@@ -73,17 +73,40 @@ by `pnpm build:wasm`; the desktop crate by the Tauri CLI.
 
 ## Status
 
-Scaffold. Every host round-trips `secret_core::version()` and nothing more.
-The `crypto`, `vault` and `sync` modules document their intended shape and are empty.
+The core crate is implemented and tested; every host still only round-trips
+`secret_core::version()`, since the CLI is the next consumer.
+
+What `secret-core` provides today:
+
+- **Accounts.** `AccountRecord::create` / `unlock` / `change_password`. Argon2id
+  stretches the password; the random X25519 keypair is wrapped under a derived key,
+  so a password change re-wraps 32 bytes instead of re-encrypting the vault.
+- **Secrets.** `SealedSecret::seal` encrypts metadata (title, kind, folder, tags,
+  URLs, timestamps) and body (login, card, env set, file, note) separately under one
+  fresh data key per revision, with XChaCha20-Poly1305 and CBOR inside. Metadata is
+  cheap to open for every secret; bodies open on demand.
+- **Grants.** `Grant::seal` wraps a data key to a recipient's public key (X25519 +
+  HKDF + XChaCha20-Poly1305). The owner is just another grantee. Revoking means
+  dropping the grant and publishing a new revision, which has a new key.
+- **Binding.** Every ciphertext carries associated data (secret id, revision, part,
+  recipient), so blobs cannot be swapped between secrets or grants re-pointed.
+- **Folders and tags.** `FolderPath` validates `projects/wallet` style paths; `Tag`
+  validates labels. Both serialize as plain strings.
+- **Serialization.** Byte fields are base64 in JSON and raw bytes in CBOR.
+- **No IO.** Randomness comes in as `rand_core::CryptoRng`; timestamps as integers.
+  All crates have `getrandom` disabled so the core builds for `wasm32` unchanged.
+
+Known gap, documented in `crypto/mod.rs`: grants are not signed yet, so a recipient
+cannot prove who shared with them. Signing lands with the sync layer.
 
 Next steps, in order:
 
-1. Core: key hierarchy, secret and folder model, encrypted blob format, tests.
-2. CLI: init, add, get, `secret run -- cmd` env injection, dotenv export, file pull.
-3. Server: SQLite schema for blobs and grants, auth, push/pull.
-4. Extension: Basic Auth via declarativeNetRequest session rules and `onAuthRequired`.
-5. Sharing as grants with wrapped data keys; revoke rotates the key.
-6. Desktop UI, then login and card autofill, then mobile.
+1. CLI: init, unlock, add, get, `secret run -- cmd` env injection, dotenv export,
+   file pull. Local encrypted store on disk.
+2. Server: SQLite schema for blobs and grants, auth, push/pull.
+3. Extension: Basic Auth via declarativeNetRequest session rules and `onAuthRequired`.
+4. Sharing end to end with invites and fingerprint verification; signed grants.
+5. Desktop UI, then login and card autofill, then mobile.
 
 Hardening still to do: set a real CSP in `tauri.conf.json` (currently `null`, the
 template default), pick a license, and write the threat model.

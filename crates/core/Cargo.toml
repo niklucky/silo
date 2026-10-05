@@ -9,4 +9,23 @@ publish.workspace = true
 [lib]
 name = "secret_core"
 
+# Every crypto crate has its `getrandom` feature disabled on purpose: randomness
+# is injected by the host, and getrandom does not build for wasm32 without extra cfg.
 [dependencies]
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+ciborium = "0.2"
+hkdf = "0.13"
+rand_core = "0.10"
+serde = { workspace = true }
+serde_bytes = "0.11"
+sha2 = "0.11"
+thiserror = "2"
+uuid = { version = "1", features = ["serde"] }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+rand_chacha = { version = "0.10", default-features = false }
+serde_json = { workspace = true }
