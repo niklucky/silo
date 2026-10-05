@@ -134,7 +134,10 @@ pub struct File {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
-    #[serde(with = "serde_bytes")]
+    #[serde(
+        serialize_with = "crate::crypto::bytes::serialize",
+        deserialize_with = "crate::crypto::bytes::deserialize_vec"
+    )]
     pub data: Vec<u8>,
 }
 
@@ -173,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn file_bytes_are_compact_in_cbor() {
+    fn file_bytes_are_compact_in_cbor_and_base64_in_json() {
         let body = SecretBody::File(File {
             name: "id_ed25519".into(),
             mime: None,
@@ -185,5 +188,10 @@ mod tests {
         assert!(cbor.len() < 1100, "cbor was {} bytes", cbor.len());
         let back: SecretBody = ciborium::from_reader(cbor.as_slice()).unwrap();
         assert_eq!(back, body);
+
+        // And base64 in JSON, which is what travels over the agent protocol.
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"data\":\"q6urq6"), "{json}");
+        assert_eq!(serde_json::from_str::<SecretBody>(&json).unwrap(), body);
     }
 }

@@ -11,5 +11,13 @@ name = "secret"
 path = "src/main.rs"
 
 [dependencies]
+secret-agent.workspace = true
 secret-core.workspace = true
+anyhow.workspace = true
 clap.workspace = true
+dotenvy.workspace = true
+humantime.workspace = true
+rand.workspace = true
+rpassword.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true

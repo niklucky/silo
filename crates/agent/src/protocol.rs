@@ -1,0 +1,241 @@
+//! Wire types. One JSON object per line in each direction.
+//!
+//! ```text
+//! → {"method":"get","params":{"selector":"projects/api/dev-env"}}
+//! ← {"ok":{"secret":{"id":"…","revision":1,"meta":{…},"body":{"env_set":{…}}}}}
+//! ← {"err":{"code":"locked"}}
+//! ```
+
+use secret_core::crypto::PublicKey;
+use secret_core::vault::{FolderPath, SecretBody, SecretId, SecretKind, SecretMeta, Tag};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "method", content = "params", rename_all = "snake_case")]
+pub enum Request {
+    Status,
+    Unlock {
+        password: String,
+        /// Seconds until the agent locks itself again. Agent default if absent.
+        #[serde(default)]
+        ttl_secs: Option<u64>,
+    },
+    Lock,
+    Shutdown,
+    List(ListFilter),
+    Get {
+        selector: String,
+    },
+    Add(NewSecret),
+    Remove {
+        selector: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListFilter {
+    /// Restrict to this folder (and, unless `exact_folder`, everything beneath it).
+    #[serde(default)]
+    pub folder: Option<FolderPath>,
+    #[serde(default)]
+    pub exact_folder: bool,
+    #[serde(default)]
+    pub tag: Option<Tag>,
+    #[serde(default)]
+    pub kind: Option<SecretKind>,
+}
+
+/// Input for creating a secret. The agent assigns id, revision and timestamps.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewSecret {
+    pub title: String,
+    #[serde(default)]
+    pub folder: FolderPath,
+    #[serde(default)]
+    pub tags: Vec<Tag>,
+    #[serde(default)]
+    pub urls: Vec<String>,
+    pub body: SecretBody,
+}
+
+/// A secret without its body: what `list` returns.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretSummary {
+    pub id: SecretId,
+    pub revision: u32,
+    pub meta: SecretMeta,
+}
+
+impl SecretSummary {
+    /// `folder/title`, or just `title` at the root.
+    pub fn path(&self) -> String {
+        display_path(&self.meta)
+    }
+}
+
+/// A fully decrypted secret: what `get` returns.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SecretView {
+    pub id: SecretId,
+    pub revision: u32,
+    pub meta: SecretMeta,
+    pub body: SecretBody,
+}
+
+impl SecretView {
+    pub fn path(&self) -> String {
+        display_path(&self.meta)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusInfo {
+    pub agent_version: String,
+    pub core_version: String,
+    pub home: String,
+    pub has_account: bool,
+    pub unlocked: bool,
+    pub fingerprint: Option<String>,
+    pub public_key: Option<PublicKey>,
+    pub secrets: usize,
+    pub expires_in_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reply {
+    Status(StatusInfo),
+    Unlocked(StatusInfo),
+    Locked,
+    ShuttingDown,
+    List(Vec<SecretSummary>),
+    Secret(SecretView),
+    Added(SecretSummary),
+    Removed(SecretSummary),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum AgentError {
+    #[error("vault is locked; run `secret unlock`")]
+    Locked,
+    #[error("wrong password")]
+    WrongPassword,
+    #[error("no account in {home}; run `secret init`")]
+    NoAccount { home: String },
+    #[error("no secret matches {selector:?}")]
+    NotFound { selector: String },
+    #[error("{selector:?} is ambiguous; matches: {}", matches.join(", "))]
+    Ambiguous {
+        selector: String,
+        matches: Vec<String>,
+    },
+    #[error("invalid request: {message}")]
+    Invalid { message: String },
+    #[error("{message}")]
+    Core { message: String },
+    #[error("storage error: {message}")]
+    Storage { message: String },
+    #[error("internal error: {message}")]
+    Internal { message: String },
+}
+
+impl From<secret_core::Error> for AgentError {
+    fn from(err: secret_core::Error) -> Self {
+        match err {
+            secret_core::Error::Unlock => Self::WrongPassword,
+            other => Self::Core {
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
+impl From<crate::store::StoreError> for AgentError {
+    fn from(err: crate::store::StoreError) -> Self {
+        match err {
+            crate::store::StoreError::NoAccount(home) => Self::NoAccount {
+                home: home.display().to_string(),
+            },
+            other => Self::Storage {
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Response {
+    Ok(Reply),
+    Err(AgentError),
+}
+
+impl From<Result<Reply, AgentError>> for Response {
+    fn from(result: Result<Reply, AgentError>) -> Self {
+        match result {
+            Ok(reply) => Self::Ok(reply),
+            Err(err) => Self::Err(err),
+        }
+    }
+}
+
+impl From<Response> for Result<Reply, AgentError> {
+    fn from(response: Response) -> Self {
+        match response {
+            Response::Ok(reply) => Ok(reply),
+            Response::Err(err) => Err(err),
+        }
+    }
+}
+
+/// `folder/title`, or just `title` at the root.
+pub fn display_path(meta: &SecretMeta) -> String {
+    if meta.folder.is_root() {
+        meta.title.clone()
+    } else {
+        format!("{}/{}", meta.folder, meta.title)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_wire_shape() {
+        let json = serde_json::to_string(&Request::Get {
+            selector: "x".into(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"method":"get","params":{"selector":"x"}}"#);
+        assert_eq!(
+            serde_json::to_string(&Request::Status).unwrap(),
+            r#"{"method":"status"}"#
+        );
+        let list: Request = serde_json::from_str(r#"{"method":"list","params":{}}"#).unwrap();
+        assert_eq!(list, Request::List(ListFilter::default()));
+    }
+
+    #[test]
+    fn response_wire_shape() {
+        assert_eq!(
+            serde_json::to_string(&Response::Ok(Reply::Locked)).unwrap(),
+            r#"{"ok":"locked"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Response::Err(AgentError::Locked)).unwrap(),
+            r#"{"err":{"code":"locked"}}"#
+        );
+        let err = Response::Err(AgentError::Ambiguous {
+            selector: "a".into(),
+            matches: vec!["x/a".into(), "y/a".into()],
+        });
+        let json = serde_json::to_string(&err).unwrap();
+        assert_eq!(
+            json,
+            r#"{"err":{"code":"ambiguous","selector":"a","matches":["x/a","y/a"]}}"#
+        );
+        assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), err);
+    }
+}

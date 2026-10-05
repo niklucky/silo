@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/core",
+  "crates/agent",
   "crates/cli",
   "crates/server",
   "crates/wasm",
@@ -9,7 +10,7 @@ members = [
 ]
 # `cargo build` / `cargo test` at the root build only the native pieces.
 # The wasm crate is built by scripts/build-wasm.sh, the desktop crate by the Tauri CLI.
-default-members = ["crates/core", "crates/cli", "crates/server"]
+default-members = ["crates/core", "crates/agent", "crates/cli", "crates/server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,13 +20,23 @@ publish = false
 
 [workspace.dependencies]
 secret-core = { path = "crates/core" }
+secret-agent = { path = "crates/agent" }
 
 # shared
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# cli
+# agent + cli
+anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+humantime = "2"
+libc = "0.2"
+rand = "0.10"
+rpassword = "7"
+tempfile = "3"
+thiserror = "2"
+zeroize = "1"
 
 # server
 axum = "0.8"
@@ -40,6 +51,10 @@ tauri-build = { version = "2", features = [] }
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 specta = { version = "=2.0.0-rc.25", features = ["derive", "function"] }
 specta-typescript = "0.0.12"
+
+# Argon2 in an unoptimized build is painfully slow; optimize just that crate in dev.
+[profile.dev.package.argon2]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

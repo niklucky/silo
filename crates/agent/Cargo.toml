@@ -1,0 +1,20 @@
+[package]
+name = "secret-agent"
+description = "Local vault service: on-disk store, unlock session, Unix-socket protocol and client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+secret-core.workspace = true
+humantime.workspace = true
+libc.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

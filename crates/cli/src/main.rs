@@ -1,28 +1,22 @@
-use clap::{Parser, Subcommand};
+//! `secret`: thin client over the local agent. Everything that touches keys
+//! happens in `secret-agent`; this binary parses arguments, prompts, and prints.
 
-#[derive(Parser)]
-#[command(
-    name = "secret",
-    version,
-    about = "Secrets manager for people and projects"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
+mod args;
+mod commands;
+mod format;
+mod prompt;
 
-#[derive(Subcommand)]
-enum Command {
-    /// Print CLI and core versions
-    Version,
-}
+use std::process::ExitCode;
 
-fn main() {
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Version => {
-            println!("secret {}", env!("CARGO_PKG_VERSION"));
-            println!("core   {}", secret_core::version());
+use clap::Parser;
+
+fn main() -> ExitCode {
+    let cli = args::Cli::parse();
+    match commands::run(cli.command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
         }
     }
 }

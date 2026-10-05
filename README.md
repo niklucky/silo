@@ -13,7 +13,8 @@ later mobile.
 Cargo.toml                 Cargo workspace (resolver 3, edition 2024)
 crates/
   core/                    secret-core: crypto, vault model, sync protocol. No platform IO.
-  cli/                     secret: clap binary
+  agent/                   secret-agent: on-disk store, unlock session, Unix-socket protocol, client
+  cli/                     secret: thin client over the agent (clap)
   server/                  secret-server: axum + SQLite (SQLite not wired yet)
   wasm/                    secret-wasm: wasm-bindgen surface over core for the extension
 apps/
@@ -58,8 +59,43 @@ means that field needs raising.
 | Extension, production build            | `pnpm build:extension`                    |
 | Type-check all TS packages             | `pnpm typecheck`                          |
 
-`cargo build` at the root builds core, cli and server only. The wasm crate is built
-by `pnpm build:wasm`; the desktop crate by the Tauri CLI.
+`cargo build` at the root builds core, agent, cli and server only. The wasm crate is
+built by `pnpm build:wasm`; the desktop crate by the Tauri CLI.
+
+## Using the CLI
+
+```sh
+secret init                                   # create ~/.secret, unlock
+secret add env projects/api/dev-env DB_URL=postgres://localhost/api API_KEY=sk-test
+secret add env projects/api/prod-env --from-file .env.prod
+secret add login work/github --username me --url https://github.com --tag dev
+secret add file projects/api/deploy-key ./id_ed25519
+echo "pin 1234" | secret add note personal/bank --tag money
+
+secret ls                                     # everything, as a table
+secret ls projects/api --kind env             # filter by folder, kind, --tag
+secret get work/github                        # id, folder/title path, or a unique title
+secret get work/github --field password       # one value, for piping
+secret run projects/api/dev-env -- npm start  # inject env vars, exec the command
+secret export dev-env > .env                  # dotenv; also --format shell|json
+secret file pull deploy-key -o ./id_ed25519
+
+secret lock | secret unlock --ttl 8h | secret status | secret agent stop
+```
+
+The first `secret unlock` (or `secret init`) starts `secret agent run` detached in its
+own session. The agent holds the unlocked keys in memory, auto-locks after the TTL
+(default 12h), and serves every other command over `~/.secret/agent.sock`. Clients
+never see a key; they receive decrypted secrets over the socket, which file
+permissions restrict to your user.
+
+| Variable              | Purpose                                              |
+| --------------------- | ---------------------------------------------------- |
+| `SECRET_HOME`         | Data directory (default `~/.secret`)                 |
+| `SECRET_AGENT_SOCKET` | Socket path (default `$SECRET_HOME/agent.sock`)      |
+| `SECRET_PASSWORD`     | Skip the password prompt; for scripts and CI only    |
+
+Unix only for now (sockets, file modes). Windows needs named pipes; later.
 
 ## How the bridges work
 
@@ -73,40 +109,39 @@ by `pnpm build:wasm`; the desktop crate by the Tauri CLI.
 
 ## Status
 
-The core crate is implemented and tested; every host still only round-trips
-`secret_core::version()`, since the CLI is the next consumer.
+Core and agent are implemented and tested; the CLI is usable for local, single-user
+work. Desktop and extension still only round-trip `secret_core::version()`.
 
-What `secret-core` provides today:
+- **`secret-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
+  key), sealed secrets (fresh data key per revision, metadata and body sealed
+  separately with XChaCha20-Poly1305, CBOR inside), grants (data key wrapped to a
+  recipient public key). Every ciphertext is bound to its context through associated
+  data. No IO; builds for `wasm32`.
+- **`secret-agent`.** `~/.secret` layout with 0700/0600 permissions and atomic
+  writes. `Session` opens every readable secret's metadata on unlock and bodies on
+  demand. Line-delimited JSON protocol over a Unix socket with `status`, `unlock`,
+  `lock`, `shutdown`, `list`, `get`, `add`, `remove`. Selector resolution by id,
+  `folder/title` path, or unique title. Client with detached spawn.
+- **`secret`.** init, unlock, lock, status, agent run/stop, ls, add
+  login/env/file/note, get, rm, run, export, file pull.
 
-- **Accounts.** `AccountRecord::create` / `unlock` / `change_password`. Argon2id
-  stretches the password; the random X25519 keypair is wrapped under a derived key,
-  so a password change re-wraps 32 bytes instead of re-encrypting the vault.
-- **Secrets.** `SealedSecret::seal` encrypts metadata (title, kind, folder, tags,
-  URLs, timestamps) and body (login, card, env set, file, note) separately under one
-  fresh data key per revision, with XChaCha20-Poly1305 and CBOR inside. Metadata is
-  cheap to open for every secret; bodies open on demand.
-- **Grants.** `Grant::seal` wraps a data key to a recipient's public key (X25519 +
-  HKDF + XChaCha20-Poly1305). The owner is just another grantee. Revoking means
-  dropping the grant and publishing a new revision, which has a new key.
-- **Binding.** Every ciphertext carries associated data (secret id, revision, part,
-  recipient), so blobs cannot be swapped between secrets or grants re-pointed.
-- **Folders and tags.** `FolderPath` validates `projects/wallet` style paths; `Tag`
-  validates labels. Both serialize as plain strings.
-- **Serialization.** Byte fields are base64 in JSON and raw bytes in CBOR.
-- **No IO.** Randomness comes in as `rand_core::CryptoRng`; timestamps as integers.
-  All crates have `getrandom` disabled so the core builds for `wasm32` unchanged.
+Known gaps:
 
-Known gap, documented in `crypto/mod.rs`: grants are not signed yet, so a recipient
-cannot prove who shared with them. Signing lands with the sync layer.
+- Grants are not signed, so a recipient cannot prove who shared with them.
+  Documented in `crypto/mod.rs`; lands with the sync layer.
+- No `update` yet: changing a secret means remove and add. Revisions exist in the
+  format; the agent protocol just has no method for them.
+- The agent does not verify the peer's uid on the socket; it relies on file modes.
+- Killing the agent leaves a stale socket; the next `unlock` cleans it up.
 
 Next steps, in order:
 
-1. CLI: init, unlock, add, get, `secret run -- cmd` env injection, dotenv export,
-   file pull. Local encrypted store on disk.
-2. Server: SQLite schema for blobs and grants, auth, push/pull.
-3. Extension: Basic Auth via declarativeNetRequest session rules and `onAuthRequired`.
+1. Agent: `update` with revisions, card kind on the CLI.
+2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
+3. Extension: Basic Auth via declarativeNetRequest session rules and `onAuthRequired`,
+   talking to the agent through a native-messaging bridge.
 4. Sharing end to end with invites and fingerprint verification; signed grants.
-5. Desktop UI, then login and card autofill, then mobile.
+5. Desktop UI over the agent, then login and card autofill, then mobile.
 
 Hardening still to do: set a real CSP in `tauri.conf.json` (currently `null`, the
 template default), pick a license, and write the threat model.
