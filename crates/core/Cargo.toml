@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_bytes = "0.11"
 sha2 = "0.11"
 thiserror = "2"
+url = "2"
 uuid = { version = "1", features = ["serde"] }
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1", features = ["derive"] }

@@ -30,6 +30,10 @@ pub enum Request {
     Remove {
         selector: String,
     },
+    /// Logins whose URL patterns cover `url`, best match first.
+    Match {
+        url: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +116,7 @@ pub enum Reply {
     Secret(SecretView),
     Added(SecretSummary),
     Removed(SecretSummary),
+    Matches(Vec<SecretSummary>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

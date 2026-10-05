@@ -1,18 +1,151 @@
 :root {
   font-family: system-ui, sans-serif;
+  font-size: 13px;
   color-scheme: light dark;
+  --muted: #7a7a7a;
+  --error: #b3261e;
+  --ok: #2e7d32;
+  --line: color-mix(in srgb, currentColor 15%, transparent);
 }
 
 body {
   margin: 0;
-  min-width: 280px;
+  width: 320px;
 }
 
 main {
-  padding: 16px;
+  padding: 12px 14px 14px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
 h1 {
-  font-size: 1.25rem;
-  margin: 0 0 8px;
+  font-size: 1.15rem;
+  margin: 0;
+}
+
+h2 {
+  font-size: 0.95rem;
+  margin: 12px 0 4px;
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.dot.unlocked {
+  background: var(--ok);
+}
+.dot.locked {
+  background: #e0a800;
+}
+.dot.bridge_error,
+.dot.no_account {
+  background: var(--error);
+}
+
+p {
+  margin: 6px 0;
+}
+.muted {
+  color: var(--muted);
+}
+.error {
+  color: var(--error);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+pre.error {
+  margin: 6px 0;
+  font-size: 12px;
+}
+code {
+  font-size: 12px;
+  user-select: all;
+}
+
+ol {
+  padding-left: 18px;
+  margin: 6px 0;
+}
+ol li {
+  margin: 4px 0;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+label {
+  color: var(--muted);
+}
+input {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+button {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+  cursor: pointer;
+  margin-top: 6px;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.matches li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+.matches em {
+  color: var(--ok);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.events li {
+  display: grid;
+  grid-template-columns: 58px 58px 1fr;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.events .origin {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.outcome.filled {
+  color: var(--ok);
+}
+.outcome.locked,
+.outcome.rejected,
+.outcome.error {
+  color: var(--error);
 }

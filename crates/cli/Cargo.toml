@@ -10,6 +10,11 @@ publish.workspace = true
 name = "secret"
 path = "src/main.rs"
 
+# Started by browsers for the extension (native messaging); see src/browser.rs.
+[[bin]]
+name = "secret-native-host"
+path = "src/bin/native_host.rs"
+
 [dependencies]
 secret-agent.workspace = true
 secret-core.workspace = true
@@ -21,3 +26,6 @@ rand.workspace = true
 rpassword.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

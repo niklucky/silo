@@ -13,7 +13,7 @@ use secret_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBo
 use zeroize::Zeroize;
 
 use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand};
-use crate::{format, prompt};
+use crate::{browser, format, prompt};
 
 pub fn run(command: Command) -> Result<()> {
     match command {
@@ -51,6 +51,8 @@ pub fn run(command: Command) -> Result<()> {
                     force,
                 },
         } => file_pull(&selector, output, force),
+        Command::Match { url, json } => match_url(&url, json),
+        Command::Browser { command } => browser::run(command),
     }
 }
 
@@ -561,6 +563,30 @@ fn file_pull(selector: &str, output: Option<PathBuf>, force: bool) -> Result<()>
     }
     write_private(&target, &file.data).with_context(|| format!("writing {}", target.display()))?;
     println!("Wrote {} ({} bytes)", target.display(), file.data.len());
+    Ok(())
+}
+
+fn match_url(url: &str, json: bool) -> Result<()> {
+    let Reply::Matches(items) = connected()?.call(&Request::Match {
+        url: url.to_owned(),
+    })?
+    else {
+        bail!("unexpected reply")
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+    if items.is_empty() {
+        println!("No logins match {url}.");
+        println!("Save one with: secret add login <folder/title> -u <user> --url <pattern>");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|s| vec![s.path(), s.meta.urls.join(", ")])
+        .collect();
+    println!("{}", format::table(&["PATH", "URLS"], &rows));
     Ok(())
 }
 

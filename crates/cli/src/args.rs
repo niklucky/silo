@@ -4,6 +4,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use secret_core::vault::SecretKind;
 
+use crate::browser::Browser;
+
 #[derive(Parser)]
 #[command(
     name = "secret",
@@ -89,6 +91,40 @@ pub enum Command {
         #[command(subcommand)]
         command: FileCommand,
     },
+    /// Show logins whose URL patterns cover URL, best match first
+    Match {
+        url: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect browsers to the agent through native messaging
+    Browser {
+        #[command(subcommand)]
+        command: BrowserCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BrowserCommand {
+    /// Write native messaging manifests for the browsers found on this machine
+    Install {
+        /// Configure only these browsers (default: every supported browser found)
+        #[arg(long, value_enum)]
+        browser: Vec<Browser>,
+        /// Also allow this extension id, e.g. an unpacked build without a pinned id
+        #[arg(long = "extension-id")]
+        extension_id: Vec<String>,
+        /// Write into this directory instead of the browser's known location (needs one --browser)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Remove the manifests written by install
+    Uninstall {
+        #[arg(long, value_enum)]
+        browser: Vec<Browser>,
+    },
+    /// Show which browsers are connected
+    Status,
 }
 
 #[derive(Subcommand)]

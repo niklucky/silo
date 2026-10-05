@@ -186,6 +186,10 @@ fn dispatch(request: Request, shared: &Shared) -> Response {
                 .and_then(|s| s.remove(store, &selector))
                 .map(Reply::Removed)
         }
+        Request::Match { url } => state
+            .session()
+            .and_then(|session| session.matches(&url))
+            .map(Reply::Matches),
     };
     result.into()
 }

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use secret_core::AccountKeys;
 use secret_core::crypto::{CryptoRng, DataKey, Fingerprint, PublicKey};
-use secret_core::vault::{Grant, SealedSecret, SecretId, SecretMeta};
+use secret_core::vault::{Grant, SealedSecret, SecretId, SecretKind, SecretMeta, Url};
 
 use crate::protocol::{AgentError, ListFilter, NewSecret, SecretSummary, SecretView, display_path};
 use crate::store::{Store, StoredSecret};
@@ -130,6 +130,29 @@ impl Session {
         Err(AgentError::NotFound {
             selector: selector.to_owned(),
         })
+    }
+
+    /// Logins whose URL patterns cover `url`, most specific first.
+    pub fn matches(&self, url: &str) -> Result<Vec<SecretSummary>, AgentError> {
+        let target = Url::parse(url).map_err(|err| AgentError::Invalid {
+            message: format!("invalid url {url:?}: {err}"),
+        })?;
+        let mut scored: Vec<(secret_core::vault::UrlMatch, SecretSummary)> = self
+            .entries
+            .values()
+            .filter(|entry| entry.meta.kind == SecretKind::Login)
+            .filter_map(|entry| {
+                let patterns = entry.meta.urls.iter().map(String::as_str);
+                secret_core::vault::best_url_match(patterns, &target)
+                    .map(|score| (score, entry.summary()))
+            })
+            .collect();
+        scored.sort_by(|(a, sa), (b, sb)| {
+            b.cmp(a)
+                .then_with(|| sa.path().cmp(&sb.path()))
+                .then_with(|| sa.id.cmp(&sb.id))
+        });
+        Ok(scored.into_iter().map(|(_, summary)| summary).collect())
     }
 
     pub fn get(&self, selector: &str) -> Result<SecretView, AgentError> {
@@ -406,6 +429,64 @@ mod tests {
                 .resolve(&SecretId::from_random_bytes([9; 16]).to_string())
                 .unwrap_err(),
             AgentError::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn matches_rank_logins_by_url_specificity() {
+        let (_dir, store, mut rng) = setup();
+        let (mut session, _) = Session::unlock(&store, b"pw").unwrap();
+        let login = |title: &str, urls: &[&str]| NewSecret {
+            title: title.into(),
+            folder: FolderPath::parse("dev").unwrap(),
+            tags: vec![],
+            urls: urls.iter().map(|u| (*u).to_owned()).collect(),
+            body: SecretBody::Login(Login {
+                username: "u".into(),
+                password: "p".into(),
+                totp: None,
+                notes: String::new(),
+            }),
+        };
+        session
+            .add(&store, &mut rng, 1, login("wild", &["*.example.com"]))
+            .unwrap();
+        session
+            .add(&store, &mut rng, 2, login("host", &["dev.example.com"]))
+            .unwrap();
+        session
+            .add(
+                &store,
+                &mut rng,
+                3,
+                login("admin", &["https://dev.example.com/admin", "junk"]),
+            )
+            .unwrap();
+        session
+            .add(&store, &mut rng, 4, login("other", &["other.com"]))
+            .unwrap();
+        // A note with a matching URL is not a login and must be ignored.
+        let mut n = note("dev/note", "x", &[]);
+        n.urls = vec!["dev.example.com".into()];
+        session.add(&store, &mut rng, 5, n).unwrap();
+
+        let paths = |url: &str| {
+            session
+                .matches(url)
+                .unwrap()
+                .iter()
+                .map(SecretSummary::path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths("https://dev.example.com/admin/users"),
+            ["dev/admin", "dev/host", "dev/wild"]
+        );
+        assert_eq!(paths("http://dev.example.com/"), ["dev/host", "dev/wild"]);
+        assert_eq!(paths("https://nothing.net/"), Vec::<String>::new());
+        assert!(matches!(
+            session.matches("not a url").unwrap_err(),
+            AgentError::Invalid { .. }
         ));
     }
 

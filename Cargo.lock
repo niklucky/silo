@@ -3091,6 +3091,7 @@ dependencies = [
  "secret-agent",
  "secret-core",
  "serde_json",
+ "tempfile",
  "zeroize",
 ]
 
@@ -3110,6 +3111,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.21",
+ "url",
  "uuid",
  "x25519-dalek",
  "zeroize",

@@ -1,23 +1,20 @@
 {
   "name": "@secret/extension",
-  "description": "Secret browser extension: autofill for logins, cards and HTTP Basic Auth",
+  "description": "Secret browser extension: HTTP Basic Auth autofill today; logins and cards later",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "wasm": "pnpm -w run build:wasm",
-    "dev": "pnpm run wasm && wxt",
-    "dev:firefox": "pnpm run wasm && wxt -b firefox",
-    "build": "pnpm run wasm && wxt build",
-    "build:firefox": "pnpm run wasm && wxt build -b firefox",
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "typecheck": "tsc --noEmit",
     "postinstall": "wxt prepare"
   },
   "dependencies": {
-    "@secret/bindings": "workspace:*",
-    "@secret/ui": "workspace:*",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },

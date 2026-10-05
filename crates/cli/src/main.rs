@@ -2,6 +2,7 @@
 //! happens in `secret-agent`; this binary parses arguments, prompts, and prints.
 
 mod args;
+mod browser;
 mod commands;
 mod format;
 mod prompt;

@@ -13,9 +13,12 @@
 mod path;
 mod sealed;
 mod secret;
+mod urls;
 
 pub use path::{FolderPath, Tag};
 pub use sealed::{Grant, SealedSecret};
 pub use secret::{
     Card, EnvSet, EnvVar, File, Login, Note, SecretBody, SecretId, SecretKind, SecretMeta,
 };
+pub use url::Url;
+pub use urls::{UrlMatch, best_url_match, url_match};
