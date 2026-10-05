@@ -1,0 +1,16 @@
+{
+  "name": "secret",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build:wasm": "sh scripts/build-wasm.sh",
+    "bindings:desktop": "cargo test -p secret-desktop export_bindings",
+    "dev:desktop": "pnpm --filter @secret/desktop tauri dev",
+    "dev:extension": "pnpm --filter @secret/extension dev",
+    "build:extension": "pnpm --filter @secret/extension build",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

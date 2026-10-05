@@ -1,0 +1,17 @@
+[package]
+name = "secret-server"
+description = "Self-hosted sync server: stores encrypted blobs and grants, never keys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "secret-server"
+path = "src/main.rs"
+
+[dependencies]
+secret-core.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde_json.workspace = true

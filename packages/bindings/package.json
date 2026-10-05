@@ -1,0 +1,17 @@
+{
+  "name": "@secret/bindings",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./desktop": "./src/desktop.ts",
+    "./wasm": "./wasm/secret_wasm.js",
+    "./wasm/*": "./wasm/*"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  }
+}

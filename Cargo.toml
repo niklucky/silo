@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/core",
+  "crates/cli",
+  "crates/server",
+  "crates/wasm",
+  "apps/desktop/src-tauri",
+]
+# `cargo build` / `cargo test` at the root build only the native pieces.
+# The wasm crate is built by scripts/build-wasm.sh, the desktop crate by the Tauri CLI.
+default-members = ["crates/core", "crates/cli", "crates/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[workspace.dependencies]
+secret-core = { path = "crates/core" }
+
+# shared
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# cli
+clap = { version = "4", features = ["derive"] }
+
+# server
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+
+# wasm — pinned to the installed wasm-bindgen-cli; keep both in lockstep
+wasm-bindgen = "=0.2.129"
+
+# desktop
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
+specta = { version = "=2.0.0-rc.25", features = ["derive", "function"] }
+specta-typescript = "0.0.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

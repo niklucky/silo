@@ -1,0 +1,15 @@
+[package]
+name = "secret-cli"
+description = "Command-line client for Secret"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "secret"
+path = "src/main.rs"
+
+[dependencies]
+secret-core.workspace = true
+clap.workspace = true

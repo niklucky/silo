@@ -1,0 +1,12 @@
+[package]
+name = "secret-core"
+description = "Platform-independent core: crypto, vault model and sync protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "secret_core"
+
+[dependencies]
