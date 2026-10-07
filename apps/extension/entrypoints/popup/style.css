@@ -25,6 +25,12 @@ h2 {
   margin: 12px 0 4px;
 }
 
+header .settings {
+  margin: 0 0 0 auto;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .dot {
   width: 9px;
   height: 9px;
@@ -91,7 +97,8 @@ ul {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.outcome.filled {
+.outcome.filled,
+.outcome.saved {
   color: var(--ok);
 }
 .outcome.locked,

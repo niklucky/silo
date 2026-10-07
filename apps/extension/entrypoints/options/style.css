@@ -1,0 +1,46 @@
+@import "../../assets/base.css";
+
+main {
+  max-width: 520px;
+  padding: 16px 18px;
+  font-size: 14px;
+}
+
+h1 {
+  font-size: 1.15rem;
+  margin: 0 0 12px;
+}
+
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px 12px;
+  margin: 0;
+}
+legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  align-items: start;
+  margin-top: 10px;
+  color: inherit;
+  cursor: pointer;
+}
+.choice input {
+  margin: 3px 0 0;
+}
+.choice .muted {
+  grid-column: 2;
+  font-size: 12px;
+}
+
+.saved {
+  min-height: 1.4em;
+  font-size: 12px;
+  color: var(--ok);
+}

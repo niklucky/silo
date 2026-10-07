@@ -1,7 +1,8 @@
 /**
  * Finding and filling login forms. Deliberately plain heuristics: a visible
  * password field, the text field right before it, and the username-first step
- * of two-page sign-ins. Sign-up and change-password forms are left alone.
+ * of two-page sign-ins. Sign-up and change-password forms get no logins, only
+ * a generated password.
  */
 
 export interface LoginFields {
@@ -35,6 +36,42 @@ export function loginFieldsFor(field: HTMLInputElement): LoginFields | null {
   if (autocomplete(field).includes("username")) return { username: field, password: null };
   if (texts.length === 1 && looksLikeUsername(field)) return { username: field, password: null };
   return null;
+}
+
+/** Where a generated password goes when the user focused `field`. */
+export interface NewPasswordFields {
+  username: HTMLInputElement | null;
+  /** The new password and its confirmation; never a "current password" field. */
+  passwords: HTMLInputElement[];
+  /** Sign-up or change-password form, as opposed to a lone password field. */
+  signup: boolean;
+}
+
+/**
+ * The fields a generated password should fill, or null when `field` is not a
+ * password field or the site marks it as the current password (a sign-in form).
+ */
+export function newPasswordFieldsFor(field: HTMLInputElement): NewPasswordFields | null {
+  if (field.type !== "password" || !usable(field)) return null;
+  if (autocomplete(field).includes("current-password")) return null;
+  const inputs = inputsAround(field);
+  const all = inputs.filter((input) => input.type === "password");
+  const marked = all.filter((input) => autocomplete(input).includes("new-password"));
+  let passwords: HTMLInputElement[];
+  if (marked.length > 0) passwords = marked;
+  else if (all.length >= 3) passwords = all.slice(1); // current, new, repeat
+  else passwords = all;
+  if (!passwords.includes(field)) return null;
+  return {
+    username: usernameBefore(inputs, all[0] ?? field),
+    passwords,
+    signup: marked.length > 0 || all.length >= 2,
+  };
+}
+
+export function fillNewPassword(fields: NewPasswordFields, password: string) {
+  for (const input of fields.passwords) setValue(input, password);
+  fields.passwords[0]?.focus();
 }
 
 /** The login form in this document to fill when the user did not pick a field. */

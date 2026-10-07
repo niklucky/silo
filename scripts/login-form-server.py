@@ -5,8 +5,9 @@
     python3 scripts/login-form-server.py 9000 me:pw   # custom port and credentials
 
 Pages: a classic form, a React-style controlled form, a two-step sign-in, a
-sign-up form (must not be offered), and a login form inside an iframe. Every
-sign-in posts to /login, which says whether the credentials were right.
+sign-up form and a change-password form (generated passwords only), and a login
+form inside an iframe. Every form posts to /login, which says whether the
+credentials were right.
 """
 import html
 import json
@@ -28,7 +29,8 @@ STYLE = """
 
 NAV = """
 <nav><a href="/">index</a><a href="/classic">classic</a><a href="/react">react</a>
-<a href="/two-step">two-step</a><a href="/signup">signup</a><a href="/frame">iframe</a></nav>
+<a href="/two-step">two-step</a><a href="/signup">signup</a><a href="/change">change</a>
+<a href="/frame">iframe</a></nav>
 """
 
 
@@ -43,7 +45,8 @@ PAGES = {
         "<ul><li><b>classic</b>: plain form, should offer and fill</li>"
         "<li><b>react</b>: no &lt;form&gt;, values tracked from input events, should fill</li>"
         "<li><b>two-step</b>: email first, password on the next page</li>"
-        "<li><b>signup</b>: password + repeat, should <i>not</i> offer anything</li>"
+        "<li><b>signup</b>: password + repeat, offers only generated passwords</li>"
+        "<li><b>change</b>: current + new + repeat, generates into new and repeat only</li>"
         "<li><b>iframe</b>: classic form inside a same-origin frame</li></ul>",
     ),
     "/classic": page(
@@ -92,6 +95,16 @@ PAGES = {
   <input name="password" type="password" placeholder="Password">
   <input name="repeat" type="password" placeholder="Repeat password">
   <button>Create account</button>
+</form>""",
+    ),
+    "/change": page(
+        "Change password",
+        """<form method="post" action="/login">
+  <input name="username" value="nikita" placeholder="Username">
+  <input name="password" type="password" placeholder="Current password">
+  <input name="new" type="password" placeholder="New password">
+  <input name="repeat" type="password" placeholder="Repeat new password">
+  <button>Change</button>
 </form>""",
     ),
     "/frame": page(

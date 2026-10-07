@@ -123,6 +123,16 @@ export default function App() {
       <header>
         <h1>Secret</h1>
         <span className={`dot ${view.state}`} title={view.state} />
+        <button
+          className="settings"
+          title="Settings"
+          onClick={() => {
+            void browser.runtime.openOptionsPage();
+            window.close();
+          }}
+        >
+          Settings
+        </button>
       </header>
 
       {view.state === "loading" && <p className="muted">Connecting to the agent…</p>}
@@ -218,7 +228,7 @@ export default function App() {
                 <span className={`outcome ${e.outcome}`}>{label(e.outcome)}</span>
                 <span className="origin" title={e.detail ?? e.origin}>
                   {e.origin}
-                  {e.detail && e.outcome === "filled" ? ` → ${e.detail}` : ""}
+                  {e.detail && (e.outcome === "filled" || e.outcome === "saved") ? ` → ${e.detail}` : ""}
                 </span>
               </li>
             ))}
@@ -233,6 +243,8 @@ function label(outcome: AuthEvent["outcome"]): string {
   switch (outcome) {
     case "filled":
       return "filled";
+    case "saved":
+      return "saved";
     case "asked":
       return "asked you";
     case "no_match":

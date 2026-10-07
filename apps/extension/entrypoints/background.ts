@@ -333,6 +333,28 @@ export default defineBackground({
             record({ origin: originOf(url), outcome: "filled", detail: `form → ${secretPath(view.meta)}` });
             return { kind: "credentials", username: view.body.login.username, password: view.body.login.password };
           }
+          case "page_save_generated": {
+            const { host, origin } = new URL(url);
+            const taken = new Set((await agent.list({ folder: "web", exact_folder: true })).map((m) => m.meta.title));
+            let title = host;
+            for (let n = 2; taken.has(title); n++) title = `${host} (${n})`;
+            const added = await agent.add({
+              title,
+              folder: "web",
+              urls: [origin],
+              body: {
+                login: {
+                  username: message.username,
+                  password: message.password,
+                  totp: null,
+                  notes: `Generated in the browser on ${new Date().toISOString().slice(0, 10)}.`,
+                },
+              },
+            });
+            const path = secretPath(added.meta);
+            record({ origin, outcome: "saved", detail: path });
+            return { kind: "saved", path };
+          }
           case "page_unlock":
             await browser.windows.create({
               url: browser.runtime.getURL("/unlock.html"),
@@ -344,6 +366,7 @@ export default defineBackground({
         }
       } catch (err) {
         if (err instanceof AgentError && err.code === "locked") return { kind: "locked" };
+        if (message.kind === "page_save_generated") return { kind: "failed", message: errorText(err) };
         return { kind: "unavailable" };
       }
     }

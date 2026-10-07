@@ -26,7 +26,7 @@ packages/
 scripts/
   build-wasm.sh            cargo build --target wasm32 + wasm-bindgen → packages/bindings/wasm
   basic-auth-server.py     local HTTP Basic Auth playground for testing the extension
-  login-form-server.py     local login form playground (classic, controlled, two-step, sign-up, iframe)
+  login-form-server.py     local login form playground (sign-in, sign-up, change password, iframe)
 ```
 
 The core crate is the only place that touches keys or plaintext. Hosts supply
@@ -189,6 +189,13 @@ the same for the current tab. When the vault is locked the menu offers *Unlock*,
 which opens a small extension window for the master password; it is never typed
 into the page.
 
+Settings (popup → *Settings*, or the add-on's preferences) choose what focusing
+a field does: *Show the menu* (default) or *Show a button*, a small key inside
+the field that opens the menu when clicked. The button mode leaves the field's
+focus to another password manager such as Apple Passwords, whose menu otherwise
+opens in the same place. No extension can hide another extension's menu, so
+this is the way to run both.
+
 ```sh
 secret add login web/playground -u nikita --url localhost:8200
 python3 scripts/login-form-server.py        # then open http://localhost:8200
@@ -197,7 +204,23 @@ python3 scripts/login-form-server.py        # then open http://localhost:8200
 What it recognises: a visible password field and the text field before it, or a
 lone username field (the first page of a two-step sign-in). Forms with two or
 more password fields (sign-up, change password) and fields marked
-`autocomplete="new-password"` are left alone.
+`autocomplete="new-password"` get no saved logins, only generated passwords.
+
+Generated passwords. On a sign-up or change-password form the password field's
+menu offers two suggestions, each with a four-step strength meter and its
+entropy: *easy to type* (`Bakomi-tuvela-rosedu7-fanipo`, consonant-vowel
+syllables, about 83 bits) and *random* (20 characters without look-alikes,
+about 121 bits). On other password fields the menu ends with *Generate
+password…*. With the vault unlocked, picking one first saves it as a new
+login, `web/<host>` with the username already typed in the form and the site's
+origin as URL pattern, and only then fills the new-password and confirmation
+fields, so a password the page has seen is never missing from the vault. With
+the vault locked or the agent unreachable, generating still works: the menu
+says the password will not be saved, and after filling it shows the password
+with a *Copy* button until you leave the field. Fields marked
+`current-password` never get suggestions. The bit counts are
+exact for the generator, computed from its alphabet and structure, not
+estimated from the result.
 
 Safety rules:
 
@@ -213,8 +236,9 @@ Safety rules:
 - On a page that is not HTTPS (localhost excepted) the menu says so before you
   fill.
 
-Not yet: saving a login when you submit a form, keyboard navigation in the menu,
-fields inside shadow DOM, TOTP codes.
+Not yet: saving a login when you submit a form, updating the saved login when
+the sign-up fails or the username changes afterwards (needs `update` in the
+agent), keyboard navigation in the menu, fields inside shadow DOM, TOTP codes.
 
 ## How the bridges work
 
@@ -258,8 +282,11 @@ only round-trips `secret_core::version()`.
   retries. Loop guard per request id, popup with unlock/lock, matches for the
   current tab and a log of recent activity. Login forms: a content script
   (`entrypoints/login.content.ts`, heuristics in `lib/forms.ts`) shows a menu
-  of matching logins and fills on click; the unlock window is
-  `entrypoints/unlock`.
+  of matching logins and fills on click, or generated passwords
+  (`lib/generate.ts`) that are saved before they are filled; the unlock window
+  is `entrypoints/unlock`, settings are `entrypoints/options` over
+  `storage.local` (`lib/settings.ts`), and the in-field button is
+  `lib/field-button.ts`.
 
 Known gaps:
 

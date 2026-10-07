@@ -17,6 +17,7 @@ export default defineConfig({
       "Passwords, env vars and secret files, including HTTP Basic Auth autofill.",
     permissions: [
       "nativeMessaging",
+      "storage",
       "webRequest",
       // Firefox answers auth challenges from a blocking listener; Chromium from
       // an asyncBlocking one that needs its own permission.

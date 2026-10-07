@@ -1,6 +1,7 @@
 import { browser, type Browser } from "wxt/browser";
 import type {
   AgentError as AgentErrorInfo,
+  ListFilter,
   NewSecret,
   Reply,
   Request,
@@ -103,6 +104,12 @@ export class Agent {
 
   async lock(): Promise<void> {
     await this.call({ method: "lock" });
+  }
+
+  async list(filter: ListFilter = {}): Promise<SecretSummary[]> {
+    const reply = await this.call({ method: "list", params: filter });
+    if (typeof reply === "object" && "list" in reply) return reply.list;
+    throw unexpected(reply);
   }
 
   /** Logins whose URL patterns cover `url`, best first. */

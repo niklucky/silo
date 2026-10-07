@@ -9,8 +9,8 @@ import type { Request, Response } from "./protocol";
 export interface AuthEvent {
   at: number;
   origin: string;
-  outcome: "filled" | "asked" | "no_match" | "locked" | "rejected" | "error";
-  /** Login path for `filled`, error text for `error`. */
+  outcome: "filled" | "saved" | "asked" | "no_match" | "locked" | "rejected" | "error";
+  /** Login path for `filled` and `saved`, error text for `error`. */
   detail?: string;
 }
 
@@ -74,7 +74,9 @@ export interface LoginOption {
 export type PageRequest =
   | { kind: "page_logins" }
   | { kind: "page_fill"; id: string }
-  | { kind: "page_unlock" };
+  | { kind: "page_unlock" }
+  /** A generated password the user chose: stored as a new login before the page gets it. */
+  | { kind: "page_save_generated"; username: string; password: string };
 
 export type PageResponse =
   | { kind: "logins"; logins: LoginOption[] }
@@ -82,6 +84,8 @@ export type PageResponse =
   /** No agent, no account, or not a web page: stay out of the way. */
   | { kind: "unavailable" }
   | { kind: "credentials"; username: string; password: string }
+  | { kind: "saved"; path: string }
+  | { kind: "failed"; message: string }
   | { kind: "ok" };
 
 /** Background to the content scripts of one tab. */
@@ -91,4 +95,5 @@ export const PAGE_KINDS: ReadonlySet<string> = new Set<PageRequest["kind"]>([
   "page_logins",
   "page_fill",
   "page_unlock",
+  "page_save_generated",
 ]);

@@ -1,19 +1,42 @@
+import { type Generated, strength } from "./generate";
 import type { LoginOption } from "./messages";
 
 /**
- * The dropdown under a login field: matching logins, or an unlock prompt. Plain
+ * The dropdown under a login field: matching logins, generated passwords, an
+ * unlock prompt, or a short confirmation. Plain
  * DOM in a closed shadow root, so page styles cannot reach in and page scripts
  * cannot read it. Clicks only count when the browser marks them as trusted.
  */
 
+/** Whether a generated password goes into the vault before the page gets it. */
+export type Saving = "saved" | "locked" | "offline";
+
 export type MenuContent =
-  | { kind: "logins"; logins: LoginOption[]; insecure: boolean }
-  | { kind: "locked" };
+  /**
+   * `locked` adds an unlock row; `generate` adds a row that switches to
+   * suggestions (lone password fields).
+   */
+  | { kind: "logins"; logins: LoginOption[]; locked: boolean; insecure: boolean; generate: Saving | null }
+  | { kind: "generate"; options: Generated[]; insecure: boolean; saving: Saving }
+  | { kind: "note"; text: string; error?: boolean }
+  /** A generated password that is filled but not in the vault: show it so it can be kept. */
+  | { kind: "unsaved"; text: string; password: string };
+
+const SAVING_NOTE: Record<Saving, string> = {
+  saved: "Saved to Secret when you pick one",
+  locked: "Secret is locked: it will not be saved",
+  offline: "Secret is not reachable: it will not be saved",
+};
 
 export interface MenuActions {
   pick(login: LoginOption): void;
   unlock(): void;
+  /** Show (fresh) suggestions. */
+  suggest(): void;
+  useGenerated(option: Generated, saving: Saving): void;
 }
+
+const STYLE_LABEL: Record<Generated["style"], string> = { easy: "Easy to type", random: "Random" };
 
 const STYLE = `
 :host { all: initial; }
@@ -22,13 +45,24 @@ const STYLE = `
   min-width: 220px; max-width: 360px; padding: 4px;
   font: 13px/1.35 system-ui, sans-serif; color: #1d1d1f;
   background: #fff; border: 1px solid rgba(0,0,0,.15); border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(0,0,0,.18);
+  box-shadow: 0 6px 24px rgba(0,0,0,.18); overflow-y: auto;
 }
 @media (prefers-color-scheme: dark) {
   .menu { color: #f2f2f2; background: #2b2b2e; border-color: rgba(255,255,255,.15); }
 }
 .head { padding: 4px 8px 2px; font-size: 11px; opacity: .6; }
+.head.unsaved { opacity: 1; color: #b06000; }
 .warn { padding: 2px 8px 4px; font-size: 11px; color: #b3261e; }
+.note { padding: 6px 8px; }
+.note.error { color: #b3261e; }
+.secret { padding: 2px 8px 4px; user-select: all; }
+.pw { display: block; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.meter { display: flex; align-items: center; gap: 6px; margin-top: 3px; font-size: 11px; opacity: .8; }
+.bars { display: inline-flex; gap: 2px; }
+.bars i { display: block; width: 14px; height: 4px; border-radius: 2px; background: rgba(127,127,127,.3); }
+.l1 i.on { background: #d93025; } .l2 i.on { background: #f29900; }
+.l3 i.on { background: #34a853; } .l4 i.on { background: #188038; }
+.more { font-size: 12px; opacity: .75; }
 button {
   all: unset; box-sizing: border-box; display: block; width: 100%;
   padding: 6px 8px; border-radius: 6px; cursor: pointer;
@@ -87,33 +121,85 @@ export class Menu {
       return;
     }
     const rect = this.anchor.getBoundingClientRect();
+    // Below the field if it fits, else above; in a short frame, the roomier side, scrolling.
+    this.box.style.maxHeight = "";
     const height = this.box.offsetHeight;
-    const below = rect.bottom + 4;
-    const top = below + height > window.innerHeight && rect.top - height - 4 > 0 ? rect.top - height - 4 : below;
+    const roomBelow = window.innerHeight - rect.bottom - 8;
+    const roomAbove = rect.top - 8;
+    const above = height > roomBelow && roomAbove > roomBelow;
+    if (height > (above ? roomAbove : roomBelow)) this.box.style.maxHeight = `${Math.max(48, above ? roomAbove : roomBelow)}px`;
+    const top = above ? rect.top - 4 - this.box.offsetHeight : rect.bottom + 4;
     this.box.style.top = `${top}px`;
     this.box.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - this.box.offsetWidth - 4))}px`;
     this.box.style.width = `${Math.max(220, Math.min(360, rect.width))}px`;
   }
 
   private render(content: MenuContent): HTMLElement[] {
-    if (content.kind === "locked") {
-      return [
-        this.option("Secret is locked", "Unlock to fill this form", () => this.actions.unlock()),
-      ];
+    switch (content.kind) {
+      case "note":
+        return [text("div", content.error ? "note error" : "note", content.text)];
+      case "unsaved": {
+        const password = text("div", "pw secret", content.password);
+        const copy = this.button(() => void copyText(content.password, password));
+        copy.append(text("span", "more", "Copy password"));
+        return [text("div", "note error", content.text), password, copy];
+      }
+      case "logins": {
+        const nodes: HTMLElement[] = [];
+        if (content.locked) {
+          nodes.push(this.option("Secret is locked", "Unlock to fill your saved logins", () => this.actions.unlock()));
+        }
+        if (content.logins.length > 0) nodes.push(text("div", "head", "Fill with Secret"));
+        if (content.insecure && content.logins.length > 0) nodes.push(insecureWarning());
+        for (const login of content.logins) {
+          nodes.push(this.option(login.username || "(no username)", login.path, () => this.actions.pick(login)));
+        }
+        if (content.generate) {
+          nodes.push(this.option("Generate password…", SAVING_NOTE[content.generate], () => this.actions.suggest()));
+        }
+        return nodes;
+      }
+      case "generate": {
+        const nodes: HTMLElement[] = [
+          text("div", content.saving === "saved" ? "head" : "head unsaved", `Generated password · ${SAVING_NOTE[content.saving]}`),
+        ];
+        if (content.insecure) nodes.push(insecureWarning());
+        for (const option of content.options) {
+          const button = this.button(() => this.actions.useGenerated(option, content.saving));
+          const { label, level } = strength(option.bits);
+          const bars = document.createElement("span");
+          bars.className = `bars l${level}`;
+          for (let i = 1; i <= 4; i++) {
+            const bar = document.createElement("i");
+            if (i <= level) bar.className = "on";
+            bars.append(bar);
+          }
+          const meter = document.createElement("span");
+          meter.className = "meter";
+          meter.append(bars, `${STYLE_LABEL[option.style]} · ${label} · ${option.bits} bits`);
+          button.append(text("span", "pw", option.password), meter);
+          nodes.push(button);
+        }
+        const again = this.button(() => this.actions.suggest());
+        again.append(text("span", "more", "↻ Other suggestions"));
+        nodes.push(again);
+        if (content.saving === "locked") {
+          nodes.push(this.option("Unlock Secret", "To save the password you pick", () => this.actions.unlock()));
+        }
+        return nodes;
+      }
     }
-    const nodes: HTMLElement[] = [];
-    nodes.push(text("div", "head", "Fill with Secret"));
-    if (content.insecure) nodes.push(text("div", "warn", "This page is not HTTPS; anyone on the network can read what you send."));
-    for (const login of content.logins) {
-      nodes.push(this.option(login.username || "(no username)", login.path, () => this.actions.pick(login)));
-    }
-    return nodes;
   }
 
   private option(title: string, sub: string, run: () => void): HTMLButtonElement {
+    const button = this.button(run);
+    button.append(text("span", "title", title), text("span", "sub", sub));
+    return button;
+  }
+
+  private button(run: () => void): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
-    button.append(text("span", "title", title), text("span", "sub", sub));
     button.addEventListener("click", (event) => {
       // A page script can dispatch a synthetic click but cannot make it trusted.
       if (!event.isTrusted) return;
@@ -123,6 +209,24 @@ export class Menu {
     });
     return button;
   }
+}
+
+/** Clipboard when the page allows it (secure contexts); otherwise select the text for ⌘C / Ctrl+C. */
+async function copyText(value: string, shown: HTMLElement) {
+  try {
+    await navigator.clipboard.writeText(value);
+    shown.textContent = "Copied to the clipboard.";
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(shown);
+    const selection = shown.ownerDocument.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+}
+
+function insecureWarning(): HTMLElement {
+  return text("div", "warn", "This page is not HTTPS; anyone on the network can read what you send.");
 }
 
 function text(tag: string, className: string, value: string): HTMLElement {
