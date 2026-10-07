@@ -159,13 +159,23 @@ lock` or `secret rm` therefore takes effect on the next page load: the site
 asks again, the icon shows a badge, and the popup unlocks. The popup also lists
 recent challenges and what happened to each.
 
+When a site challenges and the vault has no login for it, or is locked, the
+extension takes the tab to its own sign-in page instead of the browser's dialog.
+There you unlock if needed, then enter the username and password once. *Save and
+continue* stores them as a login (default `web/<host>`, URL pattern = the site's
+origin) and retries the page with the header injected. *Use once* keeps them for
+this browser session without storing. *Cancel* hands the site back to the
+browser for 15 seconds. Only top-level navigations get this page; frames,
+fetches and non-GET requests still fall through to the browser's dialog.
+
 Chrome has no blocking request hooks, so there the extension answers the
-browser's own challenge and Chrome keeps the credentials until it restarts. The
-same fallback applies on Firefox when the first request to a site is not a GET,
-or the challenge is not Basic.
+browser's own challenge and Chrome keeps the credentials until it restarts. Its
+sign-in page is reached by cancelling the request and navigating the tab, which
+flashes an error page briefly. The same fallback applies on Firefox when the
+first request to a site is not a GET, or the challenge is not Basic.
 
 Not yet: Safari (no `onAuthRequired`, needs an app-hosted extension), proxy
-authentication, saving a login from the browser, form autofill.
+authentication, editing a saved login from the browser, form autofill.
 
 ## How the bridges work
 
@@ -204,8 +214,10 @@ only round-trips `secret_core::version()`.
 - **Extension.** Firefox: `onHeadersReceived` retries a Basic `401` with an
   injected `Authorization` header, re-validated per navigation, so the browser
   cache stays empty and lock/remove work. Chrome: `onAuthRequired` with
-  asyncBlocking. Loop guard per request id, popup with unlock/lock, matches for
-  the current tab and a log of recent challenges.
+  asyncBlocking. Unknown or locked sites go to the extension's own sign-in page
+  (`entrypoints/auth`), which unlocks, saves a login through the agent and
+  retries. Loop guard per request id, popup with unlock/lock, matches for the
+  current tab and a log of recent challenges.
 
 Known gaps:
 
@@ -224,8 +236,8 @@ Next steps, in order:
 
 1. Agent: `update` with revisions, card kind on the CLI.
 2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
-3. Extension: declarativeNetRequest header rules on Chrome; save a login from the
-   popup; signed builds.
+3. Extension: form autofill for logins; declarativeNetRequest header rules on
+   Chrome; signed builds.
 4. Sharing end to end with invites and fingerprint verification; signed grants.
 5. Desktop UI over the agent, then login and card autofill, then mobile.
 

@@ -1,0 +1,46 @@
+@import "../../assets/base.css";
+
+body {
+  display: flex;
+  justify-content: center;
+  padding: 10vh 16px;
+  font-size: 14px;
+}
+
+.card {
+  width: 100%;
+  max-width: 400px;
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+h1 {
+  font-size: 1.15rem;
+  font-weight: normal;
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: 6px 0 0;
+}
+legend {
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.row input {
+  flex: 1;
+  min-width: 0;
+}
+.row button {
+  margin-top: 8px;
+}

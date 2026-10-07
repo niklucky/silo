@@ -62,6 +62,15 @@ export interface StatusInfo {
   expires_in_secs: number | null;
 }
 
+/** Input for `add`; the agent assigns id, revision and timestamps. */
+export interface NewSecret {
+  title: string;
+  folder?: string;
+  tags?: string[];
+  urls?: string[];
+  body: SecretBody;
+}
+
 export interface ListFilter {
   folder?: string;
   exact_folder?: boolean;
@@ -76,6 +85,7 @@ export type Request =
   | { method: "lock" }
   | { method: "list"; params: ListFilter }
   | { method: "get"; params: { selector: string } }
+  | { method: "add"; params: NewSecret }
   | { method: "match"; params: { url: string } };
 
 export type Reply =
@@ -84,6 +94,7 @@ export type Reply =
   | "locked"
   | { list: SecretSummary[] }
   | { secret: SecretView }
+  | { added: SecretSummary }
   | { matches: SecretSummary[] };
 
 export type AgentError =

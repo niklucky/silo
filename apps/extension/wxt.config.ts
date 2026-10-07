@@ -23,6 +23,8 @@ export default defineConfig({
       ...(browser === "firefox" ? ["webRequestBlocking"] : ["webRequestAuthProvider"]),
     ],
     host_permissions: ["<all_urls>"],
+    // The sign-in page a 401 redirects to. Must be reachable from a web navigation.
+    web_accessible_resources: [{ resources: ["auth.html"], matches: ["<all_urls>"] }],
     ...(browser === "firefox"
       ? {
           browser_specific_settings: {

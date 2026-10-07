@@ -1,6 +1,7 @@
 import { browser, type Browser } from "wxt/browser";
 import type {
   AgentError as AgentErrorInfo,
+  NewSecret,
   Reply,
   Request,
   Response,
@@ -108,6 +109,12 @@ export class Agent {
   async matches(url: string): Promise<SecretSummary[]> {
     const reply = await this.call({ method: "match", params: { url } });
     if (typeof reply === "object" && "matches" in reply) return reply.matches;
+    throw unexpected(reply);
+  }
+
+  async add(secret: NewSecret): Promise<SecretSummary> {
+    const reply = await this.call({ method: "add", params: secret });
+    if (typeof reply === "object" && "added" in reply) return reply.added;
     throw unexpected(reply);
   }
 

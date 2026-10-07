@@ -1,6 +1,8 @@
 import { browser } from "wxt/browser";
 import { Agent, AgentError, type Credentials } from "@/lib/agent";
-import type { AuthEvent, PopupRequest, PopupResponse } from "@/lib/messages";
+import type { AuthEvent, ChallengeView, UiRequest, UiResponse } from "@/lib/messages";
+import { secretPath } from "@/lib/protocol";
+import { errorText, originOf } from "@/lib/util";
 
 const ALL_URLS = { urls: ["<all_urls>"] };
 const MAX_EVENTS = 20;
@@ -8,6 +10,10 @@ const MAX_EVENTS = 20;
 const REVALIDATE_AFTER_MS = 30_000;
 /** Navigations re-check every time, except right after the retry that followed a 401. */
 const NAVIGATION_GRACE_MS = 2_000;
+/** After Cancel on the auth page, leave the site to the browser for this long. */
+const BYPASS_MS = 15_000;
+/** An auth page left open longer than this is stale. */
+const CHALLENGE_TTL_MS = 10 * 60_000;
 
 interface Header {
   name: string;
@@ -19,6 +25,7 @@ interface RequestDetails {
   url: string;
   method: string;
   type: string;
+  tabId: number;
   requestHeaders?: Header[];
 }
 
@@ -29,9 +36,11 @@ interface ResponseDetails extends RequestDetails {
 
 interface AuthChallenge extends RequestDetails {
   isProxy: boolean;
+  realm?: string;
 }
 
 interface BlockingResponse {
+  cancel?: boolean;
   redirectUrl?: string;
   requestHeaders?: Header[];
   authCredentials?: { username: string; password: string };
@@ -39,6 +48,16 @@ interface BlockingResponse {
 
 /** What this extension already did for one in-flight request. */
 type RequestState = "injected" | "lookup_failed";
+
+type Lookup =
+  | { kind: "found"; creds: Credentials }
+  | { kind: "none" }
+  | { kind: "locked" }
+  | { kind: "error"; message: string };
+
+interface Challenge extends ChallengeView {
+  at: number;
+}
 
 export default defineBackground({
   // Firefox (MV2): keep the page alive so the native port stays open.
@@ -48,8 +67,14 @@ export default defineBackground({
     const events: AuthEvent[] = [];
     /** Credentials in use per origin. On Firefox they go into our own header, never into the browser's cache. */
     const sessions = new Map<string, { creds: Credentials; at: number }>();
-    const refreshing = new Map<string, Promise<Credentials | null>>();
+    /** "Use once" credentials: this browser session only, never stored. */
+    const transient = new Map<string, Credentials>();
+    const refreshing = new Map<string, Promise<Lookup>>();
     const requests = new Map<string, RequestState>();
+    /** 401s taken over from the browser, keyed by the id in the auth page URL. */
+    const challenges = new Map<string, Challenge>();
+    /** Origins handed back to the browser after Cancel, until the given time. */
+    const bypass = new Map<string, number>();
 
     const record = (event: Omit<AuthEvent, "at">) => {
       events.unshift({ at: Date.now(), ...event });
@@ -62,37 +87,94 @@ export default defineBackground({
       void action.setBadgeText({ text });
     };
 
-    /** Asks the agent for the best login; records why when nothing comes back. */
-    async function lookup(url: string, origin: string): Promise<Credentials | null> {
+    async function lookup(url: string): Promise<Lookup> {
       try {
         const found = await agent.credentialsFor(url);
-        if (!found) record({ origin, outcome: "no_match" });
-        return found;
+        return found ? { kind: "found", creds: found } : { kind: "none" };
       } catch (err) {
-        if (err instanceof AgentError && err.code === "locked") {
-          badge("!");
-          record({ origin, outcome: "locked" });
-        } else {
-          record({ origin, outcome: "error", detail: errorText(err) });
-        }
-        return null;
+        if (err instanceof AgentError && err.code === "locked") return { kind: "locked" };
+        return { kind: "error", message: errorText(err) };
       }
     }
 
-    /** Refreshes one origin's session entry, with at most one agent call in flight per origin. */
-    function refresh(origin: string, url: string): Promise<Credentials | null> {
+    /**
+     * Refreshes one origin's session entry, with at most one agent call in
+     * flight per origin. "Use once" credentials stand in when the agent has
+     * nothing saved; a lock discards them.
+     */
+    function refresh(origin: string, url: string): Promise<Lookup> {
       let inflight = refreshing.get(origin);
       if (!inflight) {
-        inflight = lookup(url, origin)
-          .then((creds) => {
-            if (creds) sessions.set(origin, { creds, at: Date.now() });
+        inflight = lookup(url)
+          .then((result): Lookup => {
+            if (result.kind === "none") {
+              const once = transient.get(origin);
+              if (once) result = { kind: "found", creds: once };
+            }
+            if (result.kind === "locked") transient.clear();
+            if (result.kind === "found") sessions.set(origin, { creds: result.creds, at: Date.now() });
             else sessions.delete(origin);
-            return creds;
+            return result;
           })
           .finally(() => refreshing.delete(origin));
         refreshing.set(origin, inflight);
       }
       return inflight;
+    }
+
+    /** Leaves the request to the browser and notes why. */
+    function giveUp(details: RequestDetails, origin: string, result: Exclude<Lookup, { kind: "found" }>) {
+      requests.set(details.requestId, "lookup_failed");
+      if (result.kind === "locked") {
+        badge("!");
+        record({ origin, outcome: "locked" });
+      } else if (result.kind === "none") {
+        record({ origin, outcome: "no_match" });
+      } else {
+        record({ origin, outcome: "error", detail: result.message });
+      }
+    }
+
+    /** Only top-level navigations get our page; frames and fetches keep the browser's dialog. */
+    function canTakeOver(details: RequestDetails, origin: string): boolean {
+      const until = bypass.get(origin);
+      if (until !== undefined) {
+        if (Date.now() < until) return false;
+        bypass.delete(origin);
+      }
+      return details.type === "main_frame" && details.tabId >= 0;
+    }
+
+    /** Remembers the challenge and returns the URL of the auth page that resolves it. */
+    function takeOver(
+      details: RequestDetails,
+      origin: string,
+      realm: string | null,
+      state: Challenge["state"],
+    ): string {
+      const id = crypto.randomUUID();
+      challenges.set(id, {
+        id,
+        url: details.url,
+        origin,
+        host: new URL(details.url).host,
+        realm,
+        state,
+        at: Date.now(),
+      });
+      requests.set(details.requestId, "lookup_failed");
+      record({ origin, outcome: "asked" });
+      return `${browser.runtime.getURL("/auth.html")}?id=${id}`;
+    }
+
+    function liveChallenge(id: string): Challenge | null {
+      const challenge = challenges.get(id);
+      if (!challenge) return null;
+      if (Date.now() - challenge.at > CHALLENGE_TTL_MS) {
+        challenges.delete(id);
+        return null;
+      }
+      return challenge;
     }
 
     // ---- Firefox only: blocking request hooks. -------------------------------
@@ -107,13 +189,12 @@ export default defineBackground({
       if (!entry) return {};
       const navigation = details.type === "main_frame" || details.type === "sub_frame";
       const age = Date.now() - entry.at;
-      let creds: Credentials | null = entry.creds;
+      let creds = entry.creds;
       if (navigation ? age > NAVIGATION_GRACE_MS : age > REVALIDATE_AFTER_MS) {
-        creds = await refresh(origin, details.url);
-        if (!creds) {
-          requests.set(details.requestId, "lookup_failed");
-          return {};
-        }
+        const result = await refresh(origin, details.url);
+        // Nothing to send: the 401 that follows is handled in onHeadersReceived.
+        if (result.kind !== "found") return {};
+        creds = result.creds;
         if (navigation) {
           badge("");
           record({ origin, outcome: "filled", detail: creds.path });
@@ -124,26 +205,32 @@ export default defineBackground({
     }
 
     async function onHeadersReceived(details: ResponseDetails): Promise<BlockingResponse> {
-      if (details.statusCode !== 401 || !hasBasicChallenge(details.responseHeaders)) return {};
+      if (details.statusCode !== 401) return {};
+      const challenge = basicChallenge(details.responseHeaders);
+      if (!challenge) return {};
       // Already tried for this request: let onAuthRequired decide.
       if (requests.has(details.requestId)) return {};
       // A redirect re-issues the request as GET, so other methods take the fallback.
       if (details.method !== "GET" && details.method !== "HEAD") return {};
       const origin = originOf(details.url);
-      const creds = await refresh(origin, details.url);
-      if (!creds) {
-        requests.set(details.requestId, "lookup_failed");
-        return {};
+      const result = await refresh(origin, details.url);
+      if (result.kind === "found") {
+        badge("");
+        record({ origin, outcome: "filled", detail: result.creds.path });
+        // Retry the same URL; the retry passes through onBeforeSendHeaders and gets the header.
+        return { redirectUrl: details.url };
       }
-      badge("");
-      record({ origin, outcome: "filled", detail: creds.path });
-      // Retry the same URL; the retry passes through onBeforeSendHeaders and gets the header.
-      return { redirectUrl: details.url };
+      if (result.kind !== "error" && canTakeOver(details, origin)) {
+        return { redirectUrl: takeOver(details, origin, challenge.realm, stateFor(result)) };
+      }
+      giveUp(details, origin, result);
+      return {};
     }
 
     // ---- Both engines: the browser's own challenge. ---------------------------
     // The only path on Chromium, and the fallback on Firefox (non-GET first
-    // requests, Digest). Credentials returned here land in the browser's cache.
+    // requests, Digest, frames and fetches). Credentials returned here land in
+    // the browser's cache.
 
     async function onAuthRequired(details: AuthChallenge): Promise<BlockingResponse> {
       if (details.isProxy) return {};
@@ -152,19 +239,26 @@ export default defineBackground({
       if (state === "injected") {
         // The server rejected what we sent; step aside so the browser can ask.
         sessions.delete(origin);
+        transient.delete(origin);
         record({ origin, outcome: "rejected" });
         return {};
       }
       if (state === "lookup_failed") return {};
-      const creds = await refresh(origin, details.url);
-      if (!creds) {
-        requests.set(details.requestId, "lookup_failed");
-        return {};
+      const result = await refresh(origin, details.url);
+      if (result.kind === "found") {
+        requests.set(details.requestId, "injected");
+        badge("");
+        record({ origin, outcome: "filled", detail: result.creds.path });
+        return { authCredentials: { username: result.creds.username, password: result.creds.password } };
       }
-      requests.set(details.requestId, "injected");
-      badge("");
-      record({ origin, outcome: "filled", detail: creds.path });
-      return { authCredentials: { username: creds.username, password: creds.password } };
+      if (result.kind !== "error" && !import.meta.env.FIREFOX && canTakeOver(details, origin)) {
+        // Chromium cannot redirect from here, so cancel and send the tab to the auth page.
+        const page = takeOver(details, origin, details.realm ?? null, stateFor(result));
+        void browser.tabs.update(details.tabId, { url: page });
+        return { cancel: true };
+      }
+      giveUp(details, origin, result);
+      return {};
     }
 
     type AuthListener = Parameters<typeof browser.webRequest.onAuthRequired.addListener>[0];
@@ -200,34 +294,99 @@ export default defineBackground({
     browser.webRequest.onCompleted.addListener(forget, ALL_URLS);
     browser.webRequest.onErrorOccurred.addListener(forget, ALL_URLS);
 
-    async function handle(message: PopupRequest): Promise<PopupResponse> {
-      if (message.kind === "events") return { kind: "events", events };
-      try {
-        const reply = await agent.call(message.request);
-        if (message.request.method === "unlock") badge("");
-        if (message.request.method === "lock") sessions.clear();
-        return { kind: "agent", response: { ok: reply } };
-      } catch (err) {
-        if (err instanceof AgentError) return { kind: "agent", response: { err: err.info } };
-        return { kind: "bridge_error", message: errorText(err) };
+    // ---- Popup and auth page. -------------------------------------------------
+
+    async function handle(message: UiRequest): Promise<UiResponse> {
+      switch (message.kind) {
+        case "events":
+          return { kind: "events", events };
+        case "agent":
+          try {
+            const reply = await agent.call(message.request);
+            if (message.request.method === "unlock") badge("");
+            if (message.request.method === "lock") {
+              sessions.clear();
+              transient.clear();
+            }
+            return { kind: "agent", response: { ok: reply } };
+          } catch (err) {
+            if (err instanceof AgentError) return { kind: "agent", response: { err: err.info } };
+            return { kind: "bridge_error", message: errorText(err) };
+          }
+        case "challenge": {
+          const challenge = liveChallenge(message.id);
+          if (!challenge) return { kind: "unknown_challenge" };
+          const { at: _at, ...view } = challenge;
+          return { kind: "challenge", challenge: view };
+        }
+        case "challenge_retry": {
+          const challenge = liveChallenge(message.id);
+          if (!challenge) return { kind: "unknown_challenge" };
+          const result = await refresh(challenge.origin, challenge.url);
+          if (result.kind === "found") {
+            challenges.delete(challenge.id);
+            record({ origin: challenge.origin, outcome: "filled", detail: result.creds.path });
+            return { kind: "continue", url: challenge.url };
+          }
+          if (result.kind === "none") {
+            challenge.state = "no_match";
+            return { kind: "save" };
+          }
+          if (result.kind === "locked") return { kind: "error", message: "The vault is still locked." };
+          return { kind: "error", message: result.message };
+        }
+        case "challenge_save": {
+          const challenge = liveChallenge(message.id);
+          if (!challenge) return { kind: "unknown_challenge" };
+          const folder = message.folder.trim();
+          const title = message.title.trim();
+          const creds: Credentials = {
+            username: message.username,
+            password: message.password,
+            path: folder ? `${folder}/${title}` : title,
+          };
+          if (message.remember) {
+            try {
+              const added = await agent.add({
+                title,
+                folder: folder || undefined,
+                urls: [challenge.origin],
+                body: { login: { username: creds.username, password: creds.password, totp: null, notes: "" } },
+              });
+              creds.path = secretPath(added.meta);
+            } catch (err) {
+              if (err instanceof AgentError) return { kind: "error", message: err.message };
+              return { kind: "bridge_error", message: errorText(err) };
+            }
+          } else {
+            transient.set(challenge.origin, creds);
+          }
+          sessions.set(challenge.origin, { creds, at: Date.now() });
+          challenges.delete(challenge.id);
+          record({ origin: challenge.origin, outcome: "filled", detail: creds.path });
+          return { kind: "continue", url: challenge.url };
+        }
+        case "challenge_cancel": {
+          const challenge = challenges.get(message.id);
+          if (!challenge) return { kind: "unknown_challenge" };
+          challenges.delete(challenge.id);
+          bypass.set(challenge.origin, Date.now() + BYPASS_MS);
+          return { kind: "continue", url: challenge.url };
+        }
       }
     }
 
     browser.runtime.onMessage.addListener(
-      (message: unknown, _sender, sendResponse: (response: PopupResponse) => void) => {
-        void handle(message as PopupRequest).then(sendResponse);
+      (message: unknown, _sender, sendResponse: (response: UiResponse) => void) => {
+        void handle(message as UiRequest).then(sendResponse);
         return true;
       },
     );
   },
 });
 
-function originOf(url: string): string {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return url;
-  }
+function stateFor(result: Exclude<Lookup, { kind: "found" | "error" }>): Challenge["state"] {
+  return result.kind === "locked" ? "locked" : "no_match";
 }
 
 function withAuthorization(headers: Header[], creds: Credentials): Header[] {
@@ -244,12 +403,14 @@ function basic(username: string, password: string): string {
   return `Basic ${btoa(binary)}`;
 }
 
-function hasBasicChallenge(headers?: Header[]): boolean {
-  return (headers ?? []).some(
-    (h) => h.name.toLowerCase() === "www-authenticate" && /(^|,)\s*basic\b/i.test(h.value ?? ""),
-  );
-}
-
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+/** The Basic challenge in a 401, with its realm, or null when the site wants another scheme. */
+function basicChallenge(headers?: Header[]): { realm: string | null } | null {
+  for (const header of headers ?? []) {
+    if (header.name.toLowerCase() !== "www-authenticate") continue;
+    const value = header.value ?? "";
+    if (!/(^|,)\s*basic\b/i.test(value)) continue;
+    const realm = /realm\s*=\s*(?:"([^"]*)"|([^,\s]+))/i.exec(value);
+    return { realm: realm?.[1] ?? realm?.[2] ?? null };
+  }
+  return null;
 }

@@ -1,15 +1,6 @@
-:root {
-  font-family: system-ui, sans-serif;
-  font-size: 13px;
-  color-scheme: light dark;
-  --muted: #7a7a7a;
-  --error: #b3261e;
-  --ok: #2e7d32;
-  --line: color-mix(in srgb, currentColor 15%, transparent);
-}
+@import "../../assets/base.css";
 
 body {
-  margin: 0;
   width: 320px;
 }
 
@@ -51,25 +42,6 @@ h2 {
   background: var(--error);
 }
 
-p {
-  margin: 6px 0;
-}
-.muted {
-  color: var(--muted);
-}
-.error {
-  color: var(--error);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-pre.error {
-  margin: 6px 0;
-  font-size: 12px;
-}
-code {
-  font-size: 12px;
-  user-select: all;
-}
 
 ol {
   padding-left: 18px;
@@ -79,36 +51,6 @@ ol li {
   margin: 4px 0;
 }
 
-form {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-label {
-  color: var(--muted);
-}
-input {
-  font: inherit;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-}
-button {
-  font: inherit;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: color-mix(in srgb, currentColor 8%, transparent);
-  color: inherit;
-  cursor: pointer;
-  margin-top: 6px;
-}
-button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
 
 ul {
   list-style: none;

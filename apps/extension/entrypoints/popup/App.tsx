@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { browser } from "wxt/browser";
-import type { AuthEvent, PopupRequest, PopupResponse } from "@/lib/messages";
+import type { AuthEvent, UiRequest, UiResponse } from "@/lib/messages";
 import type { AgentError, Reply, Request, SecretSummary, StatusInfo } from "@/lib/protocol";
 import { describe, secretPath } from "@/lib/protocol";
 
@@ -19,8 +19,8 @@ class AgentFailure extends Error {
   }
 }
 
-async function send(message: PopupRequest): Promise<PopupResponse> {
-  return (await browser.runtime.sendMessage(message)) as PopupResponse;
+async function send(message: UiRequest): Promise<UiResponse> {
+  return (await browser.runtime.sendMessage(message)) as UiResponse;
 }
 
 async function call(request: Request): Promise<Reply> {
@@ -219,6 +219,8 @@ function label(outcome: AuthEvent["outcome"]): string {
   switch (outcome) {
     case "filled":
       return "filled";
+    case "asked":
+      return "asked you";
     case "no_match":
       return "no login";
     case "locked":
