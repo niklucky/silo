@@ -37,7 +37,8 @@ function message(err: unknown): string {
 
 export default function App() {
   const [view, setView] = useState<View>({ state: "loading" });
-  const [tabUrl, setTabUrl] = useState<string | null>(null);
+  const [tab, setTab] = useState<{ id: number; url: string } | null>(null);
+  const tabUrl = tab?.url ?? null;
   const [matches, setMatches] = useState<SecretSummary[]>([]);
   const [events, setEvents] = useState<AuthEvent[]>([]);
   const [password, setPassword] = useState("");
@@ -62,8 +63,10 @@ export default function App() {
     void refresh();
     browser.tabs
       .query({ active: true, currentWindow: true })
-      .then(([tab]) => setTabUrl(tab?.url ?? null))
-      .catch(() => setTabUrl(null));
+      .then(([active]) =>
+        setTab(active?.id !== undefined && active.url ? { id: active.id, url: active.url } : null),
+      )
+      .catch(() => setTab(null));
   }, [refresh]);
 
   useEffect(() => {
@@ -103,6 +106,14 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function fill(id: string) {
+    if (!tab) return;
+    setError(null);
+    const response = await send({ kind: "fill_tab", tabId: tab.id, id });
+    if (response.kind === "filled") window.close();
+    else if (response.kind === "error") setError(response.message);
   }
 
   const host = tabUrl && /^https?:/.test(tabUrl) ? new URL(tabUrl).host : null;
@@ -181,8 +192,11 @@ export default function App() {
             <ul className="matches">
               {matches.map((m, i) => (
                 <li key={m.id}>
-                  <span>{secretPath(m.meta)}</span>
-                  {i === 0 && <em>used for Basic Auth</em>}
+                  <span>
+                    {secretPath(m.meta)}
+                    {i === 0 && <em>Basic Auth</em>}
+                  </span>
+                  <button onClick={() => void fill(m.id)}>Fill</button>
                 </li>
               ))}
             </ul>
@@ -196,7 +210,7 @@ export default function App() {
 
       {events.length > 0 && (
         <section>
-          <h2>Recent Basic Auth</h2>
+          <h2>Recent activity</h2>
           <ul className="events">
             {events.slice(0, 6).map((e) => (
               <li key={e.at + e.origin}>

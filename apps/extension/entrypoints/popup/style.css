@@ -64,10 +64,18 @@ ul {
   padding: 4px 0;
   border-bottom: 1px solid var(--line);
 }
+.matches li {
+  align-items: center;
+}
 .matches em {
+  margin-left: 6px;
   color: var(--ok);
   font-style: normal;
   font-size: 12px;
+}
+.matches button {
+  margin-top: 0;
+  padding: 2px 10px;
 }
 
 .events li {

@@ -1,6 +1,16 @@
 import { browser } from "wxt/browser";
 import { Agent, AgentError, type Credentials } from "@/lib/agent";
-import type { AuthEvent, ChallengeView, UiRequest, UiResponse } from "@/lib/messages";
+import {
+  type AuthEvent,
+  type ChallengeView,
+  type LoginOption,
+  PAGE_KINDS,
+  type PageRequest,
+  type PageResponse,
+  type TabMessage,
+  type UiRequest,
+  type UiResponse,
+} from "@/lib/messages";
 import { secretPath } from "@/lib/protocol";
 import { errorText, originOf } from "@/lib/util";
 
@@ -14,6 +24,8 @@ const NAVIGATION_GRACE_MS = 2_000;
 const BYPASS_MS = 15_000;
 /** An auth page left open longer than this is stale. */
 const CHALLENGE_TTL_MS = 10 * 60_000;
+/** The form-fill menu lists at most this many logins. */
+const MAX_OPTIONS = 8;
 
 interface Header {
   name: string;
@@ -294,7 +306,49 @@ export default defineBackground({
     browser.webRequest.onCompleted.addListener(forget, ALL_URLS);
     browser.webRequest.onErrorOccurred.addListener(forget, ALL_URLS);
 
-    // ---- Popup and auth page. -------------------------------------------------
+    // ---- Login forms (content script). ----------------------------------------
+    // `url` is the sending frame's URL as the browser reports it.
+
+    async function handlePage(message: PageRequest, url: string): Promise<PageResponse> {
+      if (!/^https?:/.test(url)) return { kind: "unavailable" };
+      try {
+        switch (message.kind) {
+          case "page_logins": {
+            const matches = await agent.matches(url);
+            const logins: LoginOption[] = [];
+            for (const summary of matches.slice(0, MAX_OPTIONS)) {
+              const view = await agent.get(summary.id);
+              if (!("login" in view.body)) continue;
+              const path = secretPath(view.meta);
+              logins.push({ id: view.id, title: view.meta.title, path, username: view.body.login.username });
+            }
+            return { kind: "logins", logins };
+          }
+          case "page_fill": {
+            // Only a login that matches this frame's URL, whatever id the page asks for.
+            const matches = await agent.matches(url);
+            if (!matches.some((m) => m.id === message.id)) return { kind: "unavailable" };
+            const view = await agent.get(message.id);
+            if (!("login" in view.body)) return { kind: "unavailable" };
+            record({ origin: originOf(url), outcome: "filled", detail: `form → ${secretPath(view.meta)}` });
+            return { kind: "credentials", username: view.body.login.username, password: view.body.login.password };
+          }
+          case "page_unlock":
+            await browser.windows.create({
+              url: browser.runtime.getURL("/unlock.html"),
+              type: "popup",
+              width: 360,
+              height: 240,
+            });
+            return { kind: "ok" };
+        }
+      } catch (err) {
+        if (err instanceof AgentError && err.code === "locked") return { kind: "locked" };
+        return { kind: "unavailable" };
+      }
+    }
+
+    // ---- Popup, auth and unlock pages. ----------------------------------------
 
     async function handle(message: UiRequest): Promise<UiResponse> {
       switch (message.kind) {
@@ -373,12 +427,28 @@ export default defineBackground({
           bypass.set(challenge.origin, Date.now() + BYPASS_MS);
           return { kind: "continue", url: challenge.url };
         }
+        case "fill_tab": {
+          const request: TabMessage = { kind: "fill", id: message.id };
+          const filled: unknown = await browser.tabs.sendMessage(message.tabId, request).catch(() => false);
+          if (filled === true) return { kind: "filled" };
+          return { kind: "error", message: "No login form on this page." };
+        }
       }
     }
 
+    const extensionPages = browser.runtime.getURL("/");
     browser.runtime.onMessage.addListener(
-      (message: unknown, _sender, sendResponse: (response: UiResponse) => void) => {
-        void handle(message as UiRequest).then(sendResponse);
+      (message: unknown, sender, sendResponse: (response: UiResponse | PageResponse) => void) => {
+        const url = sender.url ?? "";
+        if (sender.id !== browser.runtime.id) return false;
+        if (url.startsWith(extensionPages)) {
+          void handle(message as UiRequest).then(sendResponse);
+          return true;
+        }
+        // Content scripts in web pages get the page vocabulary and nothing else.
+        const kind = (message as { kind?: unknown } | null)?.kind;
+        if (typeof kind !== "string" || !PAGE_KINDS.has(kind)) return false;
+        void handlePage(message as PageRequest, url).then(sendResponse);
         return true;
       },
     );

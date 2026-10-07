@@ -1,0 +1,12 @@
+@import "../../assets/base.css";
+
+main {
+  padding: 16px 18px;
+  font-size: 14px;
+}
+
+h1 {
+  font-size: 1.05rem;
+  font-weight: normal;
+  margin: 0 0 8px;
+}

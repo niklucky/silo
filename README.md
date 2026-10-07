@@ -26,6 +26,7 @@ packages/
 scripts/
   build-wasm.sh            cargo build --target wasm32 + wasm-bindgen → packages/bindings/wasm
   basic-auth-server.py     local HTTP Basic Auth playground for testing the extension
+  login-form-server.py     local login form playground (classic, controlled, two-step, sign-up, iframe)
 ```
 
 The core crate is the only place that touches keys or plaintext. Hosts supply
@@ -59,6 +60,7 @@ means that field needs raising.
 | Extension, build for Chrome            | `pnpm build:extension` → `apps/extension/.output/chrome-mv3` |
 | Extension, dev mode with live reload   | `pnpm --filter @secret/extension dev:firefox` or `pnpm dev:extension` |
 | Basic Auth test server                 | `python3 scripts/basic-auth-server.py` → http://localhost:8099 |
+| Login form test server                 | `python3 scripts/login-form-server.py` → http://localhost:8200 |
 | Type-check all TS packages             | `pnpm typecheck`                          |
 
 `cargo build` at the root builds core, agent, cli and server only. The wasm crate is
@@ -175,7 +177,44 @@ flashes an error page briefly. The same fallback applies on Firefox when the
 first request to a site is not a GET, or the challenge is not Basic.
 
 Not yet: Safari (no `onAuthRequired`, needs an app-hosted extension), proxy
-authentication, editing a saved login from the browser, form autofill.
+authentication, editing a saved login from the browser.
+
+## Browser extension: login forms
+
+Focus a username or password field on a site with a matching login and a menu
+drops down under it listing those logins (username and `folder/title`). Click one
+to fill both fields; the page sees ordinary `input` and `change` events, so
+React-style controlled forms pick the values up. The popup's *Fill* button does
+the same for the current tab. When the vault is locked the menu offers *Unlock*,
+which opens a small extension window for the master password; it is never typed
+into the page.
+
+```sh
+secret add login web/playground -u nikita --url localhost:8200
+python3 scripts/login-form-server.py        # then open http://localhost:8200
+```
+
+What it recognises: a visible password field and the text field before it, or a
+lone username field (the first page of a two-step sign-in). Forms with two or
+more password fields (sign-up, change password) and fields marked
+`autocomplete="new-password"` are left alone.
+
+Safety rules:
+
+- Nothing is filled on page load. A login is filled only after a trusted click
+  in the menu or the popup.
+- The background answers for the URL of the frame that asked, as the browser
+  reports it, and releases a password only for a login whose URL patterns match
+  that frame. A page cannot ask for another site's login by id.
+- The menu lives in a closed shadow root with inline styles; page scripts cannot
+  read it or restyle it, and synthetic clicks are ignored.
+- Content scripts can only send three messages (list logins, fill one, open the
+  unlock window); agent calls are reserved for extension pages.
+- On a page that is not HTTPS (localhost excepted) the menu says so before you
+  fill.
+
+Not yet: saving a login when you submit a form, keyboard navigation in the menu,
+fields inside shadow DOM, TOTP codes.
 
 ## How the bridges work
 
@@ -195,7 +234,7 @@ authentication, editing a saved login from the browser, form autofill.
 ## Status
 
 Core, agent and CLI are implemented and tested for local, single-user work. The
-extension fills HTTP Basic Auth in Firefox/Zen and Chrome. The desktop app still
+extension fills HTTP Basic Auth and login forms in Firefox/Zen and Chrome. The desktop app still
 only round-trips `secret_core::version()`.
 
 - **`secret-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
@@ -217,7 +256,10 @@ only round-trips `secret_core::version()`.
   asyncBlocking. Unknown or locked sites go to the extension's own sign-in page
   (`entrypoints/auth`), which unlocks, saves a login through the agent and
   retries. Loop guard per request id, popup with unlock/lock, matches for the
-  current tab and a log of recent challenges.
+  current tab and a log of recent activity. Login forms: a content script
+  (`entrypoints/login.content.ts`, heuristics in `lib/forms.ts`) shows a menu
+  of matching logins and fills on click; the unlock window is
+  `entrypoints/unlock`.
 
 Known gaps:
 
@@ -236,8 +278,8 @@ Next steps, in order:
 
 1. Agent: `update` with revisions, card kind on the CLI.
 2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
-3. Extension: form autofill for logins; declarativeNetRequest header rules on
-   Chrome; signed builds.
+3. Extension: declarativeNetRequest header rules on Chrome; save logins on form
+   submit; Safari; signed builds.
 4. Sharing end to end with invites and fingerprint verification; signed grants.
 5. Desktop UI over the agent, then login and card autofill, then mobile.
 
