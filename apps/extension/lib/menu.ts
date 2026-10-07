@@ -1,5 +1,5 @@
 import { type Generated, strength } from "./generate";
-import type { LoginOption } from "./messages";
+import type { LoginOption, SameSiteLogin, SaveChoice } from "./messages";
 
 /**
  * The dropdown under a login field: matching logins, generated passwords, an
@@ -18,6 +18,8 @@ export type MenuContent =
    */
   | { kind: "logins"; logins: LoginOption[]; locked: boolean; insecure: boolean; generate: Saving | null }
   | { kind: "generate"; options: Generated[]; insecure: boolean; saving: Saving }
+  /** The picked password's username is already saved for this site: new login or overwrite? */
+  | { kind: "conflict"; option: Generated; username: string; host: string; logins: SameSiteLogin[] }
   | { kind: "note"; text: string; error?: boolean }
   /** A generated password that is filled but not in the vault: show it so it can be kept. */
   | { kind: "unsaved"; text: string; password: string };
@@ -33,7 +35,7 @@ export interface MenuActions {
   unlock(): void;
   /** Show (fresh) suggestions. */
   suggest(): void;
-  useGenerated(option: Generated, saving: Saving): void;
+  useGenerated(option: Generated, saving: Saving, choice?: SaveChoice): void;
 }
 
 const STYLE_LABEL: Record<Generated["style"], string> = { easy: "Easy to type", random: "Random" };
@@ -159,6 +161,28 @@ export class Menu {
         }
         return nodes;
       }
+      case "conflict": {
+        const { option, username, host, logins } = content;
+        const head = username ? `${username} is already saved for this site` : "Logins already saved for this site";
+        const nodes: HTMLElement[] = [text("div", "head", head)];
+        nodes.push(
+          this.option(`Add a new login for ${host}`, keepNote(logins), () =>
+            this.actions.useGenerated(option, "saved", { kind: "new" }),
+          ),
+        );
+        for (const login of logins) {
+          const who = username ? "" : ` (${login.username || "no username"})`;
+          const sub = login.here
+            ? "Replace its password; the old one stays in its history"
+            : `Replace its password and fill it on ${host} too`;
+          nodes.push(
+            this.option(`Overwrite ${login.path}${who}`, sub, () =>
+              this.actions.useGenerated(option, "saved", { kind: "overwrite", id: login.id }),
+            ),
+          );
+        }
+        return nodes;
+      }
       case "generate": {
         const nodes: HTMLElement[] = [
           text("div", content.saving === "saved" ? "head" : "head unsaved", `Generated password · ${SAVING_NOTE[content.saving]}`),
@@ -223,6 +247,12 @@ async function copyText(value: string, shown: HTMLElement) {
     selection?.removeAllRanges();
     selection?.addRange(range);
   }
+}
+
+function keepNote(logins: SameSiteLogin[]): string {
+  const [first] = logins;
+  if (logins.length === 1 && first) return `${first.path} stays as it is`;
+  return "The saved logins stay as they are";
 }
 
 function insecureWarning(): HTMLElement {

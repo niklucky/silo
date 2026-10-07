@@ -178,6 +178,16 @@ fn dispatch(request: Request, shared: &Shared) -> Response {
                 .and_then(|s| s.add(store, &mut rng, now, new))
                 .map(Reply::Added)
         }
+        Request::Update(update) => {
+            let now = crate::unix_now();
+            let mut rng = rand::rng();
+            let State { store, session, .. } = &mut *state;
+            session
+                .as_mut()
+                .ok_or(AgentError::Locked)
+                .and_then(|s| s.update(store, &mut rng, now, update))
+                .map(Reply::Updated)
+        }
         Request::Remove { selector } => {
             let State { store, session, .. } = &mut *state;
             session
@@ -186,9 +196,17 @@ fn dispatch(request: Request, shared: &Shared) -> Response {
                 .and_then(|s| s.remove(store, &selector))
                 .map(Reply::Removed)
         }
-        Request::Match { url } => state
+        Request::History { selector } => {
+            let State { store, session, .. } = &mut *state;
+            session
+                .as_ref()
+                .ok_or(AgentError::Locked)
+                .and_then(|s| s.history(store, &selector))
+                .map(Reply::History)
+        }
+        Request::Match { url, site } => state
             .session()
-            .and_then(|session| session.matches(&url))
+            .and_then(|session| session.matches(&url, site))
             .map(Reply::Matches),
     };
     result.into()

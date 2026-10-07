@@ -1,10 +1,12 @@
 import { browser } from "wxt/browser";
-import { Agent, AgentError, type Credentials } from "@/lib/agent";
+import { Agent, AgentError, BridgeError, type Credentials } from "@/lib/agent";
 import {
   type AuthEvent,
   type ChallengeView,
   type LoginOption,
   PAGE_KINDS,
+  type SameSiteLogin,
+  type SaveChoice,
   type PageRequest,
   type PageResponse,
   type TabMessage,
@@ -26,6 +28,9 @@ const BYPASS_MS = 15_000;
 const CHALLENGE_TTL_MS = 10 * 60_000;
 /** The form-fill menu lists at most this many logins. */
 const MAX_OPTIONS = 8;
+/** A save looks at this many same-site logins for the same username, and offers at most MAX_CONFLICTS. */
+const MAX_SITE_LOGINS = 20;
+const MAX_CONFLICTS = 3;
 
 interface Header {
   name: string;
@@ -306,6 +311,63 @@ export default defineBackground({
     browser.webRequest.onCompleted.addListener(forget, ALL_URLS);
     browser.webRequest.onErrorOccurred.addListener(forget, ALL_URLS);
 
+    // ---- Saving next to logins of the same site. --------------------------------
+    // dev.example.com and example.com are separate logins that never fill on each
+    // other. A save that finds the same username elsewhere on the site asks
+    // whether it is a new login or a new password for the existing one.
+
+    /** Same-site logins saved under `username`; any username when it is empty. */
+    async function sameSiteLogins(url: string, username: string): Promise<SameSiteLogin[]> {
+      const here = new Set((await agent.matches(url)).map((m) => m.id));
+      const wanted = username.trim().toLowerCase();
+      const found: SameSiteLogin[] = [];
+      for (const summary of (await agent.matches(url, { site: true })).slice(0, MAX_SITE_LOGINS)) {
+        const view = await agent.get(summary.id);
+        if (!("login" in view.body)) continue;
+        const saved = view.body.login.username;
+        if (wanted && saved.trim().toLowerCase() !== wanted) continue;
+        found.push({ id: view.id, path: secretPath(view.meta), username: saved, here: here.has(view.id) });
+        if (found.length === MAX_CONFLICTS) break;
+      }
+      return found;
+    }
+
+    /**
+     * Stores `password` in a login the user picked from `sameSiteLogins`, and
+     * makes it fill on `url` too. The agent keeps the replaced revision.
+     */
+    async function overwrite(target: SameSiteLogin, url: string, username: string, password: string): Promise<string> {
+      const view = await agent.get(target.id);
+      if (!("login" in view.body)) throw new Error(`${target.path} is not a login`);
+      const { login } = view.body;
+      const urls = view.meta.urls ?? [];
+      const updated = await agent.update({
+        selector: view.id,
+        revision: view.revision,
+        urls: target.here ? urls : [...urls, originOf(url)],
+        body: { login: { ...login, username: login.username || username, password } },
+      });
+      return secretPath(updated.meta);
+    }
+
+    /**
+     * Where a save goes: the conflicts to ask about when there is no choice yet,
+     * otherwise the login to overwrite, or null for a new login.
+     */
+    async function resolveSave(
+      url: string,
+      username: string,
+      choice: SaveChoice | undefined,
+    ): Promise<{ conflicts: SameSiteLogin[] } | { target: SameSiteLogin | null }> {
+      const conflicts = await sameSiteLogins(url, username);
+      if (!choice) return conflicts.length > 0 ? { conflicts } : { target: null };
+      if (choice.kind === "new") return { target: null };
+      // Only a login that was offered for this page, whatever id the caller sends.
+      const target = conflicts.find((c) => c.id === choice.id);
+      if (!target) throw new Error("That login is not saved for this site.");
+      return { target };
+    }
+
     // ---- Login forms (content script). ----------------------------------------
     // `url` is the sending frame's URL as the browser reports it.
 
@@ -335,6 +397,13 @@ export default defineBackground({
           }
           case "page_save_generated": {
             const { host, origin } = new URL(url);
+            const resolved = await resolveSave(url, message.username, message.choice);
+            if ("conflicts" in resolved) return { kind: "conflict", logins: resolved.conflicts };
+            if (resolved.target) {
+              const path = await overwrite(resolved.target, url, message.username, message.password);
+              record({ origin, outcome: "saved", detail: `${path} (new password)` });
+              return { kind: "saved", path, updated: true };
+            }
             const taken = new Set((await agent.list({ folder: "web", exact_folder: true })).map((m) => m.meta.title));
             let title = host;
             for (let n = 2; taken.has(title); n++) title = `${host} (${n})`;
@@ -353,7 +422,7 @@ export default defineBackground({
             });
             const path = secretPath(added.meta);
             record({ origin, outcome: "saved", detail: path });
-            return { kind: "saved", path };
+            return { kind: "saved", path, updated: false };
           }
           case "page_unlock":
             await browser.windows.create({
@@ -424,15 +493,22 @@ export default defineBackground({
           };
           if (message.remember) {
             try {
-              const added = await agent.add({
-                title,
-                folder: folder || undefined,
-                urls: [challenge.origin],
-                body: { login: { username: creds.username, password: creds.password, totp: null, notes: "" } },
-              });
-              creds.path = secretPath(added.meta);
+              const resolved = await resolveSave(challenge.url, creds.username, message.choice);
+              if ("conflicts" in resolved) return { kind: "conflict", logins: resolved.conflicts };
+              if (resolved.target) {
+                creds.path = await overwrite(resolved.target, challenge.url, creds.username, creds.password);
+              } else {
+                const added = await agent.add({
+                  title,
+                  folder: folder || undefined,
+                  urls: [challenge.origin],
+                  body: { login: { username: creds.username, password: creds.password, totp: null, notes: "" } },
+                });
+                creds.path = secretPath(added.meta);
+              }
             } catch (err) {
               if (err instanceof AgentError) return { kind: "error", message: err.message };
+              if (!(err instanceof BridgeError)) return { kind: "error", message: errorText(err) };
               return { kind: "bridge_error", message: errorText(err) };
             }
           } else {

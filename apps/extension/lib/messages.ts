@@ -24,6 +24,21 @@ export interface ChallengeView {
   state: "locked" | "no_match";
 }
 
+/**
+ * A login saved for this site under the same username, which a save could
+ * overwrite instead of adding another login.
+ */
+export interface SameSiteLogin {
+  id: string;
+  path: string;
+  username: string;
+  /** Already fills on the page being saved for; otherwise it is for another host of the site. */
+  here: boolean;
+}
+
+/** The user's answer when a save finds a same-site login with the same username. */
+export type SaveChoice = { kind: "new" } | { kind: "overwrite"; id: string };
+
 export type UiRequest =
   | { kind: "agent"; request: Request }
   | { kind: "events" }
@@ -39,6 +54,8 @@ export type UiRequest =
       title: string;
       /** false = use for this browser session only, do not store. */
       remember: boolean;
+      /** Absent on the first try; the answer to a `conflict` reply on the second. */
+      choice?: SaveChoice;
     }
   | { kind: "challenge_cancel"; id: string }
   /** Popup "Fill": ask the content scripts in a tab to fill this login. */
@@ -54,6 +71,8 @@ export type UiResponse =
   | { kind: "continue"; url: string }
   /** Still nothing saved for the site: show the save form. */
   | { kind: "save" }
+  /** The same username is already saved for this site: ask, then save again with a choice. */
+  | { kind: "conflict"; logins: SameSiteLogin[] }
   /** Answer to `fill_tab`. */
   | { kind: "filled" }
   | { kind: "error"; message: string };
@@ -75,8 +94,11 @@ export type PageRequest =
   | { kind: "page_logins" }
   | { kind: "page_fill"; id: string }
   | { kind: "page_unlock" }
-  /** A generated password the user chose: stored as a new login before the page gets it. */
-  | { kind: "page_save_generated"; username: string; password: string };
+  /**
+   * A generated password the user chose: stored before the page gets it, as a
+   * new login or, when `choice` says so, over a same-site login.
+   */
+  | { kind: "page_save_generated"; username: string; password: string; choice?: SaveChoice };
 
 export type PageResponse =
   | { kind: "logins"; logins: LoginOption[] }
@@ -84,7 +106,9 @@ export type PageResponse =
   /** No agent, no account, or not a web page: stay out of the way. */
   | { kind: "unavailable" }
   | { kind: "credentials"; username: string; password: string }
-  | { kind: "saved"; path: string }
+  /** `updated`: an existing login got the new password; its old one is in its history. */
+  | { kind: "saved"; path: string; updated: boolean }
+  | { kind: "conflict"; logins: SameSiteLogin[] }
   | { kind: "failed"; message: string }
   | { kind: "ok" };
 

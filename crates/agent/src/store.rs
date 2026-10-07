@@ -1,4 +1,10 @@
 //! On-disk layout. Every file is written atomically with mode 0600.
+//!
+//! ```text
+//! <home>/account.json
+//! <home>/vault/<id>.json                    latest revision of each secret
+//! <home>/vault/history/<id>/<revision>.json revisions replaced by an update
+//! ```
 
 use std::fs;
 use std::io::{self, Write};
@@ -69,40 +75,85 @@ impl Store {
         write_json(&self.paths.account_file(), record)
     }
 
-    /// Loads every secret. Order is unspecified; callers sort.
+    /// Loads the latest revision of every secret. Order is unspecified; callers sort.
     pub fn load_all(&self) -> Result<Vec<StoredSecret>, StoreError> {
-        let dir = self.paths.vault_dir();
-        let entries = fs::read_dir(&dir).map_err(|source| StoreError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-        let mut out = Vec::new();
-        for entry in entries {
-            let path = entry
-                .map_err(|source| StoreError::Io {
-                    path: dir.clone(),
-                    source,
-                })?
-                .path();
-            if path.extension().is_some_and(|ext| ext == "json") {
-                out.push(read_json(&path)?);
-            }
-        }
-        Ok(out)
+        json_files(&self.paths.vault_dir())?
+            .iter()
+            .map(|path| read_json(path))
+            .collect()
     }
 
     pub fn save(&self, stored: &StoredSecret) -> Result<(), StoreError> {
         write_json(&self.entry_path(stored.secret.id), stored)
     }
 
+    /// Removes a secret together with its history.
     pub fn delete(&self, id: SecretId) -> Result<(), StoreError> {
         let path = self.entry_path(id);
-        fs::remove_file(&path).map_err(|source| StoreError::Io { path, source })
+        fs::remove_file(&path).map_err(|source| StoreError::Io { path, source })?;
+        let history = self.history_dir(id);
+        if history.is_dir() {
+            fs::remove_dir_all(&history).map_err(|source| StoreError::Io {
+                path: history,
+                source,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Keeps a revision that is about to be replaced. It stays sealed as it was.
+    pub fn archive(&self, stored: &StoredSecret) -> Result<(), StoreError> {
+        let dir = self.history_dir(stored.secret.id);
+        create_private_dir(&self.paths.vault_dir().join(HISTORY_DIR))?;
+        create_private_dir(&dir)?;
+        write_json(
+            &dir.join(format!("{}.json", stored.secret.revision)),
+            stored,
+        )
+    }
+
+    /// Earlier revisions of one secret, newest first.
+    pub fn history(&self, id: SecretId) -> Result<Vec<StoredSecret>, StoreError> {
+        let dir = self.history_dir(id);
+        if !dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<StoredSecret> = Vec::new();
+        for path in json_files(&dir)? {
+            out.push(read_json(&path)?);
+        }
+        out.sort_by_key(|stored| std::cmp::Reverse(stored.secret.revision));
+        Ok(out)
     }
 
     fn entry_path(&self, id: SecretId) -> PathBuf {
         self.paths.vault_dir().join(format!("{id}.json"))
     }
+
+    fn history_dir(&self, id: SecretId) -> PathBuf {
+        self.paths
+            .vault_dir()
+            .join(HISTORY_DIR)
+            .join(id.to_string())
+    }
+}
+
+const HISTORY_DIR: &str = "history";
+
+/// The `*.json` files directly in `dir`.
+fn json_files(dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
+    let io_err = |source| StoreError::Io {
+        path: dir.to_path_buf(),
+        source,
+    };
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).map_err(io_err)? {
+        let path = entry.map_err(io_err)?.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
+            out.push(path);
+        }
+    }
+    Ok(out)
 }
 
 fn create_private_dir(path: &Path) -> Result<(), StoreError> {
@@ -220,8 +271,33 @@ mod tests {
         assert!(store.load_all().unwrap().is_empty());
         store.save(&stored).unwrap();
         assert_eq!(store.load_all().unwrap(), vec![stored.clone()]);
+
+        // An update archives the old revision; it is not loaded as a secret.
+        assert!(store.history(id).unwrap().is_empty());
+        store.archive(&stored).unwrap();
+        let (second, _) = SealedSecret::seal(&mut rng, id, 2, &meta, &body).unwrap();
+        let newer = StoredSecret {
+            secret: second,
+            grants: vec![],
+        };
+        store.archive(&newer).unwrap();
+        assert_eq!(store.load_all().unwrap(), vec![stored.clone()]);
+        let history = store.history(id).unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .map(|s| s.secret.revision)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert_eq!(
+            mode(&dir.path().join("vault/history").join(id.to_string())),
+            0o700
+        );
+
         store.delete(id).unwrap();
         assert!(store.load_all().unwrap().is_empty());
+        assert!(store.history(id).unwrap().is_empty());
         assert!(store.delete(id).is_err());
     }
 }

@@ -7,6 +7,7 @@ import type {
   Request,
   Response,
   SecretSummary,
+  SecretUpdate,
   SecretView,
   StatusInfo,
 } from "./protocol";
@@ -112,9 +113,12 @@ export class Agent {
     throw unexpected(reply);
   }
 
-  /** Logins whose URL patterns cover `url`, best first. */
-  async matches(url: string): Promise<SecretSummary[]> {
-    const reply = await this.call({ method: "match", params: { url } });
+  /**
+   * Logins whose URL patterns cover `url`, best first. With `site`, followed by
+   * logins for other hosts of the same site (`example.com` for `dev.example.com`).
+   */
+  async matches(url: string, { site = false } = {}): Promise<SecretSummary[]> {
+    const reply = await this.call({ method: "match", params: site ? { url, site } : { url } });
     if (typeof reply === "object" && "matches" in reply) return reply.matches;
     throw unexpected(reply);
   }
@@ -122,6 +126,13 @@ export class Agent {
   async add(secret: NewSecret): Promise<SecretSummary> {
     const reply = await this.call({ method: "add", params: secret });
     if (typeof reply === "object" && "added" in reply) return reply.added;
+    throw unexpected(reply);
+  }
+
+  /** Makes a new revision; the agent keeps the old one in the secret's history. */
+  async update(update: SecretUpdate): Promise<SecretSummary> {
+    const reply = await this.call({ method: "update", params: update });
+    if (typeof reply === "object" && "updated" in reply) return reply.updated;
     throw unexpected(reply);
   }
 

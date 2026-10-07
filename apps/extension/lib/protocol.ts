@@ -71,6 +71,18 @@ export interface NewSecret {
   body: SecretBody;
 }
 
+/** Input for `update`: absent fields keep their value. */
+export interface SecretUpdate {
+  selector: string;
+  /** Fail with `stale` instead of overwriting if the secret moved past this revision. */
+  revision?: number;
+  title?: string;
+  folder?: string;
+  tags?: string[];
+  urls?: string[];
+  body?: SecretBody;
+}
+
 export interface ListFilter {
   folder?: string;
   exact_folder?: boolean;
@@ -78,7 +90,7 @@ export interface ListFilter {
   kind?: SecretKind;
 }
 
-/** Methods the bridge lets a browser use. `shutdown` and `remove` are refused. */
+/** Methods the bridge lets a browser use. `shutdown`, `remove` and `history` are refused. */
 export type Request =
   | { method: "status" }
   | { method: "unlock"; params: { password: string; ttl_secs?: number } }
@@ -86,7 +98,9 @@ export type Request =
   | { method: "list"; params: ListFilter }
   | { method: "get"; params: { selector: string } }
   | { method: "add"; params: NewSecret }
-  | { method: "match"; params: { url: string } };
+  | { method: "update"; params: SecretUpdate }
+  /** `site` adds logins for other hosts of the same site, after the matching ones. */
+  | { method: "match"; params: { url: string; site?: boolean } };
 
 export type Reply =
   | { status: StatusInfo }
@@ -95,6 +109,7 @@ export type Reply =
   | { list: SecretSummary[] }
   | { secret: SecretView }
   | { added: SecretSummary }
+  | { updated: SecretSummary }
   | { matches: SecretSummary[] };
 
 export type AgentError =
@@ -103,6 +118,7 @@ export type AgentError =
   | { code: "no_account"; home: string }
   | { code: "not_found"; selector: string }
   | { code: "ambiguous"; selector: string; matches: string[] }
+  | { code: "stale"; selector: string; expected: number; current: number }
   | { code: "invalid" | "core" | "storage" | "internal"; message: string };
 
 export type Response = { ok: Reply } | { err: AgentError };
@@ -119,6 +135,8 @@ export function describe(error: AgentError): string {
       return `No secret matches ${error.selector}.`;
     case "ambiguous":
       return `${error.selector} is ambiguous: ${error.matches.join(", ")}`;
+    case "stale":
+      return `${error.selector} changed in the meantime; try again.`;
     default:
       return error.message;
   }

@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { browser } from "wxt/browser";
-import type { ChallengeView, UiRequest, UiResponse } from "@/lib/messages";
+import type { ChallengeView, SameSiteLogin, SaveChoice, UiRequest, UiResponse } from "@/lib/messages";
 import { describe } from "@/lib/protocol";
 import { errorText } from "@/lib/util";
 
@@ -32,6 +32,8 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [folder, setFolder] = useState("web");
   const [title, setTitle] = useState("");
+  /** Same-site logins with this username: the save waits for "add new" or "overwrite". */
+  const [conflicts, setConflicts] = useState<SameSiteLogin[] | null>(null);
 
   useEffect(() => {
     if (framed || !id) {
@@ -63,6 +65,9 @@ export default function App() {
         break;
       case "save":
         setPhase({ step: "save", challenge });
+        break;
+      case "conflict":
+        setConflicts(response.logins);
         break;
       case "unknown_challenge":
         setPhase({ step: "unknown" });
@@ -98,12 +103,12 @@ export default function App() {
     }
   }
 
-  async function save(remember: boolean, challenge: ChallengeView) {
+  async function save(remember: boolean, challenge: ChallengeView, choice?: SaveChoice) {
     setBusy(true);
     setError(null);
     try {
       follow(
-        await send({ kind: "challenge_save", id, username, password, folder, title, remember }),
+        await send({ kind: "challenge_save", id, username, password, folder, title, remember, choice }),
         challenge,
       );
     } catch (err) {
@@ -178,6 +183,47 @@ export default function App() {
           </div>
           {error && <p className="error">{error}</p>}
         </form>
+      </main>
+    );
+  }
+
+  if (conflicts) {
+    const saveAs = folder.trim() ? `${folder.trim()}/${title.trim()}` : title.trim();
+    return (
+      <main className="card">
+        {site}
+        <p>
+          <strong>{username}</strong> is already saved for this site. Is this the same login, or another one?
+        </p>
+        <div className="choices">
+          <button
+            type="button"
+            className="primary"
+            onClick={() => void save(true, challenge, { kind: "new" })}
+            disabled={busy}
+          >
+            Add a new login: {saveAs}
+          </button>
+          {conflicts.map((login) => (
+            <button
+              key={login.id}
+              type="button"
+              onClick={() => void save(true, challenge, { kind: "overwrite", id: login.id })}
+              disabled={busy}
+            >
+              Overwrite {login.path}
+              <span className="muted">
+                {login.here
+                  ? "Replace its password; the old one stays in its history"
+                  : `Replace its password and use it on ${challenge.host} too`}
+              </span>
+            </button>
+          ))}
+          <button type="button" onClick={() => setConflicts(null)} disabled={busy}>
+            Back
+          </button>
+        </div>
+        {error && <p className="error">{error}</p>}
       </main>
     );
   }

@@ -91,9 +91,21 @@ pub enum Command {
         #[command(subcommand)]
         command: FileCommand,
     },
+    /// Earlier revisions of a secret, kept when it is overwritten
+    History {
+        selector: String,
+        /// Show this revision in full, like `get`
+        #[arg(long, short)]
+        revision: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show logins whose URL patterns cover URL, best match first
     Match {
         url: String,
+        /// Also list logins for other hosts of the same site, e.g. example.com for dev.example.com
+        #[arg(long)]
+        site: bool,
         #[arg(long)]
         json: bool,
     },

@@ -85,6 +85,8 @@ secret export dev-env > .env                  # dotenv; also --format shell|json
 secret file pull deploy-key -o ./id_ed25519
 
 secret match https://dev.example.com/admin     # which logins the extension would use
+secret match https://dev.example.com --site    # plus logins for example.com, admin.example.com, …
+secret history work/github                     # earlier revisions; --revision N shows one
 secret lock | secret unlock --ttl 8h | secret status | secret agent stop
 secret browser install | secret browser status # connect browsers, see below
 ```
@@ -169,6 +171,8 @@ origin) and retries the page with the header injected. *Use once* keeps them for
 this browser session without storing. *Cancel* hands the site back to the
 browser for 15 seconds. Only top-level navigations get this page; frames,
 fetches and non-GET requests still fall through to the browser's dialog.
+If the username is already saved for another host of the same site, the page
+asks first, as described under [Same site, same username](#same-site-same-username).
 
 Chrome has no blocking request hooks, so there the extension answers the
 browser's own challenge and Chrome keeps the credentials until it restarts. Its
@@ -222,6 +226,26 @@ with a *Copy* button until you leave the field. Fields marked
 exact for the generator, computed from its alphabet and structure, not
 estimated from the result.
 
+### Same site, same username
+
+`dev.example.com` and `example.com` are separate logins: each fills only where
+its URL patterns match. Saving never replaces one silently. When a save (a
+generated password, or the Basic Auth sign-in page) finds a login with the same
+username on the same site, it asks first, and nothing is filled until you answer:
+
+- *Add a new login*: saved next to the existing ones, which stay as they are.
+- *Overwrite `web/example.com`*: that login gets the new password, and the
+  page's origin is added to its URL patterns if it did not fill there already.
+  The agent keeps the replaced revision; `secret history web/example.com` lists
+  it and `--revision N` shows it.
+
+"Same site" is the registrable domain from the public suffix list, so
+`a.example.co.uk` and `b.example.co.uk` belong together while `alice.github.io`
+and `bob.github.io` do not. `localhost` and every `*.localhost` count as one
+site; other IP addresses are a site each. A form without a username field
+offers every login of the site, for change-password pages that only ask for
+passwords.
+
 Safety rules:
 
 - Nothing is filled on page load. A login is filled only after a trusted click
@@ -231,14 +255,16 @@ Safety rules:
   that frame. A page cannot ask for another site's login by id.
 - The menu lives in a closed shadow root with inline styles; page scripts cannot
   read it or restyle it, and synthetic clicks are ignored.
-- Content scripts can only send three messages (list logins, fill one, open the
-  unlock window); agent calls are reserved for extension pages.
+- Content scripts can only send four messages (list logins, fill one, open the
+  unlock window, save a generated password); agent calls are reserved for
+  extension pages. A save can only overwrite a login the background itself
+  offered for that frame's site and username.
 - On a page that is not HTTPS (localhost excepted) the menu says so before you
   fill.
 
 Not yet: saving a login when you submit a form, updating the saved login when
-the sign-up fails or the username changes afterwards (needs `update` in the
-agent), keyboard navigation in the menu, fields inside shadow DOM, TOTP codes.
+the sign-up fails or the username changes afterwards, keyboard navigation in
+the menu, fields inside shadow DOM, TOTP codes.
 
 ## How the bridges work
 
@@ -248,7 +274,7 @@ agent), keyboard navigation in the menu, fields inside shadow DOM, TOTP codes.
   Run `pnpm bindings:desktop` after changing a command; commit the result.
 - **Extension.** No Rust in the browser: `apps/extension/lib/agent.ts` opens one
   native-messaging port to `secret-native-host`, which forwards each JSON request
-  to the agent socket and refuses `shutdown` and `remove`. `lib/protocol.ts`
+  to the agent socket and refuses `shutdown`, `remove` and `history`. `lib/protocol.ts`
   mirrors the agent's wire types by hand. The extension id and host name live in
   both `wxt.config.ts` and `crates/cli/src/browser.rs`; change both or neither.
 - **WASM.** `crates/wasm` exports functions with `#[wasm_bindgen]` and
@@ -269,10 +295,14 @@ only round-trips `secret_core::version()`.
 - **`secret-agent`.** `~/.secret` layout with 0700/0600 permissions and atomic
   writes. `Session` opens every readable secret's metadata on unlock and bodies on
   demand. Line-delimited JSON protocol over a Unix socket with `status`, `unlock`,
-  `lock`, `shutdown`, `list`, `get`, `add`, `remove`, `match`. Selector resolution
-  by id, `folder/title` path, or unique title. Client with detached spawn.
+  `lock`, `shutdown`, `list`, `get`, `add`, `update`, `remove`, `history`,
+  `match` (optionally with same-site logins). `update` re-seals under a fresh
+  data key, re-grants every current recipient, refuses a stale base revision,
+  and archives the replaced revision under `vault/history/<id>/`. Selector
+  resolution by id, `folder/title` path, or unique title. Client with detached
+  spawn.
 - **`secret`.** init, unlock, lock, status, agent run/stop, ls, add
-  login/env/file/note, get, rm, run, export, file pull, match, browser
+  login/env/file/note, get, rm, run, export, file pull, history, match, browser
   install/uninstall/status. `secret-native-host` bridges browsers to the agent.
 - **Extension.** Firefox: `onHeadersReceived` retries a Basic `401` with an
   injected `Authorization` header, re-validated per navigation, so the browser
@@ -292,8 +322,8 @@ Known gaps:
 
 - Grants are not signed, so a recipient cannot prove who shared with them.
   Documented in `crypto/mod.rs`; lands with the sync layer.
-- No `update` yet: changing a secret means remove and add. Revisions exist in the
-  format; the agent protocol just has no method for them.
+- `update` has no CLI command yet (the extension uses it to overwrite logins),
+  and history cannot be restored with one command: copy the old values back.
 - The agent does not verify the peer's uid on the socket; it relies on file modes.
 - Killing the agent leaves a stale socket; the next `unlock` cleans it up.
 - The native host forwards passwords typed into the popup to the agent; the

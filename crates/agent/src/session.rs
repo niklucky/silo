@@ -7,7 +7,9 @@ use secret_core::AccountKeys;
 use secret_core::crypto::{CryptoRng, DataKey, Fingerprint, PublicKey};
 use secret_core::vault::{Grant, SealedSecret, SecretId, SecretKind, SecretMeta, Url};
 
-use crate::protocol::{AgentError, ListFilter, NewSecret, SecretSummary, SecretView, display_path};
+use crate::protocol::{
+    AgentError, ListFilter, NewSecret, SecretSummary, SecretUpdate, SecretView, display_path,
+};
 use crate::store::{Store, StoredSecret};
 
 pub struct Session {
@@ -42,6 +44,15 @@ impl Entry {
         let key = grant.open(keys)?;
         let meta = stored.secret.open_meta(&key)?;
         Ok(Self { stored, key, meta })
+    }
+
+    fn view(&self) -> Result<SecretView, AgentError> {
+        Ok(SecretView {
+            id: self.stored.secret.id,
+            revision: self.stored.secret.revision,
+            meta: self.meta.clone(),
+            body: self.stored.secret.open_body(&self.key)?,
+        })
     }
 
     fn summary(&self) -> SecretSummary {
@@ -132,15 +143,18 @@ impl Session {
         })
     }
 
-    /// Logins whose URL patterns cover `url`, most specific first.
-    pub fn matches(&self, url: &str) -> Result<Vec<SecretSummary>, AgentError> {
+    /// Logins whose URL patterns cover `url`, most specific first. With `site`,
+    /// followed by the logins saved for other hosts of the same site.
+    pub fn matches(&self, url: &str, site: bool) -> Result<Vec<SecretSummary>, AgentError> {
         let target = Url::parse(url).map_err(|err| AgentError::Invalid {
             message: format!("invalid url {url:?}: {err}"),
         })?;
-        let mut scored: Vec<(secret_core::vault::UrlMatch, SecretSummary)> = self
-            .entries
-            .values()
-            .filter(|entry| entry.meta.kind == SecretKind::Login)
+        let logins = || {
+            self.entries
+                .values()
+                .filter(|entry| entry.meta.kind == SecretKind::Login)
+        };
+        let mut scored: Vec<(secret_core::vault::UrlMatch, SecretSummary)> = logins()
             .filter_map(|entry| {
                 let patterns = entry.meta.urls.iter().map(String::as_str);
                 secret_core::vault::best_url_match(patterns, &target)
@@ -152,19 +166,131 @@ impl Session {
                 .then_with(|| sa.path().cmp(&sb.path()))
                 .then_with(|| sa.id.cmp(&sb.id))
         });
-        Ok(scored.into_iter().map(|(_, summary)| summary).collect())
+        let mut out: Vec<SecretSummary> = scored.into_iter().map(|(_, summary)| summary).collect();
+        if site {
+            // Entries iterate in id order, so sort the rest by path like `list` does.
+            let mut rest: Vec<SecretSummary> = logins()
+                .filter(|entry| !out.iter().any(|m| m.id == entry.stored.secret.id))
+                .filter(|entry| {
+                    entry
+                        .meta
+                        .urls
+                        .iter()
+                        .any(|pattern| secret_core::vault::same_site(pattern, &target))
+                })
+                .map(Entry::summary)
+                .collect();
+            rest.sort_by_cached_key(|summary| (summary.path(), summary.id));
+            out.extend(rest);
+        }
+        Ok(out)
     }
 
     pub fn get(&self, selector: &str) -> Result<SecretView, AgentError> {
         let id = self.resolve(selector)?;
+        self.entries[&id].view()
+    }
+
+    /// Re-seals a secret as a new revision under a fresh data key, granted again
+    /// to everyone who could read the current one. The current revision goes to
+    /// the store's history first.
+    pub fn update(
+        &mut self,
+        store: &Store,
+        rng: &mut impl CryptoRng,
+        now: u64,
+        update: SecretUpdate,
+    ) -> Result<SecretSummary, AgentError> {
+        let id = self.resolve(&update.selector)?;
         let entry = &self.entries[&id];
-        let body = entry.stored.secret.open_body(&entry.key)?;
-        Ok(SecretView {
-            id,
-            revision: entry.stored.secret.revision,
-            meta: entry.meta.clone(),
+        let current = entry.stored.secret.revision;
+        if let Some(expected) = update.revision
+            && expected != current
+        {
+            return Err(AgentError::Stale {
+                selector: update.selector,
+                expected,
+                current,
+            });
+        }
+        let SecretUpdate {
+            title,
+            folder,
+            tags,
+            urls,
             body,
-        })
+            ..
+        } = update;
+        let body = match body {
+            Some(body) if body.kind() != entry.meta.kind => {
+                return Err(AgentError::Invalid {
+                    message: format!(
+                        "{} holds a {:?}, not a {:?}",
+                        display_path(&entry.meta),
+                        entry.meta.kind,
+                        body.kind()
+                    ),
+                });
+            }
+            Some(body) => body,
+            None => entry.stored.secret.open_body(&entry.key)?,
+        };
+        let mut meta = entry.meta.clone();
+        if let Some(title) = title {
+            meta.title = validate_title(&title)?;
+        }
+        if let Some(folder) = folder {
+            meta.folder = folder;
+        }
+        if let Some(mut tags) = tags {
+            tags.sort();
+            tags.dedup();
+            meta.tags = tags;
+        }
+        if let Some(urls) = urls {
+            meta.urls = urls;
+        }
+        meta.updated_at = now;
+
+        let revision = current.checked_add(1).ok_or_else(|| AgentError::Internal {
+            message: format!("{id} has run out of revisions"),
+        })?;
+        let (sealed, key) = SealedSecret::seal(rng, id, revision, &meta, &body)?;
+        let mut grants: Vec<Grant> = Vec::new();
+        for grant in entry
+            .stored
+            .grants
+            .iter()
+            .filter(|g| g.covers(&entry.stored.secret))
+        {
+            if grants.iter().any(|g| g.recipient == grant.recipient) {
+                continue;
+            }
+            grants.push(Grant::seal(rng, &sealed, &key, grant.recipient)?);
+        }
+        let stored = StoredSecret {
+            secret: sealed,
+            grants,
+        };
+        store.archive(&entry.stored)?;
+        store.save(&stored)?;
+
+        let entry = Entry { stored, key, meta };
+        let summary = entry.summary();
+        self.entries.insert(id, entry);
+        Ok(summary)
+    }
+
+    /// Earlier revisions of a secret that this account can still open, newest first.
+    pub fn history(&self, store: &Store, selector: &str) -> Result<Vec<SecretView>, AgentError> {
+        let id = self.resolve(selector)?;
+        let mut out = Vec::new();
+        for stored in store.history(id)? {
+            if let Ok(entry) = Entry::open(stored, &self.keys) {
+                out.push(entry.view()?);
+            }
+        }
+        Ok(out)
     }
 
     /// Seals a new secret, grants it to this account, persists and caches it.
@@ -472,7 +598,7 @@ mod tests {
 
         let paths = |url: &str| {
             session
-                .matches(url)
+                .matches(url, false)
                 .unwrap()
                 .iter()
                 .map(SecretSummary::path)
@@ -485,9 +611,169 @@ mod tests {
         assert_eq!(paths("http://dev.example.com/"), ["dev/host", "dev/wild"]);
         assert_eq!(paths("https://nothing.net/"), Vec::<String>::new());
         assert!(matches!(
-            session.matches("not a url").unwrap_err(),
+            session.matches("not a url", false).unwrap_err(),
             AgentError::Invalid { .. }
         ));
+    }
+
+    fn login(title: &str, username: &str, urls: &[&str]) -> NewSecret {
+        NewSecret {
+            title: title.into(),
+            folder: FolderPath::parse("web").unwrap(),
+            tags: vec![],
+            urls: urls.iter().map(|u| (*u).to_owned()).collect(),
+            body: SecretBody::Login(Login {
+                username: username.into(),
+                password: "old".into(),
+                totp: None,
+                notes: "keep me".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn site_matches_follow_direct_ones() {
+        let (_dir, store, mut rng) = setup();
+        let (mut session, _) = Session::unlock(&store, b"pw").unwrap();
+        session
+            .add(
+                &store,
+                &mut rng,
+                1,
+                login("prod", "nikita", &["https://cutstoryapp.com"]),
+            )
+            .unwrap();
+        session
+            .add(
+                &store,
+                &mut rng,
+                2,
+                login("admin", "nikita", &["admin.cutstoryapp.com"]),
+            )
+            .unwrap();
+        session
+            .add(
+                &store,
+                &mut rng,
+                3,
+                login("dev", "nikita", &["dev.cutstoryapp.com"]),
+            )
+            .unwrap();
+        session
+            .add(
+                &store,
+                &mut rng,
+                4,
+                login("other", "nikita", &["cutstoryapp.net"]),
+            )
+            .unwrap();
+        let paths = |site| {
+            session
+                .matches("https://dev.cutstoryapp.com/signup", site)
+                .unwrap()
+                .iter()
+                .map(SecretSummary::path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(false), ["web/dev"]);
+        assert_eq!(paths(true), ["web/dev", "web/admin", "web/prod"]);
+    }
+
+    #[test]
+    fn update_makes_a_new_revision_and_keeps_the_old_one() {
+        let (_dir, store, mut rng) = setup();
+        let (mut session, _) = Session::unlock(&store, b"pw").unwrap();
+        let added = session
+            .add(
+                &store,
+                &mut rng,
+                10,
+                login("prod", "nikita", &["cutstoryapp.com"]),
+            )
+            .unwrap();
+        let change = |revision, password: &str| SecretUpdate {
+            selector: "web/prod".into(),
+            revision,
+            title: None,
+            folder: None,
+            tags: None,
+            urls: Some(vec![
+                "cutstoryapp.com".into(),
+                "https://dev.cutstoryapp.com".into(),
+            ]),
+            body: Some(SecretBody::Login(Login {
+                username: "nikita".into(),
+                password: password.into(),
+                totp: None,
+                notes: "keep me".into(),
+            })),
+        };
+        let updated = session
+            .update(&store, &mut rng, 20, change(Some(1), "new"))
+            .unwrap();
+        assert_eq!(updated.id, added.id);
+        assert_eq!(updated.revision, 2);
+        assert_eq!(updated.meta.created_at, 10);
+        assert_eq!(updated.meta.updated_at, 20);
+        assert_eq!(updated.meta.title, "prod");
+        assert_eq!(
+            session
+                .matches("https://dev.cutstoryapp.com/", false)
+                .unwrap()[0]
+                .id,
+            added.id
+        );
+
+        // Based on a revision that is no longer current: refused, nothing written.
+        assert_eq!(
+            session
+                .update(&store, &mut rng, 30, change(Some(1), "lost"))
+                .unwrap_err(),
+            AgentError::Stale {
+                selector: "web/prod".into(),
+                expected: 1,
+                current: 2
+            }
+        );
+
+        // Survives a reload; the replaced revision is still readable.
+        let (reloaded, skipped) = Session::unlock(&store, b"pw").unwrap();
+        assert_eq!(skipped, 0);
+        let view = reloaded.get("web/prod").unwrap();
+        assert_eq!(view.revision, 2);
+        assert!(matches!(&view.body, SecretBody::Login(l) if l.password == "new"));
+        let history = reloaded.history(&store, "web/prod").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].revision, 1);
+        assert!(matches!(&history[0].body, SecretBody::Login(l) if l.password == "old"));
+
+        // A body of another kind is refused.
+        let mut wrong = change(None, "x");
+        wrong.body = Some(SecretBody::Note(Note { text: "x".into() }));
+        assert!(matches!(
+            session.update(&store, &mut rng, 40, wrong).unwrap_err(),
+            AgentError::Invalid { .. }
+        ));
+
+        // Only the title, without a revision check: the body is carried over.
+        let rename = SecretUpdate {
+            selector: "web/prod".into(),
+            revision: None,
+            title: Some("cutstory".into()),
+            folder: None,
+            tags: None,
+            urls: None,
+            body: None,
+        };
+        let renamed = session.update(&store, &mut rng, 50, rename).unwrap();
+        assert_eq!(renamed.revision, 3);
+        assert!(
+            matches!(&session.get("web/cutstory").unwrap().body, SecretBody::Login(l) if l.password == "new")
+        );
+        assert_eq!(session.history(&store, "web/cutstory").unwrap().len(), 2);
+
+        session.remove(&store, "web/cutstory").unwrap();
+        assert!(store.history(added.id).unwrap().is_empty());
     }
 
     #[test]

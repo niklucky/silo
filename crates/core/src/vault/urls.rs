@@ -10,6 +10,10 @@
 //!
 //! Query strings and fragments are ignored on both sides. Hosts compare
 //! case-insensitively; paths compare exactly.
+//!
+//! Separately, [`same_site`] groups hosts by registrable domain, so that saving a
+//! login for `dev.example.com` can point out the one already saved for
+//! `example.com` without either of them filling on the other.
 
 use url::Url;
 
@@ -26,18 +30,7 @@ impl UrlMatch {
 /// Returns a match score when `pattern` applies to `target`, or `None`.
 pub fn url_match(pattern: &str, target: &Url) -> Option<UrlMatch> {
     let pattern = pattern.trim();
-    if pattern.is_empty() {
-        return None;
-    }
-    let explicit_scheme = pattern.contains("://");
-    let parsed = if explicit_scheme {
-        Url::parse(pattern).ok()?
-    } else {
-        Url::parse(&format!("https://{pattern}")).ok()?
-    };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return None;
-    }
+    let (parsed, explicit_scheme) = parse_pattern(pattern)?;
     let target_host = target.host_str()?;
     let pattern_host = parsed.host_str()?;
 
@@ -85,6 +78,56 @@ pub fn url_match(pattern: &str, target: &Url) -> Option<UrlMatch> {
         score += prefix.matches('/').count() as u32;
     }
     Some(UrlMatch(score))
+}
+
+/// True when `pattern` names a host on the same site as `target`: the same
+/// registrable domain (`dev.example.com` and `example.com`), whatever the
+/// scheme, port or path. Hosts without a public suffix, such as `localhost` or
+/// an IP address, are a site of their own.
+pub fn same_site(pattern: &str, target: &Url) -> bool {
+    let Some((parsed, _)) = parse_pattern(pattern.trim()) else {
+        return false;
+    };
+    let (Some(pattern_host), Some(target_host)) = (parsed.host_str(), target.host_str()) else {
+        return false;
+    };
+    let pattern_host = pattern_host.strip_prefix("*.").unwrap_or(pattern_host);
+    site_of(pattern_host) == site_of(target_host)
+}
+
+/// The registrable domain of `host`: `example.co.uk` for `a.b.example.co.uk`.
+/// `localhost` and its subdomains, which all point at this machine, are one
+/// site. Other hosts without a registrable domain (IP addresses, a bare
+/// suffix) are returned as is.
+pub fn site_of(host: &str) -> String {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return "localhost".to_owned();
+    }
+    if host.starts_with('[') || host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return host;
+    }
+    match psl::domain_str(&host) {
+        Some(domain) => domain.to_owned(),
+        None => host,
+    }
+}
+
+/// Parses a stored pattern; the bool says whether it named a scheme.
+fn parse_pattern(pattern: &str) -> Option<(Url, bool)> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let explicit_scheme = pattern.contains("://");
+    let parsed = if explicit_scheme {
+        Url::parse(pattern).ok()?
+    } else {
+        Url::parse(&format!("https://{pattern}")).ok()?
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    Some((parsed, explicit_scheme))
 }
 
 /// The port written in a bare `host[:port][/path]` pattern, if any.
@@ -194,6 +237,34 @@ mod tests {
         assert_eq!(score("   ", "https://example.com"), None);
         assert_eq!(score("not a url", "https://example.com"), None);
         assert_eq!(score("https://", "https://example.com"), None);
+    }
+
+    #[test]
+    fn site_is_the_registrable_domain() {
+        assert_eq!(site_of("dev.cutstoryapp.com"), "cutstoryapp.com");
+        assert_eq!(site_of("CutStoryApp.com."), "cutstoryapp.com");
+        assert_eq!(site_of("a.b.example.co.uk"), "example.co.uk");
+        assert_eq!(site_of("alice.github.io"), "alice.github.io");
+        assert_eq!(site_of("localhost"), "localhost");
+        assert_eq!(site_of("dev.LOCALHOST"), "localhost");
+        assert_eq!(site_of("127.0.0.1"), "127.0.0.1");
+        assert_eq!(site_of("[::1]"), "[::1]");
+    }
+
+    #[test]
+    fn same_site_ignores_subdomain_scheme_port_and_path() {
+        let target = Url::parse("https://dev.cutstoryapp.com/signup").unwrap();
+        assert!(same_site("cutstoryapp.com", &target));
+        assert!(same_site("http://admin.cutstoryapp.com:8443/x", &target));
+        assert!(same_site("*.cutstoryapp.com", &target));
+        assert!(!same_site("cutstoryapp.net", &target));
+        assert!(!same_site("notcutstoryapp.com", &target));
+        assert!(!same_site("", &target));
+        let local = Url::parse("http://localhost:3000/").unwrap();
+        assert!(same_site("localhost:8200", &local));
+        assert!(!same_site("127.0.0.1:3000", &local));
+        let pages = Url::parse("https://alice.github.io/").unwrap();
+        assert!(!same_site("bob.github.io", &pages));
     }
 
     #[test]

@@ -51,7 +51,12 @@ pub fn run(command: Command) -> Result<()> {
                     force,
                 },
         } => file_pull(&selector, output, force),
-        Command::Match { url, json } => match_url(&url, json),
+        Command::History {
+            selector,
+            revision,
+            json,
+        } => history(&selector, revision, json),
+        Command::Match { url, site, json } => match_url(&url, site, json),
         Command::Browser { command } => browser::run(command),
     }
 }
@@ -417,6 +422,62 @@ fn get(selector: &str, field: Option<&str>, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&view)?);
         return Ok(());
     }
+    print_view(&view);
+    Ok(())
+}
+
+fn history(selector: &str, revision: Option<u32>, json: bool) -> Result<()> {
+    let Reply::History(views) = connected()?.call(&Request::History {
+        selector: selector.to_owned(),
+    })?
+    else {
+        bail!("unexpected reply")
+    };
+    if let Some(revision) = revision {
+        let view = views
+            .iter()
+            .find(|view| view.revision == revision)
+            .ok_or_else(|| anyhow!("{selector} has no earlier revision {revision}"))?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(view)?);
+        } else {
+            println!("Revision {revision} of {}", view.path());
+            print_view(view);
+        }
+        return Ok(());
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&views)?);
+        return Ok(());
+    }
+    if views.is_empty() {
+        println!("{selector} has no earlier revisions.");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = views
+        .iter()
+        .map(|view| {
+            let username = match &view.body {
+                SecretBody::Login(login) => login.username.clone(),
+                _ => String::new(),
+            };
+            vec![
+                view.revision.to_string(),
+                format::timestamp(view.meta.updated_at),
+                view.path(),
+                username,
+            ]
+        })
+        .collect();
+    println!(
+        "{}",
+        format::table(&["REVISION", "SAVED", "PATH", "USERNAME"], &rows)
+    );
+    println!("Show one with: secret history {selector} --revision <n>");
+    Ok(())
+}
+
+fn print_view(view: &SecretView) {
     println!("{}", view.path());
     println!("  id:       {}", view.id);
     println!("  kind:     {}", format::kind_name(view.meta.kind));
@@ -468,7 +529,6 @@ fn get(selector: &str, field: Option<&str>, json: bool) -> Result<()> {
         }
         SecretBody::Note(note) => println!("{}", note.text),
     }
-    Ok(())
 }
 
 fn rm(selector: &str, yes: bool) -> Result<()> {
@@ -566,9 +626,10 @@ fn file_pull(selector: &str, output: Option<PathBuf>, force: bool) -> Result<()>
     Ok(())
 }
 
-fn match_url(url: &str, json: bool) -> Result<()> {
+fn match_url(url: &str, site: bool, json: bool) -> Result<()> {
     let Reply::Matches(items) = connected()?.call(&Request::Match {
         url: url.to_owned(),
+        site,
     })?
     else {
         bail!("unexpected reply")

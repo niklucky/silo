@@ -21,4 +21,4 @@ pub use secret::{
     Card, EnvSet, EnvVar, File, Login, Note, SecretBody, SecretId, SecretKind, SecretMeta,
 };
 pub use url::Url;
-pub use urls::{UrlMatch, best_url_match, url_match};
+pub use urls::{UrlMatch, best_url_match, same_site, site_of, url_match};

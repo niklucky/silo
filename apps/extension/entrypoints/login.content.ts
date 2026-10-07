@@ -11,7 +11,7 @@ import {
 } from "@/lib/forms";
 import { type Generated, generate } from "@/lib/generate";
 import { Menu, type MenuContent, type Saving } from "@/lib/menu";
-import type { LoginOption, PageRequest, PageResponse, TabMessage } from "@/lib/messages";
+import type { LoginOption, PageRequest, PageResponse, SaveChoice, TabMessage } from "@/lib/messages";
 import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, type Trigger } from "@/lib/settings";
 
 /**
@@ -59,7 +59,7 @@ export default defineContentScript({
       suggest: () => {
         if (current) menu.show(current.field, suggestions(savingFor(cached?.vault)));
       },
-      useGenerated: (option, saving) => void useGenerated(option, saving),
+      useGenerated: (option, saving, choice) => void useGenerated(option, saving, choice),
     });
     const button = new FieldButton(() => {
       if (!current) return;
@@ -161,24 +161,31 @@ export default defineContentScript({
       return true;
     }
 
-    async function useGenerated(option: Generated, saving: Saving) {
+    /** `choice` answers the question asked when the username is already saved for this site. */
+    async function useGenerated(option: Generated, saving: Saving, choice?: SaveChoice) {
       const target = current;
       if (!target?.fresh) return;
       const { fresh } = target;
+      const username = fresh.username?.value.trim() ?? "";
       let unsaved: string;
       if (saving === "saved") {
         let response: PageResponse;
         try {
-          response = await send({
-            kind: "page_save_generated",
-            username: fresh.username?.value.trim() ?? "",
-            password: option.password,
-          });
+          response = await send({ kind: "page_save_generated", username, password: option.password, choice });
         } catch (err) {
           response = { kind: "failed", message: err instanceof Error ? err.message : String(err) };
         }
+        if (response.kind === "conflict") {
+          // Nothing is filled until the user answers.
+          const content: MenuContent = { kind: "conflict", option, username, host: location.host, logins: response.logins };
+          current = { ...target, content };
+          button.hide();
+          menu.show(target.field, content);
+          return;
+        }
         if (response.kind === "saved") {
-          use(target, fresh, option, `Saved as ${response.path}`, false);
+          const done = response.updated ? `New password saved in ${response.path}` : `Saved as ${response.path}`;
+          use(target, fresh, option, done, false);
           return;
         }
         if (response.kind === "locked") unsaved = "Secret got locked";

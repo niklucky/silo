@@ -80,7 +80,11 @@ impl Bridge {
     }
 
     fn handle(&mut self, request: &Request) -> Response {
-        if matches!(request, Request::Shutdown | Request::Remove { .. }) {
+        // Nothing a browser does needs to delete secrets or read old revisions.
+        if matches!(
+            request,
+            Request::Shutdown | Request::Remove { .. } | Request::History { .. }
+        ) {
             return Response::Err(AgentError::Invalid {
                 message: "this method is not available through the browser".to_owned(),
             });
@@ -231,6 +235,7 @@ mod tests {
             },
             Request::Match {
                 url: "https://nothing.test/".into(),
+                site: false,
             },
         ] {
             input.extend(frame(&request));

@@ -27,12 +27,22 @@ pub enum Request {
         selector: String,
     },
     Add(NewSecret),
+    /// Replaces parts of a secret, making a new revision. The old revision is kept.
+    Update(SecretUpdate),
     Remove {
+        selector: String,
+    },
+    /// Earlier revisions of a secret, newest first.
+    History {
         selector: String,
     },
     /// Logins whose URL patterns cover `url`, best match first.
     Match {
         url: String,
+        /// Also logins saved for other hosts of the same site (`example.com`
+        /// for `dev.example.com`), after the ones that match.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        site: bool,
     },
 }
 
@@ -60,6 +70,27 @@ pub struct NewSecret {
     #[serde(default)]
     pub urls: Vec<String>,
     pub body: SecretBody,
+}
+
+/// Changes to one secret. Absent fields keep their current value; a new body
+/// must be of the same kind.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SecretUpdate {
+    pub selector: String,
+    /// The revision the change is based on. If the secret has moved on since,
+    /// the update fails with [`AgentError::Stale`] instead of overwriting.
+    #[serde(default)]
+    pub revision: Option<u32>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub folder: Option<FolderPath>,
+    #[serde(default)]
+    pub tags: Option<Vec<Tag>>,
+    #[serde(default)]
+    pub urls: Option<Vec<String>>,
+    #[serde(default)]
+    pub body: Option<SecretBody>,
 }
 
 /// A secret without its body: what `list` returns.
@@ -115,7 +146,9 @@ pub enum Reply {
     List(Vec<SecretSummary>),
     Secret(SecretView),
     Added(SecretSummary),
+    Updated(SecretSummary),
     Removed(SecretSummary),
+    History(Vec<SecretView>),
     Matches(Vec<SecretSummary>),
 }
 
@@ -134,6 +167,12 @@ pub enum AgentError {
     Ambiguous {
         selector: String,
         matches: Vec<String>,
+    },
+    #[error("{selector:?} changed since revision {expected}; it is now at revision {current}")]
+    Stale {
+        selector: String,
+        expected: u32,
+        current: u32,
     },
     #[error("invalid request: {message}")]
     Invalid { message: String },
@@ -220,6 +259,23 @@ mod tests {
         );
         let list: Request = serde_json::from_str(r#"{"method":"list","params":{}}"#).unwrap();
         assert_eq!(list, Request::List(ListFilter::default()));
+        let plain = Request::Match {
+            url: "https://x".into(),
+            site: false,
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert_eq!(json, r#"{"method":"match","params":{"url":"https://x"}}"#);
+        assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), plain);
+        let update: Request = serde_json::from_str(
+            r#"{"method":"update","params":{"selector":"a","revision":2,"urls":["x.com"]}}"#,
+        )
+        .unwrap();
+        let Request::Update(update) = update else {
+            panic!("not an update")
+        };
+        assert_eq!(update.revision, Some(2));
+        assert_eq!(update.urls, Some(vec!["x.com".to_owned()]));
+        assert_eq!(update.title, None);
     }
 
     #[test]
