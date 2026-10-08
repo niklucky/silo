@@ -226,6 +226,35 @@ with a *Copy* button until you leave the field. Fields marked
 exact for the generator, computed from its alphabet and structure, not
 estimated from the result.
 
+### Saving what you sign in with
+
+When you send a login form with a username and password that Secret does not
+have, a small panel in the top-right corner of the page asks *Save login for
+`<host>`?*. It appears on the page you land on, or on the same page when the
+site signs in without reloading (`fetch`), and stays offered for three minutes.
+Nothing is stored until you answer:
+
+- *Save*: a new login `web/<host>` with the page's origin as URL pattern.
+- *Update `web/example.com`*: when the site already has a login with that
+  username (or one without a username, or, on a change-password form, the one
+  whose password is the form's current password). It gets the new password; the
+  old one stays in its history. See [Same site, same username](#same-site-same-username).
+- *Not now*, or *Never for this site*, which the settings page can undo.
+  Settings can also turn the offer off altogether.
+
+A login that already fills on the page with that exact username and password
+is not offered again. The two steps of a two-step sign-in are joined: the
+username sent on the first page goes with the password sent on the second. When
+the vault is locked the panel offers *Unlock Secret* and then asks again. A
+form counts as sent on a trusted `submit`, a click on its submit button or on a
+button that reads like *Sign in*/*Continue*/*Next*, or Enter in one of its
+fields. Secret cannot tell whether the site accepted the password, so a typo
+gets offered too; answer *Not now*.
+
+The typed password goes from the content script to the background, which keeps
+it in memory only, for the tab that sent it, until you answer, the offer
+expires, or the tab closes. The panel never receives it.
+
 ### Same site, same username
 
 `dev.example.com` and `example.com` are separate logins: each fills only where
@@ -255,16 +284,17 @@ Safety rules:
   that frame. A page cannot ask for another site's login by id.
 - The menu lives in a closed shadow root with inline styles; page scripts cannot
   read it or restyle it, and synthetic clicks are ignored.
-- Content scripts can only send four messages (list logins, fill one, open the
-  unlock window, save a generated password); agent calls are reserved for
-  extension pages. A save can only overwrite a login the background itself
-  offered for that frame's site and username.
+- Content scripts can only send seven messages (list logins, fill one, open the
+  unlock window, save a generated password, report a sent form, and get or
+  answer the tab's save offer); agent calls are reserved for extension pages.
+  A save can only overwrite a login the background itself offered for that
+  frame's site and username, and only the tab's top frame sees or answers its
+  offer.
 - On a page that is not HTTPS (localhost excepted) the menu says so before you
   fill.
 
-Not yet: saving a login when you submit a form, updating the saved login when
-the sign-up fails or the username changes afterwards, keyboard navigation in
-the menu, fields inside shadow DOM, TOTP codes.
+Not yet: keyboard navigation in the menu and the save panel, fields inside
+shadow DOM, TOTP codes, choosing the folder and title when saving.
 
 ## How the bridges work
 
@@ -313,7 +343,8 @@ only round-trips `secret_core::version()`.
   current tab and a log of recent activity. Login forms: a content script
   (`entrypoints/login.content.ts`, heuristics in `lib/forms.ts`) shows a menu
   of matching logins and fills on click, or generated passwords
-  (`lib/generate.ts`) that are saved before they are filled; the unlock window
+  (`lib/generate.ts`) that are saved before they are filled; sent login forms
+  get a save offer (`lib/save-prompt.ts`); the unlock window
   is `entrypoints/unlock`, settings are `entrypoints/options` over
   `storage.local` (`lib/settings.ts`), and the in-field button is
   `lib/field-button.ts`.

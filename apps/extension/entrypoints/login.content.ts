@@ -8,11 +8,21 @@ import {
   loginFieldsFor,
   type NewPasswordFields,
   newPasswordFieldsFor,
+  submissionIn,
 } from "@/lib/forms";
 import { type Generated, generate } from "@/lib/generate";
 import { Menu, type MenuContent, type Saving } from "@/lib/menu";
-import type { LoginOption, PageRequest, PageResponse, SaveChoice, TabMessage } from "@/lib/messages";
-import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, type Trigger } from "@/lib/settings";
+import type {
+  LoginOption,
+  OfferAnswer,
+  PageRequest,
+  PageResponse,
+  SaveChoice,
+  SaveOffer,
+  TabMessage,
+} from "@/lib/messages";
+import { SavePrompt } from "@/lib/save-prompt";
+import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, type Settings } from "@/lib/settings";
 
 /**
  * Offers saved logins under username and password fields, and generated
@@ -21,6 +31,9 @@ import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, type Trigger } from 
  * background only at that moment. A generated password is stored in the vault
  * before the page sees it when the vault is unlocked, and filled unsaved (with
  * a warning) when it is not.
+ *
+ * When the user sends a login form, what they typed goes to the background,
+ * which offers to save it (or update a saved login) in the tab's top frame.
  */
 export default defineContentScript({
   matches: ["http://*/*", "https://*/*"],
@@ -29,8 +42,13 @@ export default defineContentScript({
   main() {
     /** How long a lookup answers repeated focus events on the same page. */
     const CACHE_MS = 5_000;
-    /** How long "Saved as …" stays under the field. */
+    /** How long "Saved as …" stays under the field or in the save panel. */
     const NOTE_MS = 4_000;
+    /** A click and the submit it causes report the same login once. */
+    const RESEND_MS = 3_000;
+    /** Buttons outside a form that look like they send a login. */
+    const SEND_LABEL =
+      /log\s*in|sign\s*(in|up)|register|continue|next|submit|create|save|change|update|reset|confirm|войти|вход|далее|продолжить|зарегистр|сохранить/i;
     type Vault = { kind: "logins"; logins: LoginOption[] } | { kind: "locked" } | { kind: "offline" };
     let cached: { url: string; at: number; vault: Vault } | null = null;
     let current: {
@@ -43,12 +61,14 @@ export default defineContentScript({
     let dismissed: HTMLInputElement | null = null;
     let filling = false;
     let noteTimer: ReturnType<typeof setTimeout> | undefined;
-    let trigger: Trigger = DEFAULT_SETTINGS.trigger;
-    void loadSettings().then((settings) => (trigger = settings.trigger));
-    onSettingsChanged((settings) => {
-      trigger = settings.trigger;
+    let settings: Settings = DEFAULT_SETTINGS;
+    void loadSettings().then((loaded) => (settings = loaded));
+    onSettingsChanged((changed) => {
+      settings = changed;
       hideAll();
     });
+    let lastReport: { key: string; at: number } | null = null;
+    let promptTimer: ReturnType<typeof setTimeout> | undefined;
 
     const send = async (message: PageRequest) => (await browser.runtime.sendMessage(message)) as PageResponse;
     const insecure = !window.isSecureContext;
@@ -61,6 +81,14 @@ export default defineContentScript({
       },
       useGenerated: (option, saving, choice) => void useGenerated(option, saving, choice),
     });
+    // Save offers show in the top frame only, whichever frame sent the login.
+    const prompt =
+      window === window.top
+        ? new SavePrompt({
+            answer: (offer, answer) => void answerOffer(offer, answer),
+            unlock: () => void send({ kind: "page_unlock" }).catch(() => undefined),
+          })
+        : null;
     const button = new FieldButton(() => {
       if (!current) return;
       if (menu.anchoredTo) menu.hide();
@@ -112,7 +140,7 @@ export default defineContentScript({
         return;
       }
       current = { field, login, fresh, content };
-      if (trigger === "button") {
+      if (settings.trigger === "button") {
         menu.hide();
         button.show(field);
       } else {
@@ -218,6 +246,94 @@ export default defineContentScript({
       }
     }
 
+    /** Tells the background about a sent login form; it decides whether to offer saving. */
+    function report(scope: ParentNode) {
+      if (!settings.offerToSave || settings.neverSave.includes(location.origin)) return;
+      const submission = submissionIn(scope);
+      if (!submission) return;
+      const key = `${submission.username}\n${submission.password}`;
+      if (lastReport && lastReport.key === key && Date.now() - lastReport.at < RESEND_MS) return;
+      lastReport = { key, at: Date.now() };
+      void send({ kind: "page_submitted", ...submission }).catch(() => undefined);
+    }
+
+    async function showOffer() {
+      if (!prompt) return;
+      let offer: SaveOffer | null = null;
+      try {
+        const response = await send({ kind: "page_offer" });
+        if (response.kind === "offer") offer = response.offer;
+      } catch {
+        // Background unavailable: nothing to offer.
+      }
+      clearTimeout(promptTimer);
+      if (offer) prompt.show(offer);
+      else if (prompt.offer) prompt.hide();
+    }
+
+    async function answerOffer(offer: SaveOffer, answer: OfferAnswer) {
+      if (!prompt) return;
+      let response: PageResponse;
+      try {
+        response = await send({ kind: "page_offer_answer", id: offer.id, answer });
+      } catch (err) {
+        response = { kind: "failed", message: err instanceof Error ? err.message : String(err) };
+      }
+      if (response.kind === "locked") {
+        // Locked since the offer was shown: show the unlock version.
+        await showOffer();
+        return;
+      }
+      if (response.kind === "saved") {
+        prompt.note(response.updated ? `Updated ${response.path}` : `Saved as ${response.path}`);
+      } else if (response.kind === "ok" && answer.kind === "never") {
+        prompt.note(`Secret will not offer to save logins on ${new URL(location.href).host} again. Settings can undo this.`);
+      } else if (response.kind === "ok") {
+        prompt.hide();
+        return;
+      } else {
+        const why = response.kind === "failed" ? response.message : "Secret is not reachable";
+        prompt.note(`Not saved: ${why}`, true);
+      }
+      clearTimeout(promptTimer);
+      promptTimer = setTimeout(() => prompt.hide(), NOTE_MS);
+    }
+
+    document.addEventListener(
+      "submit",
+      (event) => {
+        if (event.isTrusted && event.target instanceof HTMLFormElement) report(event.target);
+      },
+      true,
+    );
+    // Pages that sign in from script, without a submit event: a click on a
+    // send-like button, or Enter in a field. The submit that may follow is deduplicated.
+    document.addEventListener(
+      "click",
+      (event) => {
+        if (!event.isTrusted) return;
+        const [first] = event.composedPath();
+        if (!(first instanceof Element)) return;
+        const clicked = first.closest("button, input[type=submit], input[type=button], [role=button]");
+        if (!clicked) return;
+        const form = clicked instanceof HTMLButtonElement || clicked instanceof HTMLInputElement ? clicked.form : null;
+        const label = [clicked.textContent, (clicked as HTMLInputElement).value, clicked.getAttribute("aria-label")];
+        const sends = (form && (clicked as HTMLButtonElement).type === "submit") || SEND_LABEL.test(label.join(" "));
+        if (sends) report(form ?? clicked.ownerDocument);
+      },
+      true,
+    );
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (!event.isTrusted || event.key !== "Enter" || event.isComposing) return;
+        const [target] = event.composedPath();
+        if (target instanceof HTMLInputElement) report(target.form ?? target.ownerDocument);
+      },
+      true,
+    );
+    if (prompt) void showOffer();
+
     document.addEventListener(
       "focusin",
       (event) => {
@@ -249,14 +365,19 @@ export default defineContentScript({
     // Back from the unlock window: show what is now available.
     window.addEventListener("focus", () => {
       cached = null;
+      if (prompt?.offer?.locked) void showOffer();
       const active = document.activeElement;
       if (active instanceof HTMLInputElement && active === current?.field) void offer(active);
     });
 
-    // The popup's Fill button. Frames without a login form stay silent.
+    // The popup's Fill button (frames without a login form stay silent), and save offers.
     browser.runtime.onMessage.addListener(
       (message: unknown, _sender, sendResponse: (filled: boolean) => void) => {
         const request = message as TabMessage;
+        if (request.kind === "offer_save") {
+          if (prompt) void showOffer();
+          return false;
+        }
         if (request.kind !== "fill" || !defaultLoginFields(document)) return false;
         void fillWith(request.id, null).then(sendResponse);
         return true;

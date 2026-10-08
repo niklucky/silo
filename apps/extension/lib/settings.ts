@@ -7,9 +7,13 @@ export type Trigger = "menu" | "button";
 
 export interface Settings {
   trigger: Trigger;
+  /** Offer to save the login after the user signs in with one Secret does not have. */
+  offerToSave: boolean;
+  /** Origins where the user chose "Never for this site". */
+  neverSave: string[];
 }
 
-export const DEFAULT_SETTINGS: Settings = { trigger: "menu" };
+export const DEFAULT_SETTINGS: Settings = { trigger: "menu", offerToSave: true, neverSave: [] };
 
 const KEY = "settings";
 
@@ -33,5 +37,9 @@ export function onSettingsChanged(listener: (settings: Settings) => void) {
 
 function parse(value: unknown): Settings {
   const stored = (value ?? {}) as Partial<Settings>;
-  return { trigger: stored.trigger === "button" ? "button" : DEFAULT_SETTINGS.trigger };
+  return {
+    trigger: stored.trigger === "button" ? "button" : DEFAULT_SETTINGS.trigger,
+    offerToSave: stored.offerToSave !== false,
+    neverSave: Array.isArray(stored.neverSave) ? stored.neverSave.filter((o) => typeof o === "string") : [],
+  };
 }

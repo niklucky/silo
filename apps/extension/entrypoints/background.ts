@@ -5,15 +5,18 @@ import {
   type ChallengeView,
   type LoginOption,
   PAGE_KINDS,
-  type SameSiteLogin,
-  type SaveChoice,
   type PageRequest,
   type PageResponse,
+  type SameSiteLogin,
+  type SaveChoice,
+  type SaveOffer,
   type TabMessage,
   type UiRequest,
   type UiResponse,
+  type UpdateTarget,
 } from "@/lib/messages";
 import { secretPath } from "@/lib/protocol";
+import { loadSettings, saveSettings } from "@/lib/settings";
 import { errorText, originOf } from "@/lib/util";
 
 const ALL_URLS = { urls: ["<all_urls>"] };
@@ -31,6 +34,10 @@ const MAX_OPTIONS = 8;
 /** A save looks at this many same-site logins for the same username, and offers at most MAX_CONFLICTS. */
 const MAX_SITE_LOGINS = 20;
 const MAX_CONFLICTS = 3;
+/** A login the user signed in with is offered for saving this long. */
+const OFFER_TTL_MS = 3 * 60_000;
+/** The username from the first step of a two-step sign-in is kept this long for the second. */
+const FIRST_STEP_TTL_MS = 5 * 60_000;
 
 interface Header {
   name: string;
@@ -76,6 +83,29 @@ interface Challenge extends ChallengeView {
   at: number;
 }
 
+/** Who sent a page message, as the browser reports it. */
+interface PageSender {
+  url: string;
+  tabId?: number;
+  frameId?: number;
+}
+
+/** A login the user signed in with, waiting for an answer in the tab's top frame. Memory only. */
+interface PendingOffer {
+  id: string;
+  tabId: number;
+  url: string;
+  username: string;
+  password: string;
+  previous?: string;
+  at: number;
+}
+
+/** A same-site login with its password, which stays in the background. */
+interface SiteLogin extends SameSiteLogin {
+  password: string;
+}
+
 export default defineBackground({
   // Firefox (MV2): keep the page alive so the native port stays open.
   persistent: true,
@@ -92,6 +122,10 @@ export default defineBackground({
     const challenges = new Map<string, Challenge>();
     /** Origins handed back to the browser after Cancel, until the given time. */
     const bypass = new Map<string, number>();
+    /** Save offers by tab. */
+    const offers = new Map<number, PendingOffer>();
+    /** Username sent by the first step of a two-step sign-in, by tab. */
+    const firstSteps = new Map<number, { origin: string; username: string; at: number }>();
 
     const record = (event: Omit<AuthEvent, "at">) => {
       events.unshift({ at: Date.now(), ...event });
@@ -316,38 +350,62 @@ export default defineBackground({
     // other. A save that finds the same username elsewhere on the site asks
     // whether it is a new login or a new password for the existing one.
 
-    /** Same-site logins saved under `username`; any username when it is empty. */
-    async function sameSiteLogins(url: string, username: string): Promise<SameSiteLogin[]> {
+    /** Logins for this site (this host first), with passwords, at most MAX_SITE_LOGINS. */
+    async function siteLogins(url: string): Promise<SiteLogin[]> {
       const here = new Set((await agent.matches(url)).map((m) => m.id));
-      const wanted = username.trim().toLowerCase();
-      const found: SameSiteLogin[] = [];
+      const found: SiteLogin[] = [];
       for (const summary of (await agent.matches(url, { site: true })).slice(0, MAX_SITE_LOGINS)) {
         const view = await agent.get(summary.id);
         if (!("login" in view.body)) continue;
-        const saved = view.body.login.username;
-        if (wanted && saved.trim().toLowerCase() !== wanted) continue;
-        found.push({ id: view.id, path: secretPath(view.meta), username: saved, here: here.has(view.id) });
-        if (found.length === MAX_CONFLICTS) break;
+        const { username, password } = view.body.login;
+        found.push({ id: view.id, path: secretPath(view.meta), username, password, here: here.has(view.id) });
       }
       return found;
     }
 
+    /** Same-site logins saved under `username`; any username when it is empty. */
+    async function sameSiteLogins(url: string, username: string): Promise<SameSiteLogin[]> {
+      const wanted = username.trim();
+      return (await siteLogins(url))
+        .filter((login) => !wanted || sameUsername(login.username, wanted))
+        .slice(0, MAX_CONFLICTS)
+        .map(({ password: _password, ...login }) => login);
+    }
+
     /**
-     * Stores `password` in a login the user picked from `sameSiteLogins`, and
-     * makes it fill on `url` too. The agent keeps the replaced revision.
+     * Stores `password` in a login the user picked, adds `username` if it has
+     * none, and makes it fill on `url` too. The agent keeps the replaced
+     * revision. Nothing changes when the login already has all of that.
      */
     async function overwrite(target: SameSiteLogin, url: string, username: string, password: string): Promise<string> {
       const view = await agent.get(target.id);
       if (!("login" in view.body)) throw new Error(`${target.path} is not a login`);
       const { login } = view.body;
-      const urls = view.meta.urls ?? [];
+      const next = { ...login, username: login.username || username, password };
+      const changed = next.username !== login.username || next.password !== login.password;
+      if (!changed && target.here) return secretPath(view.meta);
       const updated = await agent.update({
         selector: view.id,
         revision: view.revision,
-        urls: target.here ? urls : [...urls, originOf(url)],
-        body: { login: { ...login, username: login.username || username, password } },
+        urls: target.here ? undefined : [...(view.meta.urls ?? []), originOf(url)],
+        body: changed ? { login: next } : undefined,
       });
       return secretPath(updated.meta);
+    }
+
+    /** A new login in `web/`, titled after the host (`host (2)` when taken), filling on its origin. */
+    async function addWebLogin(url: string, username: string, password: string, notes: string): Promise<string> {
+      const { host, origin } = new URL(url);
+      const taken = new Set((await agent.list({ folder: "web", exact_folder: true })).map((m) => m.meta.title));
+      let title = host;
+      for (let n = 2; taken.has(title); n++) title = `${host} (${n})`;
+      const added = await agent.add({
+        title,
+        folder: "web",
+        urls: [origin],
+        body: { login: { username, password, totp: null, notes } },
+      });
+      return secretPath(added.meta);
     }
 
     /**
@@ -368,10 +426,141 @@ export default defineBackground({
       return { target };
     }
 
+    // ---- Offering to save what the user signed in with. ------------------------
+    // The content script reports a sent login form; nothing is stored until the
+    // user answers the offer, which the tab's top frame shows, on this page or
+    // the next one. The password never goes back to a page.
+
+    /**
+     * Logins the sent one could update instead of being added, or null when a
+     * login for this page already has it. With no username: logins for this
+     * page whose password is the form's current one, else all of the site's.
+     */
+    async function updateTargets(offer: PendingOffer): Promise<UpdateTarget[] | null> {
+      const logins = await siteLogins(offer.url);
+      const wanted = offer.username.trim();
+      const named = (login: SiteLogin) => wanted !== "" && sameUsername(login.username, wanted);
+      if (logins.some((login) => login.here && login.password === offer.password && (!wanted || named(login)))) {
+        return null;
+      }
+      const changing = (login: SiteLogin) => offer.previous !== undefined && login.password === offer.previous;
+      return logins
+        .filter((login) => {
+          if (named(login)) return true;
+          if (login.here && (!login.username || changing(login))) return true;
+          return !wanted && offer.previous === undefined;
+        })
+        .slice(0, MAX_CONFLICTS)
+        .map(({ password, ...login }) => ({ ...login, samePassword: password === offer.password }));
+    }
+
+    /** What to show for a pending offer, or null when there is nothing to offer (any more). */
+    async function offerView(offer: PendingOffer): Promise<SaveOffer | null> {
+      const view = { id: offer.id, host: new URL(offer.url).host, username: offer.username };
+      try {
+        const logins = await updateTargets(offer);
+        return logins && { ...view, locked: false, logins };
+      } catch (err) {
+        if (err instanceof AgentError && err.code === "locked") return { ...view, locked: true, logins: [] };
+        // No agent or no vault: stay out of the way.
+        return null;
+      }
+    }
+
+    function liveOffer(tabId: number | undefined): PendingOffer | null {
+      if (tabId === undefined) return null;
+      const offer = offers.get(tabId);
+      if (!offer) return null;
+      if (Date.now() - offer.at > OFFER_TTL_MS) {
+        offers.delete(tabId);
+        return null;
+      }
+      return offer;
+    }
+
+    async function submitted(
+      message: Extract<PageRequest, { kind: "page_submitted" }>,
+      url: string,
+      tabId: number,
+    ): Promise<PageResponse> {
+      const origin = originOf(url);
+      const now = Date.now();
+      if (!message.password) {
+        firstSteps.set(tabId, { origin, username: message.username.trim(), at: now });
+        return { kind: "ok" };
+      }
+      let username = message.username.trim();
+      const step = firstSteps.get(tabId);
+      if (!username && step && step.origin === origin && now - step.at < FIRST_STEP_TTL_MS) username = step.username;
+      firstSteps.delete(tabId);
+      const known = liveOffer(tabId);
+      const same =
+        known &&
+        originOf(known.url) === origin &&
+        known.username === username &&
+        known.password === message.password;
+      const offer: PendingOffer = same
+        ? { ...known, at: now }
+        : { id: crypto.randomUUID(), tabId, url, username, password: message.password, previous: message.previous, at: now };
+      if (!(await offerView(offer))) {
+        offers.delete(tabId);
+        return { kind: "ok" };
+      }
+      offers.set(tabId, offer);
+      // Pages that sign in without navigating show it now; the others ask when the next page loads.
+      const show: TabMessage = { kind: "offer_save" };
+      void browser.tabs.sendMessage(tabId, show, { frameId: 0 }).catch(() => undefined);
+      return { kind: "ok" };
+    }
+
+    async function answerOffer(
+      message: Extract<PageRequest, { kind: "page_offer_answer" }>,
+      tabId: number,
+    ): Promise<PageResponse> {
+      const offer = liveOffer(tabId);
+      if (!offer || offer.id !== message.id) return { kind: "failed", message: "This offer has expired." };
+      const { answer } = message;
+      const origin = originOf(offer.url);
+      if (answer.kind === "dismiss" || answer.kind === "never") {
+        offers.delete(tabId);
+        if (answer.kind === "never") {
+          const { neverSave } = await loadSettings();
+          if (!neverSave.includes(origin)) await saveSettings({ neverSave: [...neverSave, origin] });
+        }
+        return { kind: "ok" };
+      }
+      const targets = await updateTargets(offer);
+      if (!targets) {
+        // Saved in the meantime, from another tab or the CLI.
+        offers.delete(tabId);
+        return { kind: "ok" };
+      }
+      let path: string;
+      if (answer.kind === "overwrite") {
+        // Only a login that was offered for this page, whatever id the caller sends.
+        const target = targets.find((t) => t.id === answer.id);
+        if (!target) throw new Error("That login is not saved for this site.");
+        path = await overwrite(target, offer.url, offer.username, offer.password);
+        record({ origin, outcome: "saved", detail: `${path} (updated after sign-in)` });
+      } else {
+        const notes = `Saved from the browser after signing in on ${new Date().toISOString().slice(0, 10)}.`;
+        path = await addWebLogin(offer.url, offer.username, offer.password, notes);
+        record({ origin, outcome: "saved", detail: path });
+      }
+      offers.delete(tabId);
+      return { kind: "saved", path, updated: answer.kind === "overwrite" };
+    }
+
+    browser.tabs.onRemoved.addListener((tabId) => {
+      offers.delete(tabId);
+      firstSteps.delete(tabId);
+    });
+
     // ---- Login forms (content script). ----------------------------------------
     // `url` is the sending frame's URL as the browser reports it.
 
-    async function handlePage(message: PageRequest, url: string): Promise<PageResponse> {
+    async function handlePage(message: PageRequest, sender: PageSender): Promise<PageResponse> {
+      const { url, tabId, frameId } = sender;
       if (!/^https?:/.test(url)) return { kind: "unavailable" };
       try {
         switch (message.kind) {
@@ -396,7 +585,7 @@ export default defineBackground({
             return { kind: "credentials", username: view.body.login.username, password: view.body.login.password };
           }
           case "page_save_generated": {
-            const { host, origin } = new URL(url);
+            const origin = originOf(url);
             const resolved = await resolveSave(url, message.username, message.choice);
             if ("conflicts" in resolved) return { kind: "conflict", logins: resolved.conflicts };
             if (resolved.target) {
@@ -404,26 +593,25 @@ export default defineBackground({
               record({ origin, outcome: "saved", detail: `${path} (new password)` });
               return { kind: "saved", path, updated: true };
             }
-            const taken = new Set((await agent.list({ folder: "web", exact_folder: true })).map((m) => m.meta.title));
-            let title = host;
-            for (let n = 2; taken.has(title); n++) title = `${host} (${n})`;
-            const added = await agent.add({
-              title,
-              folder: "web",
-              urls: [origin],
-              body: {
-                login: {
-                  username: message.username,
-                  password: message.password,
-                  totp: null,
-                  notes: `Generated in the browser on ${new Date().toISOString().slice(0, 10)}.`,
-                },
-              },
-            });
-            const path = secretPath(added.meta);
+            const notes = `Generated in the browser on ${new Date().toISOString().slice(0, 10)}.`;
+            const path = await addWebLogin(url, message.username, message.password, notes);
             record({ origin, outcome: "saved", detail: path });
             return { kind: "saved", path, updated: false };
           }
+          case "page_submitted":
+            if (tabId === undefined) return { kind: "unavailable" };
+            return await submitted(message, url, tabId);
+          case "page_offer": {
+            // The offer shows in the top frame only, whichever frame the login was sent from.
+            if (frameId !== 0) return { kind: "offer", offer: null };
+            const offer = liveOffer(tabId);
+            const view = offer && (await offerView(offer));
+            if (offer && !view) offers.delete(offer.tabId);
+            return { kind: "offer", offer: view ?? null };
+          }
+          case "page_offer_answer":
+            if (frameId !== 0 || tabId === undefined) return { kind: "unavailable" };
+            return await answerOffer(message, tabId);
           case "page_unlock":
             await browser.windows.create({
               url: browser.runtime.getURL("/unlock.html"),
@@ -435,7 +623,9 @@ export default defineBackground({
         }
       } catch (err) {
         if (err instanceof AgentError && err.code === "locked") return { kind: "locked" };
-        if (message.kind === "page_save_generated") return { kind: "failed", message: errorText(err) };
+        if (message.kind === "page_save_generated" || message.kind === "page_offer_answer") {
+          return { kind: "failed", message: errorText(err) };
+        }
         return { kind: "unavailable" };
       }
     }
@@ -547,12 +737,18 @@ export default defineBackground({
         // Content scripts in web pages get the page vocabulary and nothing else.
         const kind = (message as { kind?: unknown } | null)?.kind;
         if (typeof kind !== "string" || !PAGE_KINDS.has(kind)) return false;
-        void handlePage(message as PageRequest, url).then(sendResponse);
+        void handlePage(message as PageRequest, { url, tabId: sender.tab?.id, frameId: sender.frameId }).then(
+          sendResponse,
+        );
         return true;
       },
     );
   },
 });
+
+function sameUsername(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
 
 function stateFor(result: Exclude<Lookup, { kind: "found" | "error" }>): Challenge["state"] {
   return result.kind === "locked" ? "locked" : "no_match";

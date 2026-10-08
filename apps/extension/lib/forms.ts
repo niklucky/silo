@@ -74,6 +74,53 @@ export function fillNewPassword(fields: NewPasswordFields, password: string) {
   fields.passwords[0]?.focus();
 }
 
+/** What the user typed into a form they sent: a login to offer saving. */
+export interface Submission {
+  username: string;
+  /** Empty for the first step of a two-step sign-in, which sends only the username. */
+  password: string;
+  /** The current password of a change-password form; finds the login being changed. */
+  previous?: string;
+}
+
+/**
+ * The login sent from `scope` (a form, or the document for formless pages), or
+ * null when it holds no typed password. Sign-up and change-password forms give
+ * the new password, and nothing when its two copies differ.
+ */
+export function submissionIn(scope: ParentNode): Submission | null {
+  const inputs = Array.from(scope.querySelectorAll("input")).filter(usable);
+  const all = inputs.filter((input) => input.type === "password");
+  const filled = all.filter((input) => input.value !== "");
+  if (filled.length === 0) {
+    // Username-first sign-in: a lone identifier.
+    const texts = inputs.filter((input) => TEXT_TYPES.has(input.type));
+    const [only] = texts;
+    if (texts.length !== 1 || !only?.value.trim()) return null;
+    if (!autocomplete(only).includes("username") && !looksLikeUsername(only)) return null;
+    return { username: only.value.trim(), password: "" };
+  }
+  const marked = filled.filter((input) => autocomplete(input).includes("new-password"));
+  let fresh: HTMLInputElement[];
+  let current: HTMLInputElement | undefined;
+  if (marked.length > 0) {
+    fresh = marked;
+    current = filled.find((input) => !marked.includes(input));
+  } else if (filled.length === 1) {
+    fresh = filled;
+  } else if (filled.length === 2) {
+    // Password and repeat; two different values could be current + new or a typo.
+    fresh = filled;
+  } else {
+    [current, ...fresh] = filled;
+  }
+  const [password, ...copies] = fresh.map((input) => input.value);
+  if (password === undefined || copies.some((copy) => copy !== password)) return null;
+  const first = all[0];
+  const username = (first && usernameBefore(inputs, first)?.value.trim()) || "";
+  return current && current.value !== password ? { username, password, previous: current.value } : { username, password };
+}
+
 /** The login form in this document to fill when the user did not pick a field. */
 export function defaultLoginFields(doc: Document): LoginFields | null {
   const active = doc.activeElement;

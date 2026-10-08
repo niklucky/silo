@@ -11,6 +11,9 @@ h1 {
   margin: 0 0 12px;
 }
 
+fieldset + fieldset {
+  margin-top: 14px;
+}
 fieldset {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -43,4 +46,18 @@ legend {
   min-height: 1.4em;
   font-size: 12px;
   color: var(--ok);
+}
+
+.never {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+}
+.never li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  overflow-wrap: anywhere;
 }

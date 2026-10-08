@@ -1,3 +1,4 @@
+import { text, trustedButton } from "./dom";
 import { type Generated, strength } from "./generate";
 import type { LoginOption, SameSiteLogin, SaveChoice } from "./messages";
 
@@ -172,11 +173,8 @@ export class Menu {
         );
         for (const login of logins) {
           const who = username ? "" : ` (${login.username || "no username"})`;
-          const sub = login.here
-            ? "Replace its password; the old one stays in its history"
-            : `Replace its password and fill it on ${host} too`;
           nodes.push(
-            this.option(`Overwrite ${login.path}${who}`, sub, () =>
+            this.option(`Overwrite ${login.path}${who}`, updateNote(login, host), () =>
               this.actions.useGenerated(option, "saved", { kind: "overwrite", id: login.id }),
             ),
           );
@@ -222,16 +220,7 @@ export class Menu {
   }
 
   private button(run: () => void): HTMLButtonElement {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.addEventListener("click", (event) => {
-      // A page script can dispatch a synthetic click but cannot make it trusted.
-      if (!event.isTrusted) return;
-      event.preventDefault();
-      event.stopPropagation();
-      run();
-    });
-    return button;
+    return trustedButton(run);
   }
 }
 
@@ -249,6 +238,14 @@ async function copyText(value: string, shown: HTMLElement) {
   }
 }
 
+/** What updating `login` with a password used on `host` does. */
+export function updateNote(login: SameSiteLogin, host: string, samePassword = false): string {
+  if (samePassword) return login.here ? "Add the username to it" : `Same password: fill it on ${host} too`;
+  return login.here
+    ? "Replace its password; the old one stays in its history"
+    : `Replace its password and fill it on ${host} too`;
+}
+
 function keepNote(logins: SameSiteLogin[]): string {
   const [first] = logins;
   if (logins.length === 1 && first) return `${first.path} stays as it is`;
@@ -257,11 +254,4 @@ function keepNote(logins: SameSiteLogin[]): string {
 
 function insecureWarning(): HTMLElement {
   return text("div", "warn", "This page is not HTTPS; anyone on the network can read what you send.");
-}
-
-function text(tag: string, className: string, value: string): HTMLElement {
-  const node = document.createElement(tag);
-  node.className = className;
-  node.textContent = value;
-  return node;
 }

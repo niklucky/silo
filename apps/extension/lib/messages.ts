@@ -39,6 +39,29 @@ export interface SameSiteLogin {
 /** The user's answer when a save finds a same-site login with the same username. */
 export type SaveChoice = { kind: "new" } | { kind: "overwrite"; id: string };
 
+/** A same-site login that a login the user signed in with could update instead of being added. */
+export interface UpdateTarget extends SameSiteLogin {
+  /** It already has the password: updating only adds the username or this host. */
+  samePassword: boolean;
+}
+
+/**
+ * Shown in the tab's top frame after the user signed in with a login that
+ * Secret does not have. The password stays in the background.
+ */
+export interface SaveOffer {
+  id: string;
+  /** Host of the page the login was sent from. */
+  host: string;
+  username: string;
+  /** Unlock first; the background works the offer out again afterwards. */
+  locked: boolean;
+  /** Logins to update instead of adding one; empty means a plain save. */
+  logins: UpdateTarget[];
+}
+
+export type OfferAnswer = SaveChoice | { kind: "dismiss" } | { kind: "never" };
+
 export type UiRequest =
   | { kind: "agent"; request: Request }
   | { kind: "events" }
@@ -98,7 +121,12 @@ export type PageRequest =
    * A generated password the user chose: stored before the page gets it, as a
    * new login or, when `choice` says so, over a same-site login.
    */
-  | { kind: "page_save_generated"; username: string; password: string; choice?: SaveChoice };
+  | { kind: "page_save_generated"; username: string; password: string; choice?: SaveChoice }
+  /** The user sent a login form; the background decides whether to offer saving it. */
+  | { kind: "page_submitted"; username: string; password: string; previous?: string }
+  /** Top frame only: the offer pending for this tab, if any. */
+  | { kind: "page_offer" }
+  | { kind: "page_offer_answer"; id: string; answer: OfferAnswer };
 
 export type PageResponse =
   | { kind: "logins"; logins: LoginOption[] }
@@ -110,14 +138,21 @@ export type PageResponse =
   | { kind: "saved"; path: string; updated: boolean }
   | { kind: "conflict"; logins: SameSiteLogin[] }
   | { kind: "failed"; message: string }
+  | { kind: "offer"; offer: SaveOffer | null }
   | { kind: "ok" };
 
 /** Background to the content scripts of one tab. */
-export type TabMessage = { kind: "fill"; id: string };
+export type TabMessage =
+  | { kind: "fill"; id: string }
+  /** A save offer is pending for the tab: the top frame should ask for it. */
+  | { kind: "offer_save" };
 
 export const PAGE_KINDS: ReadonlySet<string> = new Set<PageRequest["kind"]>([
   "page_logins",
   "page_fill",
   "page_unlock",
   "page_save_generated",
+  "page_submitted",
+  "page_offer",
+  "page_offer_answer",
 ]);

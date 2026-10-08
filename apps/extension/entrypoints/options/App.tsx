@@ -61,6 +61,41 @@ export default function App() {
           ))}
         </fieldset>
       )}
+      {settings && (
+        <fieldset>
+          <legend>Saving logins</legend>
+          <label className="choice">
+            <input
+              type="checkbox"
+              checked={settings.offerToSave}
+              onChange={(e) => void update({ offerToSave: e.target.checked })}
+            />
+            <span>Offer to save logins when you sign in</span>
+            <span className="muted">
+              After you sign in with a login Secret does not have, or with a new password for one it has, a
+              small panel asks whether to save it. Nothing is stored until you answer.
+            </span>
+          </label>
+          {settings.neverSave.length > 0 && (
+            <>
+              <p className="muted">Never offered on:</p>
+              <ul className="never">
+                {settings.neverSave.map((origin) => (
+                  <li key={origin}>
+                    <span>{origin}</span>
+                    <button
+                      type="button"
+                      onClick={() => void update({ neverSave: settings.neverSave.filter((o) => o !== origin) })}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </fieldset>
+      )}
       <p className="saved">{status}</p>
     </main>
   );
