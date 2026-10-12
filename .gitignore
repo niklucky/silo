@@ -18,3 +18,6 @@ dist/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Safari app
+/apps/safari/build/

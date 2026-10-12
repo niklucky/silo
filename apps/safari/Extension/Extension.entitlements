@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Connecting to the agent socket, ~/.secret/agent.sock, and nothing else.
+	     File-access exceptions do not cover connecting to a Unix socket. -->
+	<key>com.apple.security.temporary-exception.sbpl</key>
+	<string>(allow network-outbound (regex #"^/Users/[^/]+/\.secret/agent\.sock$"))</string>
+</dict>
+</plist>

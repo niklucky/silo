@@ -20,11 +20,13 @@ export default defineConfig({
       "storage",
       "webRequest",
       // Firefox answers auth challenges from a blocking listener; Chromium from
-      // an asyncBlocking one that needs its own permission, and sends the header
-      // through session rules on the hosts it already has access to.
+      // an asyncBlocking one that needs its own permission. Chromium and Safari
+      // send the header through session rules on the hosts they can access.
       ...(browser === "firefox"
         ? ["webRequestBlocking"]
-        : ["webRequestAuthProvider", "declarativeNetRequestWithHostAccess"]),
+        : browser === "safari"
+          ? ["declarativeNetRequestWithHostAccess"]
+          : ["webRequestAuthProvider", "declarativeNetRequestWithHostAccess"]),
     ],
     host_permissions: ["<all_urls>"],
     // The sign-in page a 401 redirects to. Must be reachable from a web navigation.
@@ -39,6 +41,8 @@ export default defineConfig({
             },
           },
         }
-      : { key: CHROME_KEY }),
+      : browser === "safari"
+        ? {}
+        : { key: CHROME_KEY }),
   }),
 });

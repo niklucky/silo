@@ -19,12 +19,14 @@ crates/
   wasm/                    secret-wasm: wasm-bindgen surface over core for the extension
 apps/
   desktop/                 Tauri 2 + React + Vite; src-tauri/ is a workspace member
-  extension/               WXT + React; Firefox/Zen (MV2) and Chrome (MV3) builds
+  extension/               WXT + React; Firefox/Zen (MV2), Chrome (MV3) and Safari (MV2) builds
+  safari/                  Xcode project wrapping the Safari build, with the Swift bridge to the agent
 packages/
   ui/                      @secret/ui: shared React components
   bindings/                @secret/bindings: generated TS types (tauri-specta, wasm-bindgen)
 scripts/
   build-wasm.sh            cargo build --target wasm32 + wasm-bindgen → packages/bindings/wasm
+  build-safari.sh          Safari build + xcodebuild → apps/safari/build/Secret for Safari.app
   basic-auth-server.py     local HTTP Basic Auth playground for testing the extension
   login-form-server.py     local login form playground (sign-in, sign-up, change password, iframe)
 ```
@@ -40,6 +42,7 @@ storage and transport and get bytes back. It compiles unchanged for native,
 - Node 20+ and pnpm 9.
 - Tauri 2 platform prerequisites: Xcode Command Line Tools on macOS; see
   https://tauri.app/start/prerequisites/ for Linux packages.
+- Full Xcode for the Safari extension only.
 
 The Tauri CLI refuses to build if the `tauri` crate and `@tauri-apps/api` differ in
 minor version. When bumping one, bump the other. Cargo picks the newest crate the
@@ -58,6 +61,7 @@ means that field needs raising.
 | Desktop app, dev mode                  | `pnpm dev:desktop`                        |
 | Extension, build for Firefox / Zen     | `pnpm --filter @secret/extension build:firefox` → `apps/extension/.output/firefox-mv2` |
 | Extension, build for Chrome            | `pnpm build:extension` → `apps/extension/.output/chrome-mv3` |
+| Extension, build for Safari            | `pnpm build:safari` → `apps/safari/build/Secret for Safari.app` |
 | Extension, dev mode with live reload   | `pnpm --filter @secret/extension dev:firefox` or `pnpm dev:extension` |
 | Basic Auth test server                 | `python3 scripts/basic-auth-server.py` → http://localhost:8099 |
 | Login form test server                 | `python3 scripts/login-form-server.py` → http://localhost:8200 |
@@ -141,6 +145,16 @@ Load the extension:
 - **Chrome:** `pnpm build:extension`, open `chrome://extensions`, enable Developer
   mode, *Load unpacked*, pick `apps/extension/.output/chrome-mv3`. The manifest
   pins a public key so the id is the same on every machine.
+- **Safari:** `pnpm build:safari` builds the extension, wraps it in
+  `apps/safari/build/Secret for Safari.app` and opens the app once so Safari
+  registers it; close the window, but leave the app where it is. The build is
+  signed ad hoc, so turn on Settings → Advanced → *Show features for web
+  developers*, then Develop → Developer Settings → *Allow unsigned extensions*
+  (Safari turns it off when it quits). Enable **Secret** under Settings →
+  Extensions and allow it on every website. `secret browser install` is not
+  needed: Safari reaches the agent through the app (see
+  [How the bridges work](#how-the-bridges-work)). To sign with your own
+  certificate, set `SECRET_SAFARI_IDENTITY` and `SECRET_SAFARI_TEAM`.
 
 Save a login with the URL pattern the site should match, then visit it:
 
@@ -186,8 +200,13 @@ frame, a fetch, a POST), Chrome gets the credentials the old way and keeps them
 until it restarts; Firefox takes the same fallback when the first request to a
 site is not a GET, or the challenge is not Basic.
 
-Not yet: Safari (no `onAuthRequired`, needs an app-hosted extension), proxy
-authentication, editing a saved login from the browser.
+Safari has no `onAuthRequired` at all, so its own dialog opens on a `401`. The
+extension sees the response in a non-blocking `onHeadersReceived` and does what
+Chrome does: a session rule and the page loaded again, which closes the dialog,
+or the sign-in page. Lock and `secret rm` behave as on Chrome. Frames, fetches
+and POSTs keep Safari's dialog.
+
+Not yet: proxy authentication, editing a saved login from the browser.
 
 ## Browser extension: login forms
 
@@ -313,6 +332,14 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
   to the agent socket and refuses `shutdown`, `remove` and `history`. `lib/protocol.ts`
   mirrors the agent's wire types by hand. The extension id and host name live in
   both `wxt.config.ts` and `crates/cli/src/browser.rs`; change both or neither.
+- **Safari.** Safari cannot start a native host. `browser.runtime.sendNativeMessage`
+  goes to the app extension inside `Secret for Safari.app`
+  (`apps/safari/Extension/SafariWebExtensionHandler.swift`), which sends each
+  request to `~/.secret/agent.sock` and refuses the same three methods. Its
+  sandbox allows connecting to that socket and nothing else
+  (`Extension.entitlements`). It cannot start the agent; run `secret unlock`
+  first. The extension files are copied into the app at build time from
+  `apps/extension/.output/safari-mv2`.
 - **WASM.** `crates/wasm` exports functions with `#[wasm_bindgen]` and
   `scripts/build-wasm.sh` emits `packages/bindings/wasm/` (gitignored). Nothing
   consumes it today; it stays for hosts without an agent.
@@ -320,7 +347,7 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
 ## Status
 
 Core, agent and CLI are implemented and tested for local, single-user work. The
-extension fills HTTP Basic Auth and login forms in Firefox/Zen and Chrome. The desktop app still
+extension fills HTTP Basic Auth and login forms in Firefox/Zen, Chrome and Safari. The desktop app still
 only round-trips `secret_core::version()`.
 
 - **`secret-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
@@ -344,7 +371,8 @@ only round-trips `secret_core::version()`.
   injected `Authorization` header, re-validated per navigation, so the browser
   cache stays empty and lock/remove work. Chrome: `onAuthRequired` with
   asyncBlocking adds a `declarativeNetRequest` session rule that sends the header
-  (`lib/header-rules.ts`) and reloads the page. Unknown or locked sites go to the extension's own sign-in page
+  (`lib/header-rules.ts`) and reloads the page; Safari does the same from a
+  non-blocking `onHeadersReceived`. Unknown or locked sites go to the extension's own sign-in page
   (`entrypoints/auth`), which unlocks, saves a login through the agent and
   retries. Loop guard per request id, popup with unlock/lock, matches for the
   current tab and a log of recent activity. Login forms: a content script
@@ -368,12 +396,14 @@ Known gaps:
   browser process sees them in transit, as any extension-based unlock would.
 - Replies over native messaging are capped at 1 MiB, so `get` of a large file
   secret fails through the bridge (fine for the CLI).
+- The Safari bridge only knows the default socket path; `SECRET_HOME` and
+  `SECRET_AGENT_SOCKET` are not seen inside the sandbox.
 
 Next steps, in order:
 
 1. Agent: `update` with revisions, card kind on the CLI.
 2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
-3. Extension: Safari; signed builds.
+3. Extension: signed builds; the Safari extension inside the desktop app.
 4. Sharing end to end with invites and fingerprint verification; signed grants.
 5. Desktop UI over the agent, then login and card autofill, then mobile.
 

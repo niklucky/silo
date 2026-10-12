@@ -51,7 +51,7 @@ export interface Credentials {
 /**
  * One native messaging port to `secret-native-host`, opened on first use and
  * reopened after a disconnect. The host answers strictly in order, so a FIFO
- * pairs replies with requests.
+ * pairs replies with requests. Safari sends single messages instead.
  */
 export class Agent {
   private port: Browser.runtime.Port | null = null;
@@ -77,8 +77,30 @@ export class Agent {
   }
 
   async call(request: Request): Promise<Reply> {
+    const response = import.meta.env.SAFARI ? await this.send(request) : await this.post(request);
+    if ("err" in response) throw new AgentError(response.err);
+    return response.ok;
+  }
+
+  /**
+   * Safari has no native messaging hosts: each message goes to the containing
+   * app's extension (apps/safari), which forwards it to the agent socket.
+   */
+  private async send(request: Request): Promise<Response> {
+    let reply: Response | { bridge_error: string } | undefined;
+    try {
+      reply = (await browser.runtime.sendNativeMessage(HOST_NAME, request)) as typeof reply;
+    } catch (err) {
+      throw new BridgeError(err instanceof Error ? err.message : String(err));
+    }
+    if (!reply) throw new BridgeError("no reply from the Secret for Safari app");
+    if ("bridge_error" in reply) throw new BridgeError(reply.bridge_error);
+    return reply;
+  }
+
+  private post(request: Request): Promise<Response> {
     const port = this.port ?? this.connect();
-    const response = await new Promise<Response>((resolve, reject) => {
+    return new Promise<Response>((resolve, reject) => {
       this.pending.push({ resolve, reject });
       try {
         port.postMessage(request);
@@ -87,8 +109,6 @@ export class Agent {
         reject(new BridgeError(err instanceof Error ? err.message : String(err)));
       }
     });
-    if ("err" in response) throw new AgentError(response.err);
-    return response.ok;
   }
 
   async status(): Promise<StatusInfo> {

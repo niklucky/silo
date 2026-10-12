@@ -8,6 +8,7 @@
     "dev:desktop": "pnpm --filter @secret/desktop tauri dev",
     "dev:extension": "pnpm --filter @secret/extension dev",
     "build:extension": "pnpm --filter @secret/extension build",
+    "build:safari": "sh scripts/build-safari.sh",
     "typecheck": "pnpm -r --if-present typecheck"
   },
   "devDependencies": {

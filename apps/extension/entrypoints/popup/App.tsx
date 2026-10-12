@@ -141,15 +141,26 @@ export default function App() {
         <section>
           <p>The extension can't reach the Secret agent.</p>
           <pre className="error">{view.message}</pre>
-          <ol>
-            <li>
-              Install the CLI: <code>cargo install --path crates/cli --locked</code>
-            </li>
-            <li>
-              Connect this browser: <code>secret browser install</code>
-            </li>
-            <li>Reload the extension.</li>
-          </ol>
+          {import.meta.env.SAFARI ? (
+            <ol>
+              <li>
+                Install the CLI: <code>cargo install --path crates/cli --locked</code>
+              </li>
+              <li>
+                Start the agent: <code>secret unlock</code>
+              </li>
+            </ol>
+          ) : (
+            <ol>
+              <li>
+                Install the CLI: <code>cargo install --path crates/cli --locked</code>
+              </li>
+              <li>
+                Connect this browser: <code>secret browser install</code>
+              </li>
+              <li>Reload the extension.</li>
+            </ol>
+          )}
           <button onClick={() => void refresh()}>Retry</button>
         </section>
       )}

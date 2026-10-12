@@ -110,7 +110,8 @@ interface SiteLogin extends SameSiteLogin {
 }
 
 export default defineBackground({
-  // Firefox (MV2): keep the page alive so the native port stays open.
+  // Firefox and Safari (MV2): keep the page alive, with the native port on
+  // Firefox and the sessions on both.
   persistent: true,
   main() {
     const agent = new Agent();
@@ -118,12 +119,12 @@ export default defineBackground({
     /**
      * Credentials in use per origin. They go into our own Authorization header,
      * never into the browser's cache: from onBeforeSendHeaders on Firefox, from
-     * a session rule on Chromium.
+     * a session rule on Chromium and Safari.
      */
     const sessions = new Map<string, { creds: Credentials; at: number }>();
     const rules = import.meta.env.FIREFOX ? null : new HeaderRules();
     void rules?.reset();
-    /** Chromium: the credentials each request to a session origin went out with. */
+    /** Chromium and Safari: the credentials each request to a session origin went out with. */
     const sentWith = new Map<string, Credentials>();
     /** "Use once" credentials: this browser session only, never stored. */
     const transient = new Map<string, Credentials>();
@@ -307,7 +308,7 @@ export default defineBackground({
       return {};
     }
 
-    // ---- Chromium only: session rules. -----------------------------------------
+    // ---- Chromium and Safari: session rules. -----------------------------------
     // Without blocking request hooks, a 401 is answered by adding a header rule
     // for the origin and loading the page again (onAuthRequired below). Requests
     // to an origin with a rule re-check with the agent as on Firefox, but cannot
@@ -362,11 +363,12 @@ export default defineBackground({
       }
     }
 
-    // ---- Both engines: the browser's own challenge. ---------------------------
+    // ---- All engines: the browser's own challenge. ----------------------------
     // On Chromium the first 401 of a page load; on Firefox the fallback for
     // non-GET first requests, Digest, frames and fetches. Credentials returned
     // here land in the browser's cache, so Chromium returns them only for
-    // requests it cannot load again.
+    // requests it cannot load again. Safari has no such event: onUnauthorized
+    // below calls this for page loads, and its own dialog handles the rest.
 
     async function onAuthRequired(details: AuthChallenge): Promise<BlockingResponse> {
       if (details.isProxy) return {};
@@ -405,6 +407,14 @@ export default defineBackground({
       return {};
     }
 
+    /** Safari: a 401 to a page load, while Safari's own dialog opens. Loading the tab again closes it. */
+    function onUnauthorized(details: ResponseDetails): void {
+      if (details.statusCode !== 401 || !canReload(details)) return;
+      const challenge = basicChallenge(details.responseHeaders);
+      if (!challenge) return;
+      void onAuthRequired({ ...details, isProxy: false, realm: challenge.realm ?? undefined });
+    }
+
     type AuthListener = Parameters<typeof browser.webRequest.onAuthRequired.addListener>[0];
     type SendListener = Parameters<typeof browser.webRequest.onBeforeSendHeaders.addListener>[0];
     type ReceiveListener = Parameters<typeof browser.webRequest.onHeadersReceived.addListener>[0];
@@ -427,11 +437,19 @@ export default defineBackground({
         ["blocking"],
       );
     } else {
-      // Chromium wants the answer through a callback ("asyncBlocking", webRequestAuthProvider).
-      const listener = ((details: AuthChallenge, callback?: (r: BlockingResponse) => void) => {
-        void onAuthRequired(details).then((result) => callback?.(result));
-      }) as unknown as AuthListener;
-      browser.webRequest.onAuthRequired.addListener(listener, ALL_URLS, ["asyncBlocking"]);
+      if (import.meta.env.SAFARI) {
+        browser.webRequest.onHeadersReceived.addListener(
+          onUnauthorized as unknown as ReceiveListener,
+          ALL_URLS,
+          ["responseHeaders"],
+        );
+      } else {
+        // Chromium wants the answer through a callback ("asyncBlocking", webRequestAuthProvider).
+        const listener = ((details: AuthChallenge, callback?: (r: BlockingResponse) => void) => {
+          void onAuthRequired(details).then((result) => callback?.(result));
+        }) as unknown as AuthListener;
+        browser.webRequest.onAuthRequired.addListener(listener, ALL_URLS, ["asyncBlocking"]);
+      }
       browser.webRequest.onBeforeRequest.addListener(onBeforeRequest as unknown as RequestListener, ALL_URLS);
       setInterval(() => void checkLock(), LOCK_CHECK_MS);
     }
