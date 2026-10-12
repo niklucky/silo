@@ -6,8 +6,8 @@
 //! ← {"err":{"code":"locked"}}
 //! ```
 
-use secret_core::crypto::PublicKey;
-use secret_core::vault::{FolderPath, SecretBody, SecretId, SecretKind, SecretMeta, Tag};
+use silo_core::crypto::PublicKey;
+use silo_core::vault::{FolderPath, SecretBody, SecretId, SecretKind, SecretMeta, Tag};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -155,11 +155,11 @@ pub enum Reply {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum AgentError {
-    #[error("vault is locked; run `secret unlock`")]
+    #[error("vault is locked; run `silo unlock`")]
     Locked,
     #[error("wrong password")]
     WrongPassword,
-    #[error("no account in {home}; run `secret init`")]
+    #[error("no account in {home}; run `silo init`")]
     NoAccount { home: String },
     #[error("no secret matches {selector:?}")]
     NotFound { selector: String },
@@ -184,10 +184,10 @@ pub enum AgentError {
     Internal { message: String },
 }
 
-impl From<secret_core::Error> for AgentError {
-    fn from(err: secret_core::Error) -> Self {
+impl From<silo_core::Error> for AgentError {
+    fn from(err: silo_core::Error) -> Self {
         match err {
-            secret_core::Error::Unlock => Self::WrongPassword,
+            silo_core::Error::Unlock => Self::WrongPassword,
             other => Self::Core {
                 message: other.to_string(),
             },

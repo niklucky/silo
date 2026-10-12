@@ -5,11 +5,11 @@ use std::process::Command as Process;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use secret_agent::protocol::{ListFilter, NewSecret, Reply, Request, SecretView, StatusInfo};
-use secret_agent::{Client, ClientError, Paths, Store, client, server};
-use secret_core::AccountRecord;
-use secret_core::crypto::KdfParams;
-use secret_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBody, Tag};
+use silo_agent::protocol::{ListFilter, NewSecret, Reply, Request, SecretView, StatusInfo};
+use silo_agent::{Client, ClientError, Paths, Store, client, server};
+use silo_core::AccountRecord;
+use silo_core::crypto::KdfParams;
+use silo_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBody, Tag};
 use zeroize::Zeroize;
 
 use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand};
@@ -104,7 +104,7 @@ fn unlock(ttl: Option<Duration>) -> Result<()> {
     let store = Store::open(paths.clone())?;
     if !store.has_account() {
         bail!(
-            "no account in {}; run `secret init`",
+            "no account in {}; run `silo init`",
             paths.home().display()
         );
     }
@@ -172,9 +172,9 @@ fn status(json: bool) -> Result<()> {
             println!(
                 "Account: {}",
                 if has_account {
-                    "present (run `secret unlock`)"
+                    "present (run `silo unlock`)"
                 } else {
-                    "none (run `secret init`)"
+                    "none (run `silo init`)"
                 }
             );
         }
@@ -185,7 +185,7 @@ fn status(json: bool) -> Result<()> {
             );
             println!("Home:        {}", info.home);
             if !info.has_account {
-                println!("Account:     none (run `secret init`)");
+                println!("Account:     none (run `silo init`)");
             } else if info.unlocked {
                 let expires = info.expires_in_secs.map_or("no expiry".to_owned(), |s| {
                     format!("locks in {}", format::duration(Duration::from_secs(s)))
@@ -199,7 +199,7 @@ fn status(json: bool) -> Result<()> {
                     info.fingerprint.as_deref().unwrap_or("?")
                 );
             } else {
-                println!("Vault:       locked (run `secret unlock`)");
+                println!("Vault:       locked (run `silo unlock`)");
             }
         }
     }
@@ -248,7 +248,7 @@ fn connect(paths: &Paths) -> Result<Client, AgentUnavailable> {
 /// hint the agent gives when locked.
 pub(crate) fn connected() -> Result<Client> {
     let paths = Paths::from_env()?;
-    connect(&paths).map_err(|AgentUnavailable| anyhow!("vault is locked; run `secret unlock`"))
+    connect(&paths).map_err(|AgentUnavailable| anyhow!("vault is locked; run `silo unlock`"))
 }
 
 pub(crate) fn unexpected(reply: Reply) -> anyhow::Error {
@@ -261,7 +261,7 @@ fn ls(
     folder: Option<String>,
     exact: bool,
     tag: Option<String>,
-    kind: Option<secret_core::vault::SecretKind>,
+    kind: Option<silo_core::vault::SecretKind>,
     json: bool,
 ) -> Result<()> {
     let filter = ListFilter {
@@ -482,8 +482,8 @@ fn history(selector: &str, revision: Option<u32>, json: bool) -> Result<()> {
         "{}",
         format::table(&["REVISION", "SAVED", "PATH", "USERNAME"], &rows)
     );
-    println!("Show one with: secret history {selector} --revision <n>");
-    println!("Bring one back with: secret restore {selector} --revision <n>");
+    println!("Show one with: silo history {selector} --revision <n>");
+    println!("Bring one back with: silo restore {selector} --revision <n>");
     Ok(())
 }
 
@@ -531,7 +531,7 @@ fn print_view(view: &SecretView) {
         }
         SecretBody::File(file) => {
             println!(
-                "  file:     {} ({} bytes); use `secret file pull {}`",
+                "  file:     {} ({} bytes); use `silo file pull {}`",
                 file.name,
                 file.data.len(),
                 view.path()
@@ -650,7 +650,7 @@ fn match_url(url: &str, site: bool, json: bool) -> Result<()> {
     }
     if items.is_empty() {
         println!("No logins match {url}.");
-        println!("Save one with: secret add login <folder/title> -u <user> --url <pattern>");
+        println!("Save one with: silo add login <folder/title> -u <user> --url <pattern>");
         return Ok(());
     }
     let rows: Vec<Vec<String>> = items

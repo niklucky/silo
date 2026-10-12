@@ -1,4 +1,4 @@
-# Secret
+# Silo
 
 Self-hosted secrets manager for people and projects. Website logins, bank cards,
 environment variables and secret files, with nested folders, tags, sharing you can
@@ -12,21 +12,21 @@ later mobile.
 ```
 Cargo.toml                 Cargo workspace (resolver 3, edition 2024)
 crates/
-  core/                    secret-core: crypto, vault model, sync protocol. No platform IO.
-  agent/                   secret-agent: on-disk store, unlock session, Unix-socket protocol, client
-  cli/                     secret (CLI, clap) and secret-native-host (browser bridge)
-  server/                  secret-server: axum + SQLite (SQLite not wired yet)
-  wasm/                    secret-wasm: wasm-bindgen surface over core for the extension
+  core/                    silo-core: crypto, vault model, sync protocol. No platform IO.
+  agent/                   silo-agent: on-disk store, unlock session, Unix-socket protocol, client
+  cli/                     silo (CLI, clap) and silo-native-host (browser bridge)
+  server/                  silo-server: axum + SQLite (SQLite not wired yet)
+  wasm/                    silo-wasm: wasm-bindgen surface over core for the extension
 apps/
   desktop/                 Tauri 2 + React + Vite; src-tauri/ is a workspace member
   extension/               WXT + React; Firefox/Zen (MV2), Chrome (MV3) and Safari (MV2) builds
   safari/                  Xcode project wrapping the Safari build, with the Swift bridge to the agent
 packages/
-  ui/                      @secret/ui: shared React components
-  bindings/                @secret/bindings: generated TS types (tauri-specta, wasm-bindgen)
+  ui/                      @silo/ui: shared React components
+  bindings/                @silo/bindings: generated TS types (tauri-specta, wasm-bindgen)
 scripts/
   build-wasm.sh            cargo build --target wasm32 + wasm-bindgen → packages/bindings/wasm
-  build-safari.sh          Safari build + xcodebuild → apps/safari/build/Secret for Safari.app
+  build-safari.sh          Safari build + xcodebuild → apps/safari/build/Silo for Safari.app
   basic-auth-server.py     local HTTP Basic Auth playground for testing the extension
   login-form-server.py     local login form playground (sign-in, sign-up, change password, iframe)
 ```
@@ -54,15 +54,15 @@ means that field needs raising.
 | Task                                   | Command                                   |
 | -------------------------------------- | ----------------------------------------- |
 | Build and test native crates           | `cargo build` · `cargo test`              |
-| Run the CLI                            | `cargo run -p secret-cli -- version`      |
-| Run the server                         | `cargo run -p secret-server` then `curl localhost:8787/health` |
+| Run the CLI                            | `cargo run -p silo-cli -- version`      |
+| Run the server                         | `cargo run -p silo-server` then `curl localhost:8787/health` |
 | Build WASM + JS glue                   | `pnpm build:wasm`                         |
 | Regenerate desktop TS bindings         | `pnpm bindings:desktop`                   |
 | Desktop app, dev mode                  | `pnpm dev:desktop`                        |
-| Extension, build for Firefox / Zen     | `pnpm --filter @secret/extension build:firefox` → `apps/extension/.output/firefox-mv2` |
+| Extension, build for Firefox / Zen     | `pnpm --filter @silo/extension build:firefox` → `apps/extension/.output/firefox-mv2` |
 | Extension, build for Chrome            | `pnpm build:extension` → `apps/extension/.output/chrome-mv3` |
-| Extension, build for Safari            | `pnpm build:safari` → `apps/safari/build/Secret for Safari.app` |
-| Extension, dev mode with live reload   | `pnpm --filter @secret/extension dev:firefox` or `pnpm dev:extension` |
+| Extension, build for Safari            | `pnpm build:safari` → `apps/safari/build/Silo for Safari.app` |
+| Extension, dev mode with live reload   | `pnpm --filter @silo/extension dev:firefox` or `pnpm dev:extension` |
 | Basic Auth test server                 | `python3 scripts/basic-auth-server.py` → http://localhost:8099 |
 | Login form test server                 | `python3 scripts/login-form-server.py` → http://localhost:8200 |
 | Type-check all TS packages             | `pnpm typecheck`                          |
@@ -73,52 +73,52 @@ built by `pnpm build:wasm`; the desktop crate by the Tauri CLI.
 ## Using the CLI
 
 ```sh
-secret init                                   # create ~/.secret, unlock
-secret add env projects/api/dev-env DB_URL=postgres://localhost/api API_KEY=sk-test
-secret add env projects/api/prod-env --from-file .env.prod
-secret add login work/github --username me --url https://github.com --tag dev
-secret add file projects/api/deploy-key ./id_ed25519
-echo "pin 1234" | secret add note personal/bank --tag money
+silo init                                     # create ~/.silo, unlock
+silo add env projects/api/dev-env DB_URL=postgres://localhost/api API_KEY=sk-test
+silo add env projects/api/prod-env --from-file .env.prod
+silo add login work/github --username me --url https://github.com --tag dev
+silo add file projects/api/deploy-key ./id_ed25519
+echo "pin 1234" | silo add note personal/bank --tag money
 
-secret ls                                     # everything, as a table
-secret ls projects/api --kind env             # filter by folder, kind, --tag
-secret get work/github                        # id, folder/title path, or a unique title
-secret get work/github --field password       # one value, for piping
-secret run projects/api/dev-env -- npm start  # inject env vars, exec the command
-secret export dev-env > .env                  # dotenv; also --format shell|json
-secret file pull deploy-key -o ./id_ed25519
+silo ls                                       # everything, as a table
+silo ls projects/api --kind env               # filter by folder, kind, --tag
+silo get work/github                          # id, folder/title path, or a unique title
+silo get work/github --field password         # one value, for piping
+silo run projects/api/dev-env -- npm start    # inject env vars, exec the command
+silo export dev-env > .env                    # dotenv; also --format shell|json
+silo file pull deploy-key -o ./id_ed25519
 
-secret edit work/github                        # asks field by field; Enter keeps a value
-secret edit work/github -p                     # new password, prompted twice; -g generates one
-secret edit work/github --add-url gist.github.com --rm-tag dev --path personal/github
-secret edit projects/api/dev-env API_KEY=sk-new --unset OLD_KEY
+silo edit work/github                         # asks field by field; Enter keeps a value
+silo edit work/github -p                      # new password, prompted twice; -g generates one
+silo edit work/github --add-url gist.github.com --rm-tag dev --path personal/github
+silo edit projects/api/dev-env API_KEY=sk-new --unset OLD_KEY
 
-secret match https://dev.example.com/admin     # which logins the extension would use
-secret match https://dev.example.com --site    # plus logins for example.com, admin.example.com, …
-secret history work/github                     # earlier revisions; --revision N shows one
-secret restore work/github                     # undo the last change; --revision N for an older one
-secret import ~/Desktop/Passwords.csv -n       # preview an import; drop -n to run it
-secret lock | secret unlock --ttl 8h | secret status | secret agent stop
-secret browser install | secret browser status # connect browsers, see below
+silo match https://dev.example.com/admin      # which logins the extension would use
+silo match https://dev.example.com --site     # plus logins for example.com, admin.example.com, …
+silo history work/github                      # earlier revisions; --revision N shows one
+silo restore work/github                      # undo the last change; --revision N for an older one
+silo import ~/Desktop/Passwords.csv -n        # preview an import; drop -n to run it
+silo lock | silo unlock --ttl 8h | silo status | silo agent stop
+silo browser install | silo browser status    # connect browsers, see below
 ```
 
-The first `secret unlock` (or `secret init`) starts `secret agent run` detached in its
+The first `silo unlock` (or `silo init`) starts `silo agent run` detached in its
 own session. The agent holds the unlocked keys in memory, auto-locks after the TTL
-(default 12h), and serves every other command over `~/.secret/agent.sock`. Clients
+(default 12h), and serves every other command over `~/.silo/agent.sock`. Clients
 never see a key; they receive decrypted secrets over the socket, which file
 permissions restrict to your user.
 
 | Variable              | Purpose                                              |
 | --------------------- | ---------------------------------------------------- |
-| `SECRET_HOME`         | Data directory (default `~/.secret`)                 |
-| `SECRET_AGENT_SOCKET` | Socket path (default `$SECRET_HOME/agent.sock`)      |
-| `SECRET_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
+| `SILO_HOME`         | Data directory (default `~/.silo`)                 |
+| `SILO_AGENT_SOCKET` | Socket path (default `$SILO_HOME/agent.sock`)      |
+| `SILO_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
 
 Unix only for now (sockets, file modes). Windows needs named pipes; later.
 
 ### Importing
 
-`secret import FILE` reads a CSV export from Apple Passwords (Passwords → File →
+`silo import FILE` reads a CSV export from Apple Passwords (Passwords → File →
 Export All Passwords), Chrome, Firefox or Bitwarden; columns are found by name.
 Each login goes where the extension would save it: `web/<host>` (`<host> (2)`
 when taken), filling on the site's origin, with notes and TOTP kept. Logins
@@ -136,21 +136,21 @@ shows its password dialog. It holds no keys: it asks the agent, through a
 native-messaging bridge, for the best login for the URL being loaded.
 
 ```
-browser ──native messaging──▶ secret-native-host ──unix socket──▶ secret agent
+browser ──native messaging──▶ silo-native-host ──unix socket──▶ silo agent
           (stdio, 4-byte length + JSON)                 (same protocol as the CLI)
 ```
 
 Setup, once per machine:
 
 ```sh
-cargo install --path crates/cli --locked   # installs secret and secret-native-host
-secret init                                # if you have no account yet
-secret browser install                     # writes manifests for every browser found
-secret browser status
+cargo install --path crates/cli --locked   # installs silo and silo-native-host
+silo init                                  # if you have no account yet
+silo browser install                       # writes manifests for every browser found
+silo browser status
 ```
 
-`secret browser install` writes `dev.secret.agent.json` into each browser's
-native-messaging directory, naming the absolute path of `secret-native-host` and
+`silo browser install` writes `dev.silo.agent.json` into each browser's
+native-messaging directory, naming the absolute path of `silo-native-host` and
 the one extension id allowed to start it. Zen reads Firefox's directory
 ([zen-browser/desktop#10622](https://github.com/zen-browser/desktop/issues/10622)),
 so it gets both. Flatpak or Snap browsers need `--browser <name> --dir <path>`.
@@ -158,7 +158,7 @@ Reinstalling the CLI to a different path means running `install` again.
 
 Load the extension:
 
-- **Zen / Firefox:** `pnpm --filter @secret/extension build:firefox`, open
+- **Zen / Firefox:** `pnpm --filter @silo/extension build:firefox`, open
   `about:debugging#/runtime/this-firefox`, *Load Temporary Add-on*, pick
   `apps/extension/.output/firefox-mv2/manifest.json`. Temporary add-ons vanish on
   restart; a signed build comes later.
@@ -166,33 +166,33 @@ Load the extension:
   mode, *Load unpacked*, pick `apps/extension/.output/chrome-mv3`. The manifest
   pins a public key so the id is the same on every machine.
 - **Safari:** `pnpm build:safari` builds the extension, wraps it in
-  `apps/safari/build/Secret for Safari.app` and opens the app once so Safari
+  `apps/safari/build/Silo for Safari.app` and opens the app once so Safari
   registers it; close the window, but leave the app where it is. The build is
   signed ad hoc, so turn on Settings → Advanced → *Show features for web
   developers*, then Develop → Developer Settings → *Allow unsigned extensions*
-  (Safari turns it off when it quits). Enable **Secret** under Settings →
-  Extensions and allow it on every website. `secret browser install` is not
+  (Safari turns it off when it quits). Enable **Silo** under Settings →
+  Extensions and allow it on every website. `silo browser install` is not
   needed: Safari reaches the agent through the app (see
   [How the bridges work](#how-the-bridges-work)). To sign with your own
-  certificate, set `SECRET_SAFARI_IDENTITY` and `SECRET_SAFARI_TEAM`.
+  certificate, set `SILO_SAFARI_IDENTITY` and `SILO_SAFARI_TEAM`.
 
 Save a login with the URL pattern the site should match, then visit it:
 
 ```sh
-secret add login dev/local -u nikita --url http://localhost:8099
+silo add login dev/local -u nikita --url http://localhost:8099
 python3 scripts/basic-auth-server.py        # then open http://localhost:8099/private
 ```
 
 Patterns: `host`, `host:port`, `*.example.com`, or a full `https://host/path`
 prefix. A bare host matches any scheme, port and path; an explicit scheme pins
 scheme and port; a path must match at a segment boundary. The most specific
-pattern wins; `secret match <url>` shows the ranking.
+pattern wins; `silo match <url>` shows the ranking.
 
 Browsers remember Basic Auth credentials they have used until they restart, and
 an extension can neither read nor clear that cache. So the extension never
 feeds it: a `401` is answered by retrying the request with the extension's own
 `Authorization` header, and that header is re-checked with the agent on every
-navigation (and every 30 s for background requests). `secret lock` or `secret
+navigation (and every 30 s for background requests). `silo lock` or `silo
 rm` therefore takes effect on the next page load: the site asks again, the icon
 shows a badge, and the popup unlocks. The popup also lists recent challenges and
 what happened to each.
@@ -212,7 +212,7 @@ Chrome has no blocking request hooks, so the header comes from a
 `declarativeNetRequest` session rule per origin instead. The first `401` of a
 page load adds the rule and loads the page again; the sign-in page is reached
 the same way. The check with the agent cannot hold a request there, so after
-`secret rm` one more page loads with the old header before the tab moves to the
+`silo rm` one more page loads with the old header before the tab moves to the
 sign-in page. A lock from the popup removes the rules at once; a lock from the
 CLI or the agent's timeout is noticed within 5 seconds. Session rules end with
 the browser, like its own cache. Where a page cannot simply be loaded again (a
@@ -223,7 +223,7 @@ site is not a GET, or the challenge is not Basic.
 Safari has no `onAuthRequired` at all, so its own dialog opens on a `401`. The
 extension sees the response in a non-blocking `onHeadersReceived` and does what
 Chrome does: a session rule and the page loaded again, which closes the dialog,
-or the sign-in page. Lock and `secret rm` behave as on Chrome. Frames, fetches
+or the sign-in page. Lock and `silo rm` behave as on Chrome. Frames, fetches
 and POSTs keep Safari's dialog.
 
 Not yet: proxy authentication, editing a saved login from the browser.
@@ -246,7 +246,7 @@ opens in the same place. No extension can hide another extension's menu, so
 this is the way to run both.
 
 ```sh
-secret add login web/playground -u nikita --url localhost:8200
+silo add login web/playground -u nikita --url localhost:8200
 python3 scripts/login-form-server.py        # then open http://localhost:8200
 ```
 
@@ -273,7 +273,7 @@ estimated from the result.
 
 ### Saving what you sign in with
 
-When you send a login form with a username and password that Secret does not
+When you send a login form with a username and password that Silo does not
 have, a small panel in the top-right corner of the page asks *Save login for
 `<host>`?*. It appears on the page you land on, or on the same page when the
 site signs in without reloading (`fetch`), and stays offered for three minutes.
@@ -290,10 +290,10 @@ Nothing is stored until you answer:
 A login that already fills on the page with that exact username and password
 is not offered again. The two steps of a two-step sign-in are joined: the
 username sent on the first page goes with the password sent on the second. When
-the vault is locked the panel offers *Unlock Secret* and then asks again. A
+the vault is locked the panel offers *Unlock Silo* and then asks again. A
 form counts as sent on a trusted `submit`, a click on its submit button or on a
 button that reads like *Sign in*/*Continue*/*Next*, or Enter in one of its
-fields. Secret cannot tell whether the site accepted the password, so a typo
+fields. Silo cannot tell whether the site accepted the password, so a typo
 gets offered too; answer *Not now*.
 
 The typed password goes from the content script to the background, which keeps
@@ -310,7 +310,7 @@ username on the same site, it asks first, and nothing is filled until you answer
 - *Add a new login*: saved next to the existing ones, which stay as they are.
 - *Overwrite `web/example.com`*: that login gets the new password, and the
   page's origin is added to its URL patterns if it did not fill there already.
-  The agent keeps the replaced revision; `secret history web/example.com` lists
+  The agent keeps the replaced revision; `silo history web/example.com` lists
   it and `--revision N` shows it.
 
 "Same site" is the registrable domain from the public suffix list, so
@@ -348,16 +348,16 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
   `packages/bindings/src/desktop.ts`, which the React app imports as `commands.*`.
   Run `pnpm bindings:desktop` after changing a command; commit the result.
 - **Extension.** No Rust in the browser: `apps/extension/lib/agent.ts` opens one
-  native-messaging port to `secret-native-host`, which forwards each JSON request
+  native-messaging port to `silo-native-host`, which forwards each JSON request
   to the agent socket and refuses `shutdown`, `remove` and `history`. `lib/protocol.ts`
   mirrors the agent's wire types by hand. The extension id and host name live in
   both `wxt.config.ts` and `crates/cli/src/browser.rs`; change both or neither.
 - **Safari.** Safari cannot start a native host. `browser.runtime.sendNativeMessage`
-  goes to the app extension inside `Secret for Safari.app`
+  goes to the app extension inside `Silo for Safari.app`
   (`apps/safari/Extension/SafariWebExtensionHandler.swift`), which sends each
-  request to `~/.secret/agent.sock` and refuses the same three methods. Its
+  request to `~/.silo/agent.sock` and refuses the same three methods. Its
   sandbox allows connecting to that socket and nothing else
-  (`Extension.entitlements`). It cannot start the agent; run `secret unlock`
+  (`Extension.entitlements`). It cannot start the agent; run `silo unlock`
   first. The extension files are copied into the app at build time from
   `apps/extension/.output/safari-mv2`.
 - **WASM.** `crates/wasm` exports functions with `#[wasm_bindgen]` and
@@ -368,14 +368,14 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
 
 Core, agent and CLI are implemented and tested for local, single-user work. The
 extension fills HTTP Basic Auth and login forms in Firefox/Zen, Chrome and Safari. The desktop app still
-only round-trips `secret_core::version()`.
+only round-trips `silo_core::version()`.
 
-- **`secret-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
+- **`silo-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
   key), sealed secrets (fresh data key per revision, metadata and body sealed
   separately with XChaCha20-Poly1305, CBOR inside), grants (data key wrapped to a
   recipient public key). Every ciphertext is bound to its context through associated
   data. No IO; builds for `wasm32`.
-- **`secret-agent`.** `~/.secret` layout with 0700/0600 permissions and atomic
+- **`silo-agent`.** `~/.silo` layout with 0700/0600 permissions and atomic
   writes. `Session` opens every readable secret's metadata on unlock and bodies on
   demand. Line-delimited JSON protocol over a Unix socket with `status`, `unlock`,
   `lock`, `shutdown`, `list`, `get`, `add`, `update`, `remove`, `history`,
@@ -384,9 +384,9 @@ only round-trips `secret_core::version()`.
   and archives the replaced revision under `vault/history/<id>/`. Selector
   resolution by id, `folder/title` path, or unique title. Client with detached
   spawn.
-- **`secret`.** init, unlock, lock, status, agent run/stop, ls, add
+- **`silo`.** init, unlock, lock, status, agent run/stop, ls, add
   login/env/file/note, get, edit, restore, import, rm, run, export, file pull, history, match, browser
-  install/uninstall/status. `secret-native-host` bridges browsers to the agent.
+  install/uninstall/status. `silo-native-host` bridges browsers to the agent.
 - **Extension.** Firefox: `onHeadersReceived` retries a Basic `401` with an
   injected `Authorization` header, re-validated per navigation, so the browser
   cache stays empty and lock/remove work. Chrome: `onAuthRequired` with
@@ -414,8 +414,8 @@ Known gaps:
   browser process sees them in transit, as any extension-based unlock would.
 - Replies over native messaging are capped at 1 MiB, so `get` of a large file
   secret fails through the bridge (fine for the CLI).
-- The Safari bridge only knows the default socket path; `SECRET_HOME` and
-  `SECRET_AGENT_SOCKET` are not seen inside the sandbox.
+- The Safari bridge only knows the default socket path; `SILO_HOME` and
+  `SILO_AGENT_SOCKET` are not seen inside the sandbox.
 
 Next steps, in order:
 

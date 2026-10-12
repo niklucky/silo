@@ -11,8 +11,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use secret_core::AccountRecord;
-use secret_core::vault::{Grant, SealedSecret, SecretId};
+use silo_core::AccountRecord;
+use silo_core::vault::{Grant, SealedSecret, SecretId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,7 @@ pub enum StoreError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("no account in {0}; run `secret init`")]
+    #[error("no account in {0}; run `silo init`")]
     NoAccount(PathBuf),
 }
 
@@ -214,9 +214,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use rand::SeedableRng;
-    use secret_core::crypto::KdfParams;
-    use secret_core::vault::SecretKind;
-    use secret_core::vault::{FolderPath, Note, SecretBody, SecretMeta};
+    use silo_core::crypto::KdfParams;
+    use silo_core::vault::SecretKind;
+    use silo_core::vault::{FolderPath, Note, SecretBody, SecretMeta};
 
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777

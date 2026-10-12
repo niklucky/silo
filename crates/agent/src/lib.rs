@@ -1,4 +1,4 @@
-//! `secret-agent`: the local vault service.
+//! `silo-agent`: the local vault service.
 //!
 //! One agent process per user holds the unlocked account keys and the data key of
 //! every readable secret. Clients (the CLI today, desktop app and extension later)
@@ -6,10 +6,10 @@
 //! [`protocol`] for the wire types and [`store`] for the on-disk layout.
 //!
 //! ```text
-//! $SECRET_HOME            default ~/.secret, mode 0700
+//! $SILO_HOME              default ~/.silo, mode 0700
 //! ├── account.json        AccountRecord: KDF params, public key, wrapped secret key
 //! ├── vault/<id>.json     StoredSecret: latest SealedSecret plus its grants
-//! ├── agent.sock          Unix socket, mode 0600  (override: SECRET_AGENT_SOCKET)
+//! ├── agent.sock          Unix socket, mode 0600  (override: SILO_AGENT_SOCKET)
 //! └── agent.log           stdout/stderr of a detached agent
 //! ```
 //!

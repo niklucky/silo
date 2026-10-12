@@ -1,4 +1,4 @@
-//! `secret import`: logins from a password manager's CSV export. Columns are
+//! `silo import`: logins from a password manager's CSV export. Columns are
 //! found by name, so exports from Apple Passwords, Chrome, Firefox and
 //! Bitwarden all work. New logins go where the extension saves them,
 //! `web/<host>` filling on the site's origin, and logins already in the vault
@@ -8,9 +8,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use secret_agent::Client;
-use secret_agent::protocol::{ListFilter, NewSecret, Reply, Request, SecretUpdate};
-use secret_core::vault::{
+use silo_agent::Client;
+use silo_agent::protocol::{ListFilter, NewSecret, Reply, Request, SecretUpdate};
+use silo_core::vault::{
     FolderPath, Login, SecretBody, SecretId, SecretKind, Tag, Url, url_match,
 };
 

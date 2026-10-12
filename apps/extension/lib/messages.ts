@@ -47,7 +47,7 @@ export interface UpdateTarget extends SameSiteLogin {
 
 /**
  * Shown in the tab's top frame after the user signed in with a login that
- * Secret does not have. The password stays in the background.
+ * Silo does not have. The password stays in the background.
  */
 export interface SaveOffer {
   id: string;

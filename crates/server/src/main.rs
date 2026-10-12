@@ -5,7 +5,7 @@ const DEFAULT_ADDR: &str = "127.0.0.1:8787";
 
 #[tokio::main]
 async fn main() {
-    let addr = std::env::var("SECRET_SERVER_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
+    let addr = std::env::var("SILO_SERVER_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
 
     let app = Router::new().route("/health", get(health));
 
@@ -13,7 +13,7 @@ async fn main() {
         .await
         .unwrap_or_else(|err| panic!("failed to bind {addr}: {err}"));
 
-    println!("secret-server listening on http://{addr}");
+    println!("silo-server listening on http://{addr}");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -25,7 +25,7 @@ async fn health() -> Json<Value> {
     Json(json!({
         "status": "ok",
         "server": env!("CARGO_PKG_VERSION"),
-        "core": secret_core::version(),
+        "core": silo_core::version(),
     }))
 }
 

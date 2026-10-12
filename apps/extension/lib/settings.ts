@@ -7,7 +7,7 @@ export type Trigger = "menu" | "button";
 
 export interface Settings {
   trigger: Trigger;
-  /** Offer to save the login after the user signs in with one Secret does not have. */
+  /** Offer to save the login after the user signs in with one Silo does not have. */
   offerToSave: boolean;
   /** Origins where the user chose "Never for this site". */
   neverSave: string[];

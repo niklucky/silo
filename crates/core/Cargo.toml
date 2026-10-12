@@ -1,5 +1,5 @@
 [package]
-name = "secret-core"
+name = "silo-core"
 description = "Platform-independent core: crypto, vault model and sync protocol"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [lib]
-name = "secret_core"
+name = "silo_core"
 
 # Every crypto crate has its `getrandom` feature disabled on purpose: randomness
 # is injected by the host, and getrandom does not build for wasm32 without extra cfg.

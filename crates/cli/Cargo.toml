@@ -1,23 +1,23 @@
 [package]
-name = "secret-cli"
-description = "Command-line client for Secret"
+name = "silo-cli"
+description = "Command-line client for Silo"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "secret"
+name = "silo"
 path = "src/main.rs"
 
 # Started by browsers for the extension (native messaging); see src/browser.rs.
 [[bin]]
-name = "secret-native-host"
+name = "silo-native-host"
 path = "src/bin/native_host.rs"
 
 [dependencies]
-secret-agent.workspace = true
-secret-core.workspace = true
+silo-agent.workspace = true
+silo-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 csv.workspace = true

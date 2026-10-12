@@ -1,7 +1,7 @@
 export type CoreVersionProps = {
   /** Which host loaded the Rust core. */
   host: "desktop" | "extension";
-  /** Version string from `secret_core::version()`, or null while loading. */
+  /** Version string from `silo_core::version()`, or null while loading. */
   version: string | null;
   error?: string | null;
 };

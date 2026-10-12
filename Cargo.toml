@@ -19,8 +19,8 @@ rust-version = "1.90"
 publish = false
 
 [workspace.dependencies]
-secret-core = { path = "crates/core" }
-secret-agent = { path = "crates/agent" }
+silo-core = { path = "crates/core" }
+silo-agent = { path = "crates/agent" }
 
 # shared
 serde = { version = "1", features = ["derive"] }

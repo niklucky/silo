@@ -216,11 +216,11 @@ export default defineContentScript({
           use(target, fresh, option, done, false);
           return;
         }
-        if (response.kind === "locked") unsaved = "Secret got locked";
+        if (response.kind === "locked") unsaved = "Silo got locked";
         else if (response.kind === "failed") unsaved = `saving failed: ${response.message}`;
-        else unsaved = "Secret is not reachable";
+        else unsaved = "Silo is not reachable";
       } else {
-        unsaved = saving === "locked" ? "Secret is locked" : "Secret is not reachable";
+        unsaved = saving === "locked" ? "Silo is locked" : "Silo is not reachable";
       }
       use(target, fresh, option, `Filled but not saved: ${unsaved}. Keep a copy before you leave the page.`, true);
     }
@@ -287,12 +287,12 @@ export default defineContentScript({
       if (response.kind === "saved") {
         prompt.note(response.updated ? `Updated ${response.path}` : `Saved as ${response.path}`);
       } else if (response.kind === "ok" && answer.kind === "never") {
-        prompt.note(`Secret will not offer to save logins on ${new URL(location.href).host} again. Settings can undo this.`);
+        prompt.note(`Silo will not offer to save logins on ${new URL(location.href).host} again. Settings can undo this.`);
       } else if (response.kind === "ok") {
         prompt.hide();
         return;
       } else {
-        const why = response.kind === "failed" ? response.message : "Secret is not reachable";
+        const why = response.kind === "failed" ? response.message : "Silo is not reachable";
         prompt.note(`Not saved: ${why}`, true);
       }
       clearTimeout(promptTimer);

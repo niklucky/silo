@@ -4,12 +4,12 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-cargo build -p secret-wasm --target wasm32-unknown-unknown --release
+cargo build -p silo-wasm --target wasm32-unknown-unknown --release
 
 wasm-bindgen \
   --target web \
   --out-dir packages/bindings/wasm \
-  --out-name secret_wasm \
-  target/wasm32-unknown-unknown/release/secret_wasm.wasm
+  --out-name silo_wasm \
+  target/wasm32-unknown-unknown/release/silo_wasm.wasm
 
 echo "wasm bindings written to packages/bindings/wasm"

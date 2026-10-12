@@ -2,13 +2,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use secret_core::vault::SecretKind;
+use silo_core::vault::SecretKind;
 
 use crate::browser::Browser;
 
 #[derive(Parser)]
 #[command(
-    name = "secret",
+    name = "silo",
     version,
     about = "Secrets manager for people and projects"
 )]
@@ -19,7 +19,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Create an account in SECRET_HOME (default ~/.secret) and unlock it
+    /// Create an account in SILO_HOME (default ~/.silo) and unlock it
     Init,
     /// Unlock the vault, starting the agent if needed
     Unlock {
@@ -84,7 +84,7 @@ pub enum Command {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Run a command with one or more env sets injected: secret run api/dev -- npm start
+    /// Run a command with one or more env sets injected: silo run api/dev -- npm start
     Run {
         #[arg(required = true)]
         selectors: Vec<String>,
@@ -169,7 +169,7 @@ pub enum BrowserCommand {
 
 #[derive(Subcommand)]
 pub enum AgentCommand {
-    /// Run the agent in the foreground (what `secret unlock` spawns detached)
+    /// Run the agent in the foreground (what `silo unlock` spawns detached)
     Run,
     /// Stop the running agent
     Stop,

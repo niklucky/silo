@@ -252,7 +252,7 @@ impl State {
     fn status(&self) -> StatusInfo {
         StatusInfo {
             agent_version: crate::VERSION.to_owned(),
-            core_version: secret_core::version().to_owned(),
+            core_version: silo_core::version().to_owned(),
             home: self.store.paths().home().display().to_string(),
             has_account: self.store.has_account(),
             unlocked: self.session.is_some(),
@@ -278,9 +278,9 @@ mod tests {
     use crate::paths::Paths;
     use crate::protocol::{ListFilter, NewSecret};
     use rand::SeedableRng;
-    use secret_core::AccountRecord;
-    use secret_core::crypto::KdfParams;
-    use secret_core::vault::{FolderPath, Note, SecretBody};
+    use silo_core::AccountRecord;
+    use silo_core::crypto::KdfParams;
+    use silo_core::vault::{FolderPath, Note, SecretBody};
 
     #[test]
     fn end_to_end_over_the_socket() {

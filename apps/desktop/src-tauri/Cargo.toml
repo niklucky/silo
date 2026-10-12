@@ -1,6 +1,6 @@
 [package]
-name = "secret-desktop"
-description = "Secret desktop app (Tauri 2)"
+name = "silo-desktop"
+description = "Silo desktop app (Tauri 2)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,14 @@ publish.workspace = true
 
 [lib]
 # `_lib` suffix keeps the lib name distinct from the bin name (matters on Windows).
-name = "secret_desktop_lib"
+name = "silo_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build.workspace = true
 
 [dependencies]
-secret-core.workspace = true
+silo-core.workspace = true
 tauri.workspace = true
 tauri-specta.workspace = true
 specta.workspace = true

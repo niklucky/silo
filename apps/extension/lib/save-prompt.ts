@@ -4,7 +4,7 @@ import type { OfferAnswer, SaveOffer } from "./messages";
 
 /**
  * The "Save login?" panel in the top-right corner of the page, shown after
- * the user signs in with a login Secret does not have. Same rules as the
+ * the user signs in with a login Silo does not have. Same rules as the
  * menu: closed shadow root, trusted clicks only. It never holds the password.
  */
 
@@ -48,7 +48,7 @@ export class SavePrompt {
   private busy = false;
 
   constructor(private readonly actions: SavePromptActions) {
-    this.host = document.createElement("secret-save-prompt");
+    this.host = document.createElement("silo-save-prompt");
     this.host.style.setProperty("all", "initial", "important");
     const root = this.host.attachShadow({ mode: "closed" });
     const style = document.createElement("style");
@@ -56,7 +56,7 @@ export class SavePrompt {
     this.box = document.createElement("div");
     this.box.className = "panel";
     this.box.setAttribute("role", "dialog");
-    this.box.setAttribute("aria-label", "Secret");
+    this.box.setAttribute("aria-label", "Silo");
     root.append(style, this.box);
   }
 
@@ -92,7 +92,7 @@ export class SavePrompt {
       text("div", "who", username ? `Signed in as ${username}` : "Signed in without a username"),
     ];
     if (offer.locked) {
-      nodes.push(this.option("Unlock Secret", "Then choose how to save it", () => this.actions.unlock()));
+      nodes.push(this.option("Unlock Silo", "Then choose how to save it", () => this.actions.unlock()));
     } else if (logins.length === 0) {
       nodes.push(this.option("Save", "As a new login in web/", () => this.answer({ kind: "new" })));
     } else {

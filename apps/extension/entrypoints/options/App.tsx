@@ -12,7 +12,7 @@ const TRIGGERS: { value: Trigger; title: string; detail: string }[] = [
     value: "button",
     title: "Show a button",
     detail:
-      "A small Secret key appears inside the field; click it for the menu. Pick this when another " +
+      "A small Silo key appears inside the field; click it for the menu. Pick this when another " +
       "password manager, such as Apple Passwords, opens its own menu in the same place.",
   },
 ];
@@ -38,7 +38,7 @@ export default function App() {
 
   return (
     <main>
-      <h1>Secret settings</h1>
+      <h1>Silo settings</h1>
       {settings && (
         <fieldset>
           <legend>Login and password fields</legend>
@@ -72,7 +72,7 @@ export default function App() {
             />
             <span>Offer to save logins when you sign in</span>
             <span className="muted">
-              After you sign in with a login Secret does not have, or with a new password for one it has, a
+              After you sign in with a login Silo does not have, or with a new password for one it has, a
               small panel asks whether to save it. Nothing is stored until you answer.
             </span>
           </label>

@@ -13,8 +13,8 @@ import type {
 } from "./protocol";
 import { describe, secretPath } from "./protocol";
 
-/** Name of the native messaging host; must match `secret browser install`. */
-export const HOST_NAME = "dev.secret.agent";
+/** Name of the native messaging host; must match `silo browser install`. */
+export const HOST_NAME = "dev.silo.agent";
 
 /** The agent answered, with an error. */
 export class AgentError extends Error {
@@ -49,7 +49,7 @@ export interface Credentials {
 }
 
 /**
- * One native messaging port to `secret-native-host`, opened on first use and
+ * One native messaging port to `silo-native-host`, opened on first use and
  * reopened after a disconnect. The host answers strictly in order, so a FIFO
  * pairs replies with requests. Safari sends single messages instead.
  */
@@ -93,7 +93,7 @@ export class Agent {
     } catch (err) {
       throw new BridgeError(err instanceof Error ? err.message : String(err));
     }
-    if (!reply) throw new BridgeError("no reply from the Secret for Safari app");
+    if (!reply) throw new BridgeError("no reply from the Silo for Safari app");
     if ("bridge_error" in reply) throw new BridgeError(reply.bridge_error);
     return reply;
   }

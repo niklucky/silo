@@ -137,7 +137,7 @@ export default function App() {
   if (phase.step === "unknown") {
     return (
       <main className="card">
-        <h1>Secret</h1>
+        <h1>Silo</h1>
         <p>Nothing to do here.</p>
         <p className="muted">
           This page opens by itself when a site asks for a password. You can close it.

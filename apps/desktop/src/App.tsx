@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { commands } from "@secret/bindings/desktop";
-import { CoreVersion } from "@secret/ui";
+import { commands } from "@silo/bindings/desktop";
+import { CoreVersion } from "@silo/ui";
 
 export default function App() {
   const [version, setVersion] = useState<string | null>(null);
@@ -15,7 +15,7 @@ export default function App() {
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: 24 }}>
-      <h1>Secret</h1>
+      <h1>Silo</h1>
       <CoreVersion host="desktop" version={version} error={error} />
     </main>
   );

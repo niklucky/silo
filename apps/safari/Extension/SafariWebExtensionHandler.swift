@@ -2,7 +2,7 @@ import Foundation
 import SafariServices
 import os.log
 
-/// Safari's `secret-native-host`. Safari cannot start a native messaging host,
+/// Safari's `silo-native-host`. Safari cannot start a native messaging host,
 /// so `browser.runtime.sendNativeMessage` lands here instead, one request per
 /// message. Each one is forwarded to the agent socket as a JSON line and the
 /// agent's reply goes back unchanged.
@@ -10,7 +10,7 @@ import os.log
 /// Transport failures come back as `{"bridge_error": "..."}`, which the
 /// extension reports the way it reports a missing native host elsewhere.
 final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
-    private static let log = Logger(subsystem: "dev.secret.safari.extension", category: "bridge")
+    private static let log = Logger(subsystem: "dev.silo.safari.extension", category: "bridge")
 
     func beginRequest(with context: NSExtensionContext) {
         let item = context.inputItems.first as? NSExtensionItem
@@ -53,13 +53,13 @@ struct BridgeFailure: Error {
     let message: String
 }
 
-/// One connection per request to `~/.secret/agent.sock`, the only socket the
+/// One connection per request to `~/.silo/agent.sock`, the only socket the
 /// sandbox lets this extension reach (see Extension.entitlements).
 enum AgentSocket {
     /// The real home directory: inside the sandbox `HOME` is the container.
     static var path: String {
         let home = getpwuid(getuid()).flatMap { String(validatingCString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
-        return home + "/.secret/agent.sock"
+        return home + "/.silo/agent.sock"
     }
 
     static func call(_ line: Data) throws -> Data {
@@ -83,7 +83,7 @@ enum AgentSocket {
         }
         guard connected == 0 else {
             if errno == ENOENT || errno == ECONNREFUSED {
-                throw BridgeFailure(message: "the Secret agent is not running (\(path))")
+                throw BridgeFailure(message: "the Silo agent is not running (\(path))")
             }
             throw BridgeFailure(message: "cannot reach the agent at \(path): \(errnoText())")
         }

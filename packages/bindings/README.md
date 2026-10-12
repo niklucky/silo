@@ -1,4 +1,4 @@
-# @secret/bindings
+# @silo/bindings
 
 Generated TypeScript surface over the Rust core. Do not edit by hand.
 

@@ -1,15 +1,15 @@
 [package]
-name = "secret-wasm"
-description = "wasm-bindgen surface over secret-core for the browser extension"
+name = "silo-wasm"
+description = "wasm-bindgen surface over silo-core for the browser extension"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [lib]
-name = "secret_wasm"
+name = "silo_wasm"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-secret-core.workspace = true
+silo-core.workspace = true
 wasm-bindgen.workspace = true

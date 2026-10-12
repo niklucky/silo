@@ -3,9 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use secret_core::AccountKeys;
-use secret_core::crypto::{CryptoRng, DataKey, Fingerprint, PublicKey};
-use secret_core::vault::{Grant, SealedSecret, SecretId, SecretKind, SecretMeta, Url};
+use silo_core::AccountKeys;
+use silo_core::crypto::{CryptoRng, DataKey, Fingerprint, PublicKey};
+use silo_core::vault::{Grant, SealedSecret, SecretId, SecretKind, SecretMeta, Url};
 
 use crate::protocol::{
     AgentError, ListFilter, NewSecret, SecretSummary, SecretUpdate, SecretView, display_path,
@@ -154,10 +154,10 @@ impl Session {
                 .values()
                 .filter(|entry| entry.meta.kind == SecretKind::Login)
         };
-        let mut scored: Vec<(secret_core::vault::UrlMatch, SecretSummary)> = logins()
+        let mut scored: Vec<(silo_core::vault::UrlMatch, SecretSummary)> = logins()
             .filter_map(|entry| {
                 let patterns = entry.meta.urls.iter().map(String::as_str);
-                secret_core::vault::best_url_match(patterns, &target)
+                silo_core::vault::best_url_match(patterns, &target)
                     .map(|score| (score, entry.summary()))
             })
             .collect();
@@ -176,7 +176,7 @@ impl Session {
                         .meta
                         .urls
                         .iter()
-                        .any(|pattern| secret_core::vault::same_site(pattern, &target))
+                        .any(|pattern| silo_core::vault::same_site(pattern, &target))
                 })
                 .map(Entry::summary)
                 .collect();
@@ -406,9 +406,9 @@ mod tests {
     use crate::paths::Paths;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
-    use secret_core::AccountRecord;
-    use secret_core::crypto::KdfParams;
-    use secret_core::vault::{
+    use silo_core::AccountRecord;
+    use silo_core::crypto::KdfParams;
+    use silo_core::vault::{
         EnvSet, EnvVar, FolderPath, Login, Note, SecretBody, SecretKind, Tag,
     };
 

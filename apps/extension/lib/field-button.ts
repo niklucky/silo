@@ -1,5 +1,5 @@
 /**
- * The small Secret button inside a login field, for the "show button" setting:
+ * The small Silo button inside a login field, for the "show button" setting:
  * the menu opens only when it is clicked, which leaves the field's focus to
  * other password managers (Apple Passwords, the browser's own). Closed shadow
  * root and trusted clicks only, like the menu.
@@ -54,15 +54,15 @@ export class FieldButton {
   private readonly reposition = () => this.place();
 
   constructor(onClick: () => void) {
-    this.host = document.createElement("secret-fill-button");
+    this.host = document.createElement("silo-fill-button");
     this.host.style.setProperty("all", "initial", "important");
     const root = this.host.attachShadow({ mode: "closed" });
     const style = document.createElement("style");
     style.textContent = STYLE;
     this.button = document.createElement("button");
     this.button.type = "button";
-    this.button.title = "Secret";
-    this.button.setAttribute("aria-label", "Open Secret");
+    this.button.title = "Silo";
+    this.button.setAttribute("aria-label", "Open Silo");
     this.button.append(keyIcon());
     // Keep focus in the field.
     this.button.addEventListener("mousedown", (event) => event.preventDefault());

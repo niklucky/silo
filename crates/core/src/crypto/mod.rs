@@ -17,6 +17,10 @@
 //! revision, part, recipient), so blobs cannot be swapped between secrets or
 //! grants re-pointed at another account.
 //!
+//! Domain-separation strings (`b"secret/v1/..."`) predate the rename to Silo and
+//! stay as they are: they are part of the ciphertext format, and changing them
+//! would make every existing vault unreadable.
+//!
 //! Randomness is always supplied by the host through [`CryptoRng`]. Only vetted
 //! RustCrypto primitives are used; nothing here is a custom construction beyond
 //! the standard ECIES-style key wrap in [`WrappedKey`].

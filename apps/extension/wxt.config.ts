@@ -1,7 +1,7 @@
 import { defineConfig } from "wxt";
 
 // Both ids are baked into the native messaging manifests that
-// `secret browser install` writes (crates/cli/src/browser.rs). Change both or neither.
+// `silo browser install` writes (crates/cli/src/browser.rs). Change both or neither.
 const FIREFOX_ID = "{a0c28bb5-d123-45d0-bc03-db1ac9a0a61d}";
 // Public half of a throwaway RSA key. Pinning it gives every unpacked Chrome
 // build the same extension id: mhngnkbgjofcmibiepppmjmhdcfmkama.
@@ -12,7 +12,7 @@ const CHROME_KEY =
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   manifest: ({ browser }) => ({
-    name: "Secret",
+    name: "Silo",
     description:
       "Passwords, env vars and secret files, including HTTP Basic Auth autofill.",
     permissions: [

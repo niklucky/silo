@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use zeroize::Zeroizing;
 
 /// Env var that bypasses the password prompt, for scripts and CI.
-pub const PASSWORD_ENV: &str = "SECRET_PASSWORD";
+pub const PASSWORD_ENV: &str = "SILO_PASSWORD";
 const MIN_PASSWORD_LEN: usize = 8;
 
 pub fn password(label: &str) -> Result<Zeroizing<String>> {
@@ -15,7 +15,7 @@ pub fn password(label: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(password))
 }
 
-/// A hidden answer. Unlike [`password`], never taken from SECRET_PASSWORD,
+/// A hidden answer. Unlike [`password`], never taken from SILO_PASSWORD,
 /// which holds the master password.
 pub fn hidden(label: &str) -> Result<Zeroizing<String>> {
     let answer = rpassword::prompt_password(format!("{label}: ")).context("reading password")?;

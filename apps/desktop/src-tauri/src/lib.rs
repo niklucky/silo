@@ -1,6 +1,6 @@
-//! Tauri host for Secret.
+//! Tauri host for Silo.
 //!
-//! Keep this crate thin: commands validate input and delegate to `secret_core`.
+//! Keep this crate thin: commands validate input and delegate to `silo_core`.
 //! Every command is registered in [`specta_builder`], which also produces the
 //! TypeScript bindings in `packages/bindings/src/desktop.ts`.
 
@@ -10,7 +10,7 @@ use tauri_specta::{Builder, collect_commands};
 #[tauri::command]
 #[specta::specta]
 fn core_version() -> String {
-    secret_core::version().to_owned()
+    silo_core::version().to_owned()
 }
 
 fn specta_builder() -> Builder<tauri::Wry> {

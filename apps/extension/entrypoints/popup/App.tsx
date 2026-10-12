@@ -121,7 +121,7 @@ export default function App() {
   return (
     <main>
       <header>
-        <h1>Secret</h1>
+        <h1>Silo</h1>
         <span className={`dot ${view.state}`} title={view.state} />
         <button
           className="settings"
@@ -139,7 +139,7 @@ export default function App() {
 
       {view.state === "bridge_error" && (
         <section>
-          <p>The extension can't reach the Secret agent.</p>
+          <p>The extension can't reach the Silo agent.</p>
           <pre className="error">{view.message}</pre>
           {import.meta.env.SAFARI ? (
             <ol>
@@ -147,7 +147,7 @@ export default function App() {
                 Install the CLI: <code>cargo install --path crates/cli --locked</code>
               </li>
               <li>
-                Start the agent: <code>secret unlock</code>
+                Start the agent: <code>silo unlock</code>
               </li>
             </ol>
           ) : (
@@ -156,7 +156,7 @@ export default function App() {
                 Install the CLI: <code>cargo install --path crates/cli --locked</code>
               </li>
               <li>
-                Connect this browser: <code>secret browser install</code>
+                Connect this browser: <code>silo browser install</code>
               </li>
               <li>Reload the extension.</li>
             </ol>
@@ -169,7 +169,7 @@ export default function App() {
         <section>
           <p>No account yet.</p>
           <p className="muted">
-            Run <code>secret init</code> in a terminal, then reopen this popup.
+            Run <code>silo init</code> in a terminal, then reopen this popup.
           </p>
           <button onClick={() => void refresh()}>Retry</button>
         </section>
@@ -207,7 +207,7 @@ export default function App() {
             <p className="muted">
               No login saved for this site. Add one:
               <br />
-              <code>secret add login dev/{host.split(":")[0]} -u USER --url {host}</code>
+              <code>silo add login dev/{host.split(":")[0]} -u USER --url {host}</code>
             </p>
           ) : (
             <ul className="matches">

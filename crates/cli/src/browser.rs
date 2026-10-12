@@ -1,5 +1,5 @@
-//! `secret browser …`: native messaging manifests that let the browser
-//! extension start `secret-native-host`.
+//! `silo browser …`: native messaging manifests that let the browser
+//! extension start `silo-native-host`.
 //!
 //! Browsers look for `<host name>.json` in fixed per-user directories. The
 //! manifest names the absolute path of the host binary and the one extension
@@ -17,9 +17,9 @@ use crate::args::BrowserCommand;
 use crate::format;
 
 /// Name the extension passes to `runtime.connectNative`.
-pub const HOST_NAME: &str = "dev.secret.agent";
-/// Binary next to `secret`, built from `src/bin/native_host.rs`.
-pub const HOST_BINARY: &str = "secret-native-host";
+pub const HOST_NAME: &str = "dev.silo.agent";
+/// Binary next to `silo`, built from `src/bin/native_host.rs`.
+pub const HOST_BINARY: &str = "silo-native-host";
 /// Must equal `browser_specific_settings.gecko.id` in `apps/extension/wxt.config.ts`.
 pub const FIREFOX_EXTENSION_ID: &str = "{a0c28bb5-d123-45d0-bc03-db1ac9a0a61d}";
 /// Derived from the `key` in `apps/extension/wxt.config.ts`; the same on every machine.
@@ -188,7 +188,7 @@ impl Layout {
 pub fn manifest(family: Family, host: &Path, extra_ids: &[String]) -> Value {
     let mut value = json!({
         "name": HOST_NAME,
-        "description": "Secret: connects the browser extension to the local agent",
+        "description": "Silo: connects the browser extension to the local agent",
         "path": host,
         "type": "stdio",
     });
@@ -218,7 +218,7 @@ fn chrome_origin(id: &str) -> String {
     }
 }
 
-/// Absolute path of `secret-native-host`, which `cargo install` puts next to `secret`.
+/// Absolute path of `silo-native-host`, which `cargo install` puts next to `silo`.
 pub fn host_binary() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("locating the secret binary")?;
     let dir = exe
@@ -378,11 +378,11 @@ mod tests {
 
     #[test]
     fn manifests_name_the_extension_in_each_dialect() {
-        let host = Path::new("/opt/bin/secret-native-host");
+        let host = Path::new("/opt/bin/silo-native-host");
         let mozilla = manifest(Family::Mozilla, host, &[]);
         assert_eq!(mozilla["name"], HOST_NAME);
         assert_eq!(mozilla["type"], "stdio");
-        assert_eq!(mozilla["path"], "/opt/bin/secret-native-host");
+        assert_eq!(mozilla["path"], "/opt/bin/silo-native-host");
         assert_eq!(mozilla["allowed_extensions"], json!([FIREFOX_EXTENSION_ID]));
         assert!(mozilla.get("allowed_origins").is_none());
 
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(
             layout.manifest_files(Browser::Chrome),
             [PathBuf::from(
-                "/Users/u/Library/Application Support/Google/Chrome/NativeMessagingHosts/dev.secret.agent.json"
+                "/Users/u/Library/Application Support/Google/Chrome/NativeMessagingHosts/dev.silo.agent.json"
             )]
         );
     }
@@ -450,7 +450,7 @@ mod tests {
         fs::create_dir_all(layout.profile_dir(Browser::Chrome)).unwrap();
         assert_eq!(layout.detected(), [Browser::Zen, Browser::Chrome]);
 
-        let host = dir.path().join("secret-native-host");
+        let host = dir.path().join("silo-native-host");
         for browser in layout.detected() {
             for d in layout.manifest_dirs(browser) {
                 write_manifest(&d, browser.family(), &host, &[]).unwrap();

@@ -1,5 +1,5 @@
-//! `secret`: thin client over the local agent. Everything that touches keys
-//! happens in `secret-agent`; this binary parses arguments, prompts, and prints.
+//! `silo`: thin client over the local agent. Everything that touches keys
+//! happens in `silo-agent`; this binary parses arguments, prompts, and prints.
 
 mod args;
 mod browser;

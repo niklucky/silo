@@ -9,15 +9,15 @@ pub struct Paths {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PathsError {
-    #[error("neither SECRET_HOME nor HOME is set")]
+    #[error("neither SILO_HOME nor HOME is set")]
     NoHome,
 }
 
 impl Paths {
     /// Overrides the data directory. Default: `$HOME/.secret`.
-    pub const HOME_ENV: &'static str = "SECRET_HOME";
+    pub const HOME_ENV: &'static str = "SILO_HOME";
     /// Overrides the socket path. Default: `<home>/agent.sock`.
-    pub const SOCKET_ENV: &'static str = "SECRET_AGENT_SOCKET";
+    pub const SOCKET_ENV: &'static str = "SILO_AGENT_SOCKET";
 
     pub fn from_env() -> Result<Self, PathsError> {
         let home = match std::env::var_os(Self::HOME_ENV).filter(|v| !v.is_empty()) {
@@ -26,7 +26,7 @@ impl Paths {
                 let user_home = std::env::var_os("HOME")
                     .filter(|v| !v.is_empty())
                     .ok_or(PathsError::NoHome)?;
-                PathBuf::from(user_home).join(".secret")
+                PathBuf::from(user_home).join(".silo")
             }
         };
         let mut paths = Self::new(home);

@@ -1,13 +1,13 @@
-//! `secret edit`: changes parts of a secret through the agent's `update`, which
+//! `silo edit`: changes parts of a secret through the agent's `update`, which
 //! keeps the replaced revision in the secret's history. Options say what to
 //! change; without any, the user is asked field by field.
 
 use std::io::{IsTerminal, Read};
 
 use anyhow::{Context, Result, anyhow, bail};
-use secret_agent::ClientError;
-use secret_agent::protocol::{AgentError, Reply, Request, SecretSummary, SecretUpdate, SecretView};
-use secret_core::vault::{SecretBody, SecretKind};
+use silo_agent::ClientError;
+use silo_agent::protocol::{AgentError, Reply, Request, SecretSummary, SecretUpdate, SecretView};
+use silo_core::vault::{SecretBody, SecretKind};
 use zeroize::Zeroizing;
 
 use crate::args::EditArgs;
@@ -30,17 +30,17 @@ pub fn run(args: EditArgs) -> Result<()> {
     let summary = send(update)?;
     let path = summary.path();
     println!(
-        "Updated {path}: {} (revision {}; `secret history {path}` keeps the old one)",
+        "Updated {path}: {} (revision {}; `silo history {path}` keeps the old one)",
         changed.join(", "),
         summary.revision
     );
     if generated {
-        println!("Show the new password with `secret get {path} -f password`.");
+        println!("Show the new password with `silo get {path} -f password`.");
     }
     Ok(())
 }
 
-/// `secret restore`: saves an earlier revision as the newest one. The replaced
+/// `silo restore`: saves an earlier revision as the newest one. The replaced
 /// revision goes to history like any other edit, so a restore can be undone.
 /// Without `revision`, the most recent earlier one: an undo of the last change.
 pub fn restore(selector: &str, revision: Option<u32>) -> Result<()> {
@@ -54,12 +54,12 @@ pub fn restore(selector: &str, revision: Option<u32>) -> Result<()> {
     };
     let target = match revision {
         Some(n) if n == current.revision => {
-            bail!("revision {n} is the current one; see `secret history {path}`")
+            bail!("revision {n} is the current one; see `silo history {path}`")
         }
         Some(n) => history
             .into_iter()
             .find(|view| view.revision == n)
-            .ok_or_else(|| anyhow!("{path} has no revision {n}; see `secret history {path}`"))?,
+            .ok_or_else(|| anyhow!("{path} has no revision {n}; see `silo history {path}`"))?,
         // Newest first.
         None => history
             .into_iter()
@@ -77,7 +77,7 @@ pub fn restore(selector: &str, revision: Option<u32>) -> Result<()> {
     let summary = send(update)?;
     let path = summary.path();
     println!(
-        "Restored revision {} of {path}: {} (now revision {}; `secret restore {path}` undoes this)",
+        "Restored revision {} of {path}: {} (now revision {}; `silo restore {path}` undoes this)",
         target.revision,
         changed.join(", "),
         summary.revision
@@ -93,8 +93,8 @@ fn send(update: SecretUpdate) -> Result<SecretSummary> {
             if message.contains("unknown variant `update`") =>
         {
             bail!(
-                "the running agent predates `secret edit`; restart it with \
-                 `secret agent stop && secret unlock`"
+                "the running agent predates `silo edit`; restart it with \
+                 `silo agent stop && silo unlock`"
             )
         }
         Err(err) => Err(err.into()),
@@ -286,7 +286,7 @@ impl Changes {
 /// Asks for each field, showing the current value; Enter keeps it.
 fn ask(view: &SecretView) -> Result<Changes> {
     if !std::io::stdin().is_terminal() {
-        bail!("nothing to change; see `secret edit --help`");
+        bail!("nothing to change; see `silo edit --help`");
     }
     println!(
         "Editing {} ({}). Press Enter to keep a value; \"-\" empties a list.",
@@ -408,7 +408,7 @@ fn apply(view: &SecretView, changes: Changes) -> Result<(SecretUpdate, Vec<&'sta
                 upsert(set, key, value);
             }
             if set.vars.is_empty() {
-                bail!("an env set needs at least one variable; remove it with `secret rm {path}`");
+                bail!("an env set needs at least one variable; remove it with `silo rm {path}`");
             }
         }
         SecretBody::Note(note) => {
@@ -454,7 +454,7 @@ fn split_list(answer: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use secret_core::vault::{EnvSet, EnvVar, FolderPath, Login, SecretId, SecretMeta, Tag};
+    use silo_core::vault::{EnvSet, EnvVar, FolderPath, Login, SecretId, SecretMeta, Tag};
 
     use super::*;
 

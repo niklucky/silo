@@ -26,9 +26,9 @@ export type MenuContent =
   | { kind: "unsaved"; text: string; password: string };
 
 const SAVING_NOTE: Record<Saving, string> = {
-  saved: "Saved to Secret when you pick one",
-  locked: "Secret is locked: it will not be saved",
-  offline: "Secret is not reachable: it will not be saved",
+  saved: "Saved to Silo when you pick one",
+  locked: "Silo is locked: it will not be saved",
+  offline: "Silo is not reachable: it will not be saved",
 };
 
 export interface MenuActions {
@@ -83,7 +83,7 @@ export class Menu {
   private readonly reposition = () => this.place();
 
   constructor(private readonly actions: MenuActions) {
-    this.host = document.createElement("secret-fill-menu");
+    this.host = document.createElement("silo-fill-menu");
     // Inline !important outranks any page stylesheet aimed at the host element.
     this.host.style.setProperty("all", "initial", "important");
     this.root = this.host.attachShadow({ mode: "closed" });
@@ -150,9 +150,9 @@ export class Menu {
       case "logins": {
         const nodes: HTMLElement[] = [];
         if (content.locked) {
-          nodes.push(this.option("Secret is locked", "Unlock to fill your saved logins", () => this.actions.unlock()));
+          nodes.push(this.option("Silo is locked", "Unlock to fill your saved logins", () => this.actions.unlock()));
         }
-        if (content.logins.length > 0) nodes.push(text("div", "head", "Fill with Secret"));
+        if (content.logins.length > 0) nodes.push(text("div", "head", "Fill with Silo"));
         if (content.insecure && content.logins.length > 0) nodes.push(insecureWarning());
         for (const login of content.logins) {
           nodes.push(this.option(login.username || "(no username)", login.path, () => this.actions.pick(login)));
@@ -206,7 +206,7 @@ export class Menu {
         again.append(text("span", "more", "↻ Other suggestions"));
         nodes.push(again);
         if (content.saving === "locked") {
-          nodes.push(this.option("Unlock Secret", "To save the password you pick", () => this.actions.unlock()));
+          nodes.push(this.option("Unlock Silo", "To save the password you pick", () => this.actions.unlock()));
         }
         return nodes;
       }

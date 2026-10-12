@@ -1,12 +1,12 @@
-//! `secret-native-host`: the browser's bridge to the agent.
+//! `silo-native-host`: the browser's bridge to the agent.
 //!
-//! A browser starts this binary on behalf of the Secret extension (native
+//! A browser starts this binary on behalf of the Silo extension (native
 //! messaging) and talks to it over stdin/stdout: a 4-byte native-endian length
 //! followed by one JSON message, in both directions. Each message in is one
 //! agent `Request`; each message out is one `Response`. The process exits when
 //! the browser closes stdin.
 //!
-//! Only the extension named in the manifest written by `secret browser install`
+//! Only the extension named in the manifest written by `silo browser install`
 //! can start it. The bridge forwards requests to the agent socket, starting the
 //! agent if needed, and refuses the two methods a web-facing client never needs.
 
@@ -14,8 +14,8 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use secret_agent::protocol::{AgentError, Request, Response};
-use secret_agent::{Client, ClientError, Paths, client};
+use silo_agent::protocol::{AgentError, Request, Response};
+use silo_agent::{Client, ClientError, Paths, client};
 use zeroize::Zeroize;
 
 /// Requests are tiny; anything larger is a bug or an attack.
@@ -27,7 +27,7 @@ fn main() -> ExitCode {
     let paths = match Paths::from_env() {
         Ok(paths) => paths,
         Err(err) => {
-            eprintln!("secret-native-host: {err}");
+            eprintln!("silo-native-host: {err}");
             return ExitCode::FAILURE;
         }
     };
@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     match bridge.serve(stdin, stdout) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("secret-native-host: {err}");
+            eprintln!("silo-native-host: {err}");
             ExitCode::FAILURE
         }
     }
@@ -92,7 +92,7 @@ impl Bridge {
         match self.call(request) {
             Ok(response) => response,
             Err(_) => {
-                // The agent went away (restart, crash, `secret agent stop`): reconnect once.
+                // The agent went away (restart, crash, `silo agent stop`): reconnect once.
                 self.agent = None;
                 self.call(request).unwrap_or_else(|err| {
                     Response::Err(AgentError::Internal {
@@ -117,7 +117,7 @@ impl Bridge {
         if self.agent.is_none() {
             let paths = self.paths.clone();
             let client = client::connect_or_spawn(&paths, || {
-                client::spawn_detached(&secret_binary()?, &["agent", "run"], &paths)
+                client::spawn_detached(&silo_binary()?, &["agent", "run"], &paths)
             })?;
             self.agent = Some(client);
         }
@@ -125,23 +125,23 @@ impl Bridge {
     }
 }
 
-/// The `secret` binary installed next to this one, used to start the agent.
-fn secret_binary() -> io::Result<PathBuf> {
+/// The `silo` binary installed next to this one, used to start the agent.
+fn silo_binary() -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe
         .parent()
         .ok_or_else(|| io::Error::other("native host has no parent directory"))?;
-    let secret = dir.join("secret");
-    if !secret.is_file() {
+    let silo = dir.join("silo");
+    if !silo.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
                 "{} is missing; reinstall with `cargo install --path crates/cli`",
-                secret.display()
+                silo.display()
             ),
         ));
     }
-    Ok(secret)
+    Ok(silo)
 }
 
 /// One framed message, or `None` once the browser has closed the stream.
@@ -179,10 +179,10 @@ mod tests {
     use std::time::Duration;
 
     use rand::SeedableRng;
-    use secret_agent::protocol::Reply;
-    use secret_agent::{Store, server};
-    use secret_core::AccountRecord;
-    use secret_core::crypto::KdfParams;
+    use silo_agent::protocol::Reply;
+    use silo_agent::{Store, server};
+    use silo_core::AccountRecord;
+    use silo_core::crypto::KdfParams;
 
     use super::*;
 

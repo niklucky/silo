@@ -1,13 +1,13 @@
 {
-  "name": "secret",
+  "name": "silo",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build:wasm": "sh scripts/build-wasm.sh",
-    "bindings:desktop": "cargo test -p secret-desktop export_bindings",
-    "dev:desktop": "pnpm --filter @secret/desktop tauri dev",
-    "dev:extension": "pnpm --filter @secret/extension dev",
-    "build:extension": "pnpm --filter @secret/extension build",
+    "bindings:desktop": "cargo test -p silo-desktop export_bindings",
+    "dev:desktop": "pnpm --filter @silo/desktop tauri dev",
+    "dev:extension": "pnpm --filter @silo/extension dev",
+    "build:extension": "pnpm --filter @silo/extension build",
     "build:safari": "sh scripts/build-safari.sh",
     "typecheck": "pnpm -r --if-present typecheck"
   },

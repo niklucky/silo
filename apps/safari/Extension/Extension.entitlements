@@ -4,9 +4,9 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<!-- Connecting to the agent socket, ~/.secret/agent.sock, and nothing else.
+	<!-- Connecting to the agent socket, ~/.silo/agent.sock, and nothing else.
 	     File-access exceptions do not cover connecting to a Unix socket. -->
 	<key>com.apple.security.temporary-exception.sbpl</key>
-	<string>(allow network-outbound (regex #"^/Users/[^/]+/\.secret/agent\.sock$"))</string>
+	<string>(allow network-outbound (regex #"^/Users/[^/]+/\.silo/agent\.sock$"))</string>
 </dict>
 </plist>

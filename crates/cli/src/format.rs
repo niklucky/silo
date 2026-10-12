@@ -2,7 +2,7 @@
 
 use std::time::{Duration, UNIX_EPOCH};
 
-use secret_core::vault::{SecretBody, SecretKind};
+use silo_core::vault::{SecretBody, SecretKind};
 
 pub fn kind_name(kind: SecretKind) -> &'static str {
     match kind {
@@ -82,7 +82,7 @@ pub fn shell_line(key: &str, value: &str) -> String {
     format!("export {key}='{}'", value.replace('\'', "'\\''"))
 }
 
-/// Looks up a single field of a body by name, for `secret get --field`.
+/// Looks up a single field of a body by name, for `silo get --field`.
 pub fn field(body: &SecretBody, name: &str) -> Option<String> {
     match body {
         SecretBody::Login(login) => match name {

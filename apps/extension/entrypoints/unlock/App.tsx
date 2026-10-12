@@ -37,7 +37,7 @@ export default function App() {
 
   return (
     <main>
-      <h1>Unlock Secret</h1>
+      <h1>Unlock Silo</h1>
       <form onSubmit={(e) => void unlock(e)}>
         <label htmlFor="password">Master password</label>
         <input

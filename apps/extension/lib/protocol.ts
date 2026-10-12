@@ -130,7 +130,7 @@ export function describe(error: AgentError): string {
     case "wrong_password":
       return "Wrong password.";
     case "no_account":
-      return `No account in ${error.home}. Run \`secret init\` in a terminal.`;
+      return `No account in ${error.home}. Run \`silo init\` in a terminal.`;
     case "not_found":
       return `No secret matches ${error.selector}.`;
     case "ambiguous":

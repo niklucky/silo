@@ -14,10 +14,10 @@ importers:
 
   apps/desktop:
     dependencies:
-      '@secret/bindings':
+      '@silo/bindings':
         specifier: workspace:*
         version: link:../../packages/bindings
-      '@secret/ui':
+      '@silo/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       '@tauri-apps/api':

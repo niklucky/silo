@@ -3100,94 +3100,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "secret-agent"
-version = "0.1.0"
-dependencies = [
- "humantime",
- "libc",
- "rand",
- "secret-core",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "zeroize",
-]
-
-[[package]]
-name = "secret-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "csv",
- "dotenvy",
- "humantime",
- "rand",
- "rpassword",
- "secret-agent",
- "secret-core",
- "serde_json",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
-name = "secret-core"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base64 0.23.1",
- "chacha20poly1305",
- "ciborium",
- "hkdf",
- "psl",
- "rand_chacha",
- "rand_core",
- "serde",
- "serde_bytes",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.21",
- "url",
- "uuid",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "secret-desktop"
-version = "0.1.0"
-dependencies = [
- "secret-core",
- "serde",
- "serde_json",
- "specta",
- "specta-typescript",
- "tauri",
- "tauri-build",
- "tauri-specta",
-]
-
-[[package]]
-name = "secret-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "secret-core",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "secret-wasm"
-version = "0.1.0"
-dependencies = [
- "secret-core",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "selectors"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3442,6 +3354,94 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "silo-agent"
+version = "0.1.0"
+dependencies = [
+ "humantime",
+ "libc",
+ "rand",
+ "serde",
+ "serde_json",
+ "silo-core",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "silo-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "csv",
+ "dotenvy",
+ "humantime",
+ "rand",
+ "rpassword",
+ "serde_json",
+ "silo-agent",
+ "silo-core",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "silo-core"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "base64 0.23.1",
+ "chacha20poly1305",
+ "ciborium",
+ "hkdf",
+ "psl",
+ "rand_chacha",
+ "rand_core",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+ "url",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "silo-desktop"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "silo-core",
+ "specta",
+ "specta-typescript",
+ "tauri",
+ "tauri-build",
+ "tauri-specta",
+]
+
+[[package]]
+name = "silo-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde_json",
+ "silo-core",
+ "tokio",
+]
+
+[[package]]
+name = "silo-wasm"
+version = "0.1.0"
+dependencies = [
+ "silo-core",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-//! `secret-core`: the platform-independent heart of Secret.
+//! `silo-core`: the platform-independent heart of Silo.
 //!
 //! Rules for this crate:
 //!

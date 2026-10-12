@@ -2,7 +2,7 @@ import Cocoa
 import SafariServices
 import WebKit
 
-let extensionBundleIdentifier = "dev.secret.safari.extension"
+let extensionBundleIdentifier = "dev.silo.safari.extension"
 
 class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHandler {
 
