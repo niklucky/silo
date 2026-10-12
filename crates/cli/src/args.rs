@@ -69,6 +69,14 @@ pub enum Command {
     /// Change a secret; the previous revision stays in its history.
     /// With no options, asks for each field in turn
     Edit(EditArgs),
+    /// Bring back an earlier revision, saved as a new one; the current revision stays in history
+    Restore {
+        /// An id, a folder/title path, or a unique title
+        selector: String,
+        /// The revision to restore (default: the one before the current, which undoes the last change)
+        #[arg(long, short)]
+        revision: Option<u32>,
+    },
     /// Remove a secret
     Rm {
         selector: String,

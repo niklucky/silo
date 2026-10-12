@@ -41,6 +41,7 @@ pub fn run(command: Command) -> Result<()> {
             json,
         } => get(&selector, field.as_deref(), json),
         Command::Edit(args) => edit::run(args),
+        Command::Restore { selector, revision } => edit::restore(&selector, revision),
         Command::Rm { selector, yes } => rm(&selector, yes),
         Command::Run { selectors, command } => run_with_env(&selectors, &command),
         Command::Export { selector, format } => export(&selector, format),
@@ -475,6 +476,7 @@ fn history(selector: &str, revision: Option<u32>, json: bool) -> Result<()> {
         format::table(&["REVISION", "SAVED", "PATH", "USERNAME"], &rows)
     );
     println!("Show one with: secret history {selector} --revision <n>");
+    println!("Bring one back with: secret restore {selector} --revision <n>");
     Ok(())
 }
 

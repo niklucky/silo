@@ -96,6 +96,7 @@ secret edit projects/api/dev-env API_KEY=sk-new --unset OLD_KEY
 secret match https://dev.example.com/admin     # which logins the extension would use
 secret match https://dev.example.com --site    # plus logins for example.com, admin.example.com, …
 secret history work/github                     # earlier revisions; --revision N shows one
+secret restore work/github                     # undo the last change; --revision N for an older one
 secret lock | secret unlock --ttl 8h | secret status | secret agent stop
 secret browser install | secret browser status # connect browsers, see below
 ```
@@ -370,7 +371,7 @@ only round-trips `secret_core::version()`.
   resolution by id, `folder/title` path, or unique title. Client with detached
   spawn.
 - **`secret`.** init, unlock, lock, status, agent run/stop, ls, add
-  login/env/file/note, get, edit, rm, run, export, file pull, history, match, browser
+  login/env/file/note, get, edit, restore, rm, run, export, file pull, history, match, browser
   install/uninstall/status. `secret-native-host` bridges browsers to the agent.
 - **Extension.** Firefox: `onHeadersReceived` retries a Basic `401` with an
   injected `Authorization` header, re-validated per navigation, so the browser
@@ -393,8 +394,6 @@ Known gaps:
 
 - Grants are not signed, so a recipient cannot prove who shared with them.
   Documented in `crypto/mod.rs`; lands with the sync layer.
-- History cannot be restored with one command: copy the old values back with
-  `secret edit`.
 - The agent does not verify the peer's uid on the socket; it relies on file modes.
 - Killing the agent leaves a stale socket; the next `unlock` cleans it up.
 - The native host forwards passwords typed into the popup to the agent; the
@@ -406,7 +405,7 @@ Known gaps:
 
 Next steps, in order:
 
-1. Card kind on the CLI; restoring a revision from history.
+1. Card kind on the CLI; import from other password managers.
 2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
 3. Extension: signed builds; the Safari extension inside the desktop app.
 4. Sharing end to end with invites and fingerprint verification; signed grants.

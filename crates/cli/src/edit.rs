@@ -6,7 +6,7 @@ use std::io::{IsTerminal, Read};
 
 use anyhow::{Context, Result, anyhow, bail};
 use secret_agent::ClientError;
-use secret_agent::protocol::{AgentError, Reply, Request, SecretUpdate, SecretView};
+use secret_agent::protocol::{AgentError, Reply, Request, SecretSummary, SecretUpdate, SecretView};
 use secret_core::vault::{SecretBody, SecretKind};
 use zeroize::Zeroizing;
 
@@ -27,19 +27,7 @@ pub fn run(args: EditArgs) -> Result<()> {
         println!("Nothing changed.");
         return Ok(());
     }
-    let summary = match connected()?.call(&Request::Update(update)) {
-        Ok(Reply::Updated(summary)) => summary,
-        Ok(other) => return Err(unexpected(other)),
-        Err(ClientError::Agent(AgentError::Invalid { message }))
-            if message.contains("unknown variant `update`") =>
-        {
-            bail!(
-                "the running agent predates `secret edit`; restart it with \
-                 `secret agent stop && secret unlock`"
-            )
-        }
-        Err(err) => return Err(err.into()),
-    };
+    let summary = send(update)?;
     let path = summary.path();
     println!(
         "Updated {path}: {} (revision {}; `secret history {path}` keeps the old one)",
@@ -50,6 +38,113 @@ pub fn run(args: EditArgs) -> Result<()> {
         println!("Show the new password with `secret get {path} -f password`.");
     }
     Ok(())
+}
+
+/// `secret restore`: saves an earlier revision as the newest one. The replaced
+/// revision goes to history like any other edit, so a restore can be undone.
+/// Without `revision`, the most recent earlier one: an undo of the last change.
+pub fn restore(selector: &str, revision: Option<u32>) -> Result<()> {
+    let current = fetch(selector)?;
+    let path = current.path();
+    let history = match connected()?.call(&Request::History {
+        selector: current.id.to_string(),
+    })? {
+        Reply::History(views) => views,
+        other => return Err(unexpected(other)),
+    };
+    let target = match revision {
+        Some(n) if n == current.revision => {
+            bail!("revision {n} is the current one; see `secret history {path}`")
+        }
+        Some(n) => history
+            .into_iter()
+            .find(|view| view.revision == n)
+            .ok_or_else(|| anyhow!("{path} has no revision {n}; see `secret history {path}`"))?,
+        // Newest first.
+        None => history
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("{path} has no earlier revisions"))?,
+    };
+    let (update, changed) = restoration(&current, &target);
+    if changed.is_empty() {
+        println!(
+            "Revision {} is the same as the current one; nothing to restore.",
+            target.revision
+        );
+        return Ok(());
+    }
+    let summary = send(update)?;
+    let path = summary.path();
+    println!(
+        "Restored revision {} of {path}: {} (now revision {}; `secret restore {path}` undoes this)",
+        target.revision,
+        changed.join(", "),
+        summary.revision
+    );
+    Ok(())
+}
+
+fn send(update: SecretUpdate) -> Result<SecretSummary> {
+    match connected()?.call(&Request::Update(update)) {
+        Ok(Reply::Updated(summary)) => Ok(summary),
+        Ok(other) => Err(unexpected(other)),
+        Err(ClientError::Agent(AgentError::Invalid { message }))
+            if message.contains("unknown variant `update`") =>
+        {
+            bail!(
+                "the running agent predates `secret edit`; restart it with \
+                 `secret agent stop && secret unlock`"
+            )
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// The update that makes `current` look like `target` again, and what it changes.
+fn restoration(current: &SecretView, target: &SecretView) -> (SecretUpdate, Vec<&'static str>) {
+    let (now, then) = (&current.meta, &target.meta);
+    let mut changed = Vec::new();
+    if now.title != then.title || now.folder != then.folder {
+        changed.push("path");
+    }
+    if now.urls != then.urls {
+        changed.push("urls");
+    }
+    if now.tags != then.tags {
+        changed.push("tags");
+    }
+    match (&current.body, &target.body) {
+        (SecretBody::Login(a), SecretBody::Login(b)) => {
+            for (name, differs) in [
+                ("username", a.username != b.username),
+                ("password", a.password != b.password),
+                ("totp", a.totp != b.totp),
+                ("notes", a.notes != b.notes),
+            ] {
+                if differs {
+                    changed.push(name);
+                }
+            }
+        }
+        (a, b) if a != b => changed.push(match b {
+            SecretBody::EnvSet(_) => "variables",
+            SecretBody::Note(_) => "text",
+            SecretBody::File(_) => "contents",
+            _ => "card",
+        }),
+        _ => {}
+    }
+    let update = SecretUpdate {
+        selector: current.id.to_string(),
+        revision: Some(current.revision),
+        title: (now.title != then.title).then(|| then.title.clone()),
+        folder: (now.folder != then.folder).then(|| then.folder.clone()),
+        tags: (now.tags != then.tags).then(|| then.tags.clone()),
+        urls: (now.urls != then.urls).then(|| then.urls.clone()),
+        body: (current.body != target.body).then(|| target.body.clone()),
+    };
+    (update, changed)
 }
 
 impl EditArgs {
@@ -509,6 +604,28 @@ mod tests {
             .map(|v| (v.key.as_str(), v.value.as_str()))
             .collect();
         assert_eq!(pairs, [("A", "9"), ("C", "3")]);
+    }
+
+    #[test]
+    fn restoring_brings_back_what_differs_only() {
+        let mut old = view(login("me", "old"), &["github.com"], &["a"]);
+        old.revision = 2;
+        let mut current = view(
+            login("me", "new"),
+            &["github.com", "gist.github.com"],
+            &["a"],
+        );
+        current.meta.title = "gh".into();
+        let (update, changed) = restoration(&current, &old);
+        assert_eq!(changed, ["path", "urls", "password"]);
+        assert_eq!(update.revision, Some(4));
+        assert_eq!(update.title.as_deref(), Some("github"));
+        assert!(update.folder.is_none() && update.tags.is_none());
+        assert_eq!(update.urls.unwrap(), ["github.com".to_owned()]);
+        assert_eq!(update.body, Some(login("me", "old")));
+
+        let (update, changed) = restoration(&current, &current);
+        assert!(changed.is_empty() && update.body.is_none());
     }
 
     #[test]
