@@ -1,5 +1,6 @@
 import { browser } from "wxt/browser";
 import { Agent, AgentError, BridgeError, type Credentials } from "@/lib/agent";
+import { HeaderRules } from "@/lib/header-rules";
 import {
   type AuthEvent,
   type ChallengeView,
@@ -25,6 +26,8 @@ const MAX_EVENTS = 20;
 const REVALIDATE_AFTER_MS = 30_000;
 /** Navigations re-check every time, except right after the retry that followed a 401. */
 const NAVIGATION_GRACE_MS = 2_000;
+/** Chromium asks the agent this often whether the vault is still unlocked while it sends credentials. */
+const LOCK_CHECK_MS = 5_000;
 /** After Cancel on the auth page, leave the site to the browser for this long. */
 const BYPASS_MS = 15_000;
 /** An auth page left open longer than this is stale. */
@@ -112,8 +115,16 @@ export default defineBackground({
   main() {
     const agent = new Agent();
     const events: AuthEvent[] = [];
-    /** Credentials in use per origin. On Firefox they go into our own header, never into the browser's cache. */
+    /**
+     * Credentials in use per origin. They go into our own Authorization header,
+     * never into the browser's cache: from onBeforeSendHeaders on Firefox, from
+     * a session rule on Chromium.
+     */
     const sessions = new Map<string, { creds: Credentials; at: number }>();
+    const rules = import.meta.env.FIREFOX ? null : new HeaderRules();
+    void rules?.reset();
+    /** Chromium: the credentials each request to a session origin went out with. */
+    const sentWith = new Map<string, Credentials>();
     /** "Use once" credentials: this browser session only, never stored. */
     const transient = new Map<string, Credentials>();
     const refreshing = new Map<string, Promise<Lookup>>();
@@ -138,6 +149,24 @@ export default defineBackground({
       void action.setBadgeText({ text });
     };
 
+    async function startSession(origin: string, creds: Credentials): Promise<void> {
+      sessions.set(origin, { creds, at: Date.now() });
+      await rules?.set(origin, basic(creds.username, creds.password)).catch((err: unknown) => {
+        record({ origin, outcome: "error", detail: `header rule: ${errorText(err)}` });
+      });
+    }
+
+    async function endSession(origin: string): Promise<void> {
+      sessions.delete(origin);
+      await rules?.remove(origin).catch(() => undefined);
+    }
+
+    async function endAllSessions(): Promise<void> {
+      sessions.clear();
+      transient.clear();
+      await rules?.clear().catch(() => undefined);
+    }
+
     async function lookup(url: string): Promise<Lookup> {
       try {
         const found = await agent.credentialsFor(url);
@@ -157,14 +186,14 @@ export default defineBackground({
       let inflight = refreshing.get(origin);
       if (!inflight) {
         inflight = lookup(url)
-          .then((result): Lookup => {
+          .then(async (result): Promise<Lookup> => {
             if (result.kind === "none") {
               const once = transient.get(origin);
               if (once) result = { kind: "found", creds: once };
             }
             if (result.kind === "locked") transient.clear();
-            if (result.kind === "found") sessions.set(origin, { creds: result.creds, at: Date.now() });
-            else sessions.delete(origin);
+            if (result.kind === "found") await startSession(origin, result.creds);
+            else await endSession(origin);
             return result;
           })
           .finally(() => refreshing.delete(origin));
@@ -278,18 +307,81 @@ export default defineBackground({
       return {};
     }
 
+    // ---- Chromium only: session rules. -----------------------------------------
+    // Without blocking request hooks, a 401 is answered by adding a header rule
+    // for the origin and loading the page again (onAuthRequired below). Requests
+    // to an origin with a rule re-check with the agent as on Firefox, but cannot
+    // wait for the answer: when it says no, the rule goes and a navigation is
+    // loaded again, which lands on the sign-in page. A lock from the CLI or the
+    // agent's timeout is noticed within LOCK_CHECK_MS.
+
+    /** A first visit Chromium can load again once the header rule is in place. */
+    function canReload(details: RequestDetails): boolean {
+      return details.type === "main_frame" && details.tabId >= 0 && details.method === "GET";
+    }
+
+    async function reload(details: RequestDetails): Promise<BlockingResponse> {
+      // Navigating first makes the cancel below land on a request the tab has already left.
+      await browser.tabs.update(details.tabId, { url: details.url }).catch(() => undefined);
+      return { cancel: true };
+    }
+
+    async function revalidate(details: RequestDetails, origin: string, sent: Credentials): Promise<void> {
+      const result = await refresh(origin, details.url);
+      const navigation = details.type === "main_frame" || details.type === "sub_frame";
+      if (result.kind === "found") {
+        if (navigation) {
+          badge("");
+          record({ origin, outcome: "filled", detail: result.creds.path });
+        }
+        if (sameCredentials(result.creds, sent) || !canReload(details)) return;
+      }
+      // The page went out with credentials the vault no longer gives.
+      if (canReload(details)) await browser.tabs.update(details.tabId, { url: details.url }).catch(() => undefined);
+    }
+
+    function onBeforeRequest(details: RequestDetails): void {
+      const origin = originOf(details.url);
+      const entry = sessions.get(origin);
+      if (!entry) return;
+      requests.set(details.requestId, "injected");
+      sentWith.set(details.requestId, entry.creds);
+      const navigation = details.type === "main_frame" || details.type === "sub_frame";
+      const age = Date.now() - entry.at;
+      if (navigation ? age > NAVIGATION_GRACE_MS : age > REVALIDATE_AFTER_MS) {
+        void revalidate(details, origin, entry.creds);
+      }
+    }
+
+    async function checkLock(): Promise<void> {
+      if (sessions.size === 0) return;
+      try {
+        if (!(await agent.status()).unlocked) await endAllSessions();
+      } catch {
+        await endAllSessions();
+      }
+    }
+
     // ---- Both engines: the browser's own challenge. ---------------------------
-    // The only path on Chromium, and the fallback on Firefox (non-GET first
-    // requests, Digest, frames and fetches). Credentials returned here land in
-    // the browser's cache.
+    // On Chromium the first 401 of a page load; on Firefox the fallback for
+    // non-GET first requests, Digest, frames and fetches. Credentials returned
+    // here land in the browser's cache, so Chromium returns them only for
+    // requests it cannot load again.
 
     async function onAuthRequired(details: AuthChallenge): Promise<BlockingResponse> {
       if (details.isProxy) return {};
       const origin = originOf(details.url);
       const state = requests.get(details.requestId);
       if (state === "injected") {
+        const sent = sentWith.get(details.requestId);
+        if (!import.meta.env.FIREFOX && sent) {
+          // The rule may have changed while the request was out (a new password in the vault).
+          await refreshing.get(origin);
+          const current = sessions.get(origin)?.creds;
+          if (current && !sameCredentials(current, sent) && canReload(details)) return reload(details);
+        }
         // The server rejected what we sent; step aside so the browser can ask.
-        sessions.delete(origin);
+        await endSession(origin);
         transient.delete(origin);
         record({ origin, outcome: "rejected" });
         return {};
@@ -297,9 +389,10 @@ export default defineBackground({
       if (state === "lookup_failed") return {};
       const result = await refresh(origin, details.url);
       if (result.kind === "found") {
-        requests.set(details.requestId, "injected");
         badge("");
         record({ origin, outcome: "filled", detail: result.creds.path });
+        if (!import.meta.env.FIREFOX && canReload(details)) return reload(details);
+        requests.set(details.requestId, "injected");
         return { authCredentials: { username: result.creds.username, password: result.creds.password } };
       }
       if (result.kind !== "error" && !import.meta.env.FIREFOX && canTakeOver(details, origin)) {
@@ -315,6 +408,7 @@ export default defineBackground({
     type AuthListener = Parameters<typeof browser.webRequest.onAuthRequired.addListener>[0];
     type SendListener = Parameters<typeof browser.webRequest.onBeforeSendHeaders.addListener>[0];
     type ReceiveListener = Parameters<typeof browser.webRequest.onHeadersReceived.addListener>[0];
+    type RequestListener = Parameters<typeof browser.webRequest.onBeforeRequest.addListener>[0];
     if (import.meta.env.FIREFOX) {
       // Firefox resolves promises returned from blocking listeners.
       browser.webRequest.onBeforeSendHeaders.addListener(
@@ -338,9 +432,12 @@ export default defineBackground({
         void onAuthRequired(details).then((result) => callback?.(result));
       }) as unknown as AuthListener;
       browser.webRequest.onAuthRequired.addListener(listener, ALL_URLS, ["asyncBlocking"]);
+      browser.webRequest.onBeforeRequest.addListener(onBeforeRequest as unknown as RequestListener, ALL_URLS);
+      setInterval(() => void checkLock(), LOCK_CHECK_MS);
     }
     const forget = (details: { requestId: string }) => {
       requests.delete(details.requestId);
+      sentWith.delete(details.requestId);
     };
     browser.webRequest.onCompleted.addListener(forget, ALL_URLS);
     browser.webRequest.onErrorOccurred.addListener(forget, ALL_URLS);
@@ -640,10 +737,7 @@ export default defineBackground({
           try {
             const reply = await agent.call(message.request);
             if (message.request.method === "unlock") badge("");
-            if (message.request.method === "lock") {
-              sessions.clear();
-              transient.clear();
-            }
+            if (message.request.method === "lock") await endAllSessions();
             return { kind: "agent", response: { ok: reply } };
           } catch (err) {
             if (err instanceof AgentError) return { kind: "agent", response: { err: err.info } };
@@ -704,7 +798,7 @@ export default defineBackground({
           } else {
             transient.set(challenge.origin, creds);
           }
-          sessions.set(challenge.origin, { creds, at: Date.now() });
+          await startSession(challenge.origin, creds);
           challenges.delete(challenge.id);
           record({ origin: challenge.origin, outcome: "filled", detail: creds.path });
           return { kind: "continue", url: challenge.url };
@@ -745,6 +839,10 @@ export default defineBackground({
     );
   },
 });
+
+function sameCredentials(a: Credentials, b: Credentials): boolean {
+  return a.username === b.username && a.password === b.password;
+}
 
 function sameUsername(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();

@@ -155,13 +155,13 @@ scheme and port; a path must match at a segment boundary. The most specific
 pattern wins; `secret match <url>` shows the ranking.
 
 Browsers remember Basic Auth credentials they have used until they restart, and
-an extension can neither read nor clear that cache. So on Firefox/Zen the
-extension never feeds it: a `401` is answered by retrying the request with the
-extension's own `Authorization` header, and that header is re-checked with the
-agent on every navigation (and every 30 s for background requests). `secret
-lock` or `secret rm` therefore takes effect on the next page load: the site
-asks again, the icon shows a badge, and the popup unlocks. The popup also lists
-recent challenges and what happened to each.
+an extension can neither read nor clear that cache. So the extension never
+feeds it: a `401` is answered by retrying the request with the extension's own
+`Authorization` header, and that header is re-checked with the agent on every
+navigation (and every 30 s for background requests). `secret lock` or `secret
+rm` therefore takes effect on the next page load: the site asks again, the icon
+shows a badge, and the popup unlocks. The popup also lists recent challenges and
+what happened to each.
 
 When a site challenges and the vault has no login for it, or is locked, the
 extension takes the tab to its own sign-in page instead of the browser's dialog.
@@ -174,11 +174,17 @@ fetches and non-GET requests still fall through to the browser's dialog.
 If the username is already saved for another host of the same site, the page
 asks first, as described under [Same site, same username](#same-site-same-username).
 
-Chrome has no blocking request hooks, so there the extension answers the
-browser's own challenge and Chrome keeps the credentials until it restarts. Its
-sign-in page is reached by cancelling the request and navigating the tab, which
-flashes an error page briefly. The same fallback applies on Firefox when the
-first request to a site is not a GET, or the challenge is not Basic.
+Chrome has no blocking request hooks, so the header comes from a
+`declarativeNetRequest` session rule per origin instead. The first `401` of a
+page load adds the rule and loads the page again; the sign-in page is reached
+the same way. The check with the agent cannot hold a request there, so after
+`secret rm` one more page loads with the old header before the tab moves to the
+sign-in page. A lock from the popup removes the rules at once; a lock from the
+CLI or the agent's timeout is noticed within 5 seconds. Session rules end with
+the browser, like its own cache. Where a page cannot simply be loaded again (a
+frame, a fetch, a POST), Chrome gets the credentials the old way and keeps them
+until it restarts; Firefox takes the same fallback when the first request to a
+site is not a GET, or the challenge is not Basic.
 
 Not yet: Safari (no `onAuthRequired`, needs an app-hosted extension), proxy
 authentication, editing a saved login from the browser.
@@ -337,7 +343,8 @@ only round-trips `secret_core::version()`.
 - **Extension.** Firefox: `onHeadersReceived` retries a Basic `401` with an
   injected `Authorization` header, re-validated per navigation, so the browser
   cache stays empty and lock/remove work. Chrome: `onAuthRequired` with
-  asyncBlocking. Unknown or locked sites go to the extension's own sign-in page
+  asyncBlocking adds a `declarativeNetRequest` session rule that sends the header
+  (`lib/header-rules.ts`) and reloads the page. Unknown or locked sites go to the extension's own sign-in page
   (`entrypoints/auth`), which unlocks, saves a login through the agent and
   retries. Loop guard per request id, popup with unlock/lock, matches for the
   current tab and a log of recent activity. Login forms: a content script
@@ -366,8 +373,7 @@ Next steps, in order:
 
 1. Agent: `update` with revisions, card kind on the CLI.
 2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
-3. Extension: declarativeNetRequest header rules on Chrome; save logins on form
-   submit; Safari; signed builds.
+3. Extension: Safari; signed builds.
 4. Sharing end to end with invites and fingerprint verification; signed grants.
 5. Desktop UI over the agent, then login and card autofill, then mobile.
 
