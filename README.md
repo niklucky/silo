@@ -88,6 +88,11 @@ secret run projects/api/dev-env -- npm start  # inject env vars, exec the comman
 secret export dev-env > .env                  # dotenv; also --format shell|json
 secret file pull deploy-key -o ./id_ed25519
 
+secret edit work/github                        # asks field by field; Enter keeps a value
+secret edit work/github -p                     # new password, prompted twice; -g generates one
+secret edit work/github --add-url gist.github.com --rm-tag dev --path personal/github
+secret edit projects/api/dev-env API_KEY=sk-new --unset OLD_KEY
+
 secret match https://dev.example.com/admin     # which logins the extension would use
 secret match https://dev.example.com --site    # plus logins for example.com, admin.example.com, …
 secret history work/github                     # earlier revisions; --revision N shows one
@@ -105,7 +110,7 @@ permissions restrict to your user.
 | --------------------- | ---------------------------------------------------- |
 | `SECRET_HOME`         | Data directory (default `~/.secret`)                 |
 | `SECRET_AGENT_SOCKET` | Socket path (default `$SECRET_HOME/agent.sock`)      |
-| `SECRET_PASSWORD`     | Skip the password prompt; for scripts and CI only    |
+| `SECRET_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
 
 Unix only for now (sockets, file modes). Windows needs named pipes; later.
 
@@ -365,7 +370,7 @@ only round-trips `secret_core::version()`.
   resolution by id, `folder/title` path, or unique title. Client with detached
   spawn.
 - **`secret`.** init, unlock, lock, status, agent run/stop, ls, add
-  login/env/file/note, get, rm, run, export, file pull, history, match, browser
+  login/env/file/note, get, edit, rm, run, export, file pull, history, match, browser
   install/uninstall/status. `secret-native-host` bridges browsers to the agent.
 - **Extension.** Firefox: `onHeadersReceived` retries a Basic `401` with an
   injected `Authorization` header, re-validated per navigation, so the browser
@@ -388,8 +393,8 @@ Known gaps:
 
 - Grants are not signed, so a recipient cannot prove who shared with them.
   Documented in `crypto/mod.rs`; lands with the sync layer.
-- `update` has no CLI command yet (the extension uses it to overwrite logins),
-  and history cannot be restored with one command: copy the old values back.
+- History cannot be restored with one command: copy the old values back with
+  `secret edit`.
 - The agent does not verify the peer's uid on the socket; it relies on file modes.
 - Killing the agent leaves a stale socket; the next `unlock` cleans it up.
 - The native host forwards passwords typed into the popup to the agent; the
@@ -401,7 +406,7 @@ Known gaps:
 
 Next steps, in order:
 
-1. Agent: `update` with revisions, card kind on the CLI.
+1. Card kind on the CLI; restoring a revision from history.
 2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
 3. Extension: signed builds; the Safari extension inside the desktop app.
 4. Sharing end to end with invites and fingerprint verification; signed grants.

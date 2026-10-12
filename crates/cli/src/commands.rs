@@ -13,7 +13,7 @@ use secret_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBo
 use zeroize::Zeroize;
 
 use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand};
-use crate::{browser, format, prompt};
+use crate::{browser, edit, format, prompt};
 
 pub fn run(command: Command) -> Result<()> {
     match command {
@@ -40,6 +40,7 @@ pub fn run(command: Command) -> Result<()> {
             field,
             json,
         } => get(&selector, field.as_deref(), json),
+        Command::Edit(args) => edit::run(args),
         Command::Rm { selector, yes } => rm(&selector, yes),
         Command::Run { selectors, command } => run_with_env(&selectors, &command),
         Command::Export { selector, format } => export(&selector, format),
@@ -237,12 +238,12 @@ fn connect(paths: &Paths) -> Result<Client, AgentUnavailable> {
 
 /// For commands that need an unlocked vault. Turns "not running" into the same
 /// hint the agent gives when locked.
-fn connected() -> Result<Client> {
+pub(crate) fn connected() -> Result<Client> {
     let paths = Paths::from_env()?;
     connect(&paths).map_err(|AgentUnavailable| anyhow!("vault is locked; run `secret unlock`"))
 }
 
-fn unexpected(reply: Reply) -> anyhow::Error {
+pub(crate) fn unexpected(reply: Reply) -> anyhow::Error {
     anyhow!("unexpected reply from agent: {reply:?}")
 }
 
@@ -308,7 +309,7 @@ fn add(command: AddCommand) -> Result<()> {
             let (folder, title) = split_path(&path)?;
             let password = match password {
                 Some(password) => password,
-                None => prompt::password(&format!("Password for {username}"))?.to_string(),
+                None => prompt::hidden(&format!("Password for {username}"))?.to_string(),
             };
             NewSecret {
                 title,
@@ -653,7 +654,7 @@ fn match_url(url: &str, site: bool, json: bool) -> Result<()> {
 
 // ---------- helpers ----------
 
-fn fetch(selector: &str) -> Result<SecretView> {
+pub(crate) fn fetch(selector: &str) -> Result<SecretView> {
     match connected()?.call(&Request::Get {
         selector: selector.to_owned(),
     }) {
@@ -665,7 +666,7 @@ fn fetch(selector: &str) -> Result<SecretView> {
 }
 
 /// Splits `folder/title` into a validated folder and a title.
-fn split_path(path: &str) -> Result<(FolderPath, String)> {
+pub(crate) fn split_path(path: &str) -> Result<(FolderPath, String)> {
     let (folder, title) = path.rsplit_once('/').unwrap_or(("", path));
     if title.trim().is_empty() {
         bail!("missing title in {path:?}; expected folder/title");
@@ -673,7 +674,7 @@ fn split_path(path: &str) -> Result<(FolderPath, String)> {
     Ok((FolderPath::parse(folder)?, title.to_owned()))
 }
 
-fn tags(raw: &[String]) -> Result<Vec<Tag>> {
+pub(crate) fn tags(raw: &[String]) -> Result<Vec<Tag>> {
     raw.iter()
         .flat_map(|s| s.split(','))
         .filter(|s| !s.is_empty())
@@ -681,7 +682,7 @@ fn tags(raw: &[String]) -> Result<Vec<Tag>> {
         .collect()
 }
 
-fn upsert(set: &mut EnvSet, key: String, value: String) {
+pub(crate) fn upsert(set: &mut EnvSet, key: String, value: String) {
     if let Some(existing) = set.vars.iter_mut().find(|v| v.key == key) {
         existing.value = value;
     } else {

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use secret_core::vault::SecretKind;
 
 use crate::browser::Browser;
@@ -66,6 +66,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Change a secret; the previous revision stays in its history.
+    /// With no options, asks for each field in turn
+    Edit(EditArgs),
     /// Remove a secret
     Rm {
         selector: String,
@@ -188,6 +191,50 @@ pub enum AddCommand {
         #[arg(long)]
         tag: Vec<String>,
     },
+}
+
+#[derive(Args)]
+pub struct EditArgs {
+    /// An id, a folder/title path, or a unique title
+    pub selector: String,
+    /// Env set: variables to add or change, as KEY=VALUE
+    pub vars: Vec<String>,
+    /// Move or rename to this folder/title
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Login: new username
+    #[arg(long, short)]
+    pub username: Option<String>,
+    /// Login: new password; prompted for when given without a value
+    #[arg(long, short, num_args = 0..=1, conflicts_with = "generate")]
+    pub password: Option<Option<String>>,
+    /// Login: replace the password with a generated one
+    #[arg(long, short)]
+    pub generate: bool,
+    /// Login: new notes ("" clears them)
+    #[arg(long)]
+    pub notes: Option<String>,
+    /// Add a URL pattern
+    #[arg(long = "add-url")]
+    pub add_url: Vec<String>,
+    /// Remove a URL pattern
+    #[arg(long = "rm-url")]
+    pub rm_url: Vec<String>,
+    /// Add tags (comma-separated or repeated)
+    #[arg(long = "add-tag")]
+    pub add_tag: Vec<String>,
+    /// Remove tags
+    #[arg(long = "rm-tag")]
+    pub rm_tag: Vec<String>,
+    /// Env set: remove this variable
+    #[arg(long)]
+    pub unset: Vec<String>,
+    /// Note: new text; "-" reads it from stdin
+    #[arg(long)]
+    pub text: Option<String>,
+    /// File: replace the contents with this file's
+    #[arg(long)]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]

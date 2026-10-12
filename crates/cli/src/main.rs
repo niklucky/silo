@@ -4,7 +4,9 @@
 mod args;
 mod browser;
 mod commands;
+mod edit;
 mod format;
+mod generate;
 mod prompt;
 
 use std::process::ExitCode;

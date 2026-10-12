@@ -15,6 +15,39 @@ pub fn password(label: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(password))
 }
 
+/// A hidden answer. Unlike [`password`], never taken from SECRET_PASSWORD,
+/// which holds the master password.
+pub fn hidden(label: &str) -> Result<Zeroizing<String>> {
+    let answer = rpassword::prompt_password(format!("{label}: ")).context("reading password")?;
+    Ok(Zeroizing::new(answer))
+}
+
+/// A new secret value, typed twice.
+pub fn new_secret(label: &str) -> Result<Zeroizing<String>> {
+    let first = hidden(label)?;
+    if first.is_empty() {
+        bail!("empty password");
+    }
+    if *hidden("Repeat")? != *first {
+        bail!("passwords do not match");
+    }
+    Ok(first)
+}
+
+/// One line, shown with the current value; `None` when the answer is empty.
+pub fn line(label: &str, current: &str) -> Result<Option<String>> {
+    if current.is_empty() {
+        print!("{label}: ");
+    } else {
+        print!("{label} [{current}]: ");
+    }
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().lock().read_line(&mut answer)?;
+    let answer = answer.trim();
+    Ok((!answer.is_empty()).then(|| answer.to_owned()))
+}
+
 pub fn new_password() -> Result<Zeroizing<String>> {
     if let Ok(password) = std::env::var(PASSWORD_ENV) {
         check_strength(&password)?;
