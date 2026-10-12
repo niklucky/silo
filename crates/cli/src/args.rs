@@ -111,6 +111,23 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Import logins from a CSV export: Apple Passwords, Chrome, Firefox or Bitwarden
+    Import {
+        /// The exported file, e.g. from Passwords → File → Export All Passwords
+        file: PathBuf,
+        /// Folder for new logins
+        #[arg(long, default_value = "web")]
+        folder: String,
+        /// Tag every new login
+        #[arg(long)]
+        tag: Vec<String>,
+        /// Also update logins saved with another password (the old one stays in history)
+        #[arg(long)]
+        replace: bool,
+        /// Show what would happen without changing anything
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+    },
     /// Show logins whose URL patterns cover URL, best match first
     Match {
         url: String,

@@ -97,6 +97,7 @@ secret match https://dev.example.com/admin     # which logins the extension woul
 secret match https://dev.example.com --site    # plus logins for example.com, admin.example.com, …
 secret history work/github                     # earlier revisions; --revision N shows one
 secret restore work/github                     # undo the last change; --revision N for an older one
+secret import ~/Desktop/Passwords.csv -n       # preview an import; drop -n to run it
 secret lock | secret unlock --ttl 8h | secret status | secret agent stop
 secret browser install | secret browser status # connect browsers, see below
 ```
@@ -114,6 +115,19 @@ permissions restrict to your user.
 | `SECRET_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
 
 Unix only for now (sockets, file modes). Windows needs named pipes; later.
+
+### Importing
+
+`secret import FILE` reads a CSV export from Apple Passwords (Passwords → File →
+Export All Passwords), Chrome, Firefox or Bitwarden; columns are found by name.
+Each login goes where the extension would save it: `web/<host>` (`<host> (2)`
+when taken), filling on the site's origin, with notes and TOTP kept. Logins
+the vault already has for that site and username are left alone: the same
+password is reported as already saved, another password is listed, and
+`--replace` updates it (the old one stays in history). Running an import twice
+adds nothing. `--dry-run` shows the plan, `--folder` and `--tag` place the new
+logins. Rows without a password are skipped. Delete the CSV afterwards: it holds
+every password in plain text.
 
 ## Browser extension: HTTP Basic Auth
 
@@ -371,7 +385,7 @@ only round-trips `secret_core::version()`.
   resolution by id, `folder/title` path, or unique title. Client with detached
   spawn.
 - **`secret`.** init, unlock, lock, status, agent run/stop, ls, add
-  login/env/file/note, get, edit, restore, rm, run, export, file pull, history, match, browser
+  login/env/file/note, get, edit, restore, import, rm, run, export, file pull, history, match, browser
   install/uninstall/status. `secret-native-host` bridges browsers to the agent.
 - **Extension.** Firefox: `onHeadersReceived` retries a Basic `401` with an
   injected `Authorization` header, re-validated per navigation, so the browser
@@ -405,7 +419,7 @@ Known gaps:
 
 Next steps, in order:
 
-1. Card kind on the CLI; import from other password managers.
+1. Card kind on the CLI.
 2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
 3. Extension: signed builds; the Safari extension inside the desktop app.
 4. Sharing end to end with invites and fingerprint verification; signed grants.

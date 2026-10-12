@@ -7,6 +7,7 @@ mod commands;
 mod edit;
 mod format;
 mod generate;
+mod import;
 mod prompt;
 
 use std::process::ExitCode;

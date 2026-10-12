@@ -13,7 +13,7 @@ use secret_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBo
 use zeroize::Zeroize;
 
 use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand};
-use crate::{browser, edit, format, prompt};
+use crate::{browser, edit, format, import, prompt};
 
 pub fn run(command: Command) -> Result<()> {
     match command {
@@ -58,6 +58,13 @@ pub fn run(command: Command) -> Result<()> {
             revision,
             json,
         } => history(&selector, revision, json),
+        Command::Import {
+            file,
+            folder,
+            tag,
+            replace,
+            dry_run,
+        } => import::run(&file, &folder, &tag, replace, dry_run),
         Command::Match { url, site, json } => match_url(&url, site, json),
         Command::Browser { command } => browser::run(command),
     }
