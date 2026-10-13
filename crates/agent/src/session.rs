@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use silo_core::AccountKeys;
+use silo_core::account::Identity;
 use silo_core::crypto::{CryptoRng, DataKey, Fingerprint, PublicKey};
 use silo_core::vault::{Grant, SealedSecret, SecretId, SecretKind, SecretMeta, Url};
 
@@ -85,6 +86,10 @@ impl Session {
 
     pub fn public_key(&self) -> &PublicKey {
         self.keys.public_key()
+    }
+
+    pub fn identity(&self) -> Identity {
+        self.keys.identity()
     }
 
     pub fn fingerprint(&self) -> Fingerprint {
@@ -255,7 +260,7 @@ impl Session {
         let revision = current.checked_add(1).ok_or_else(|| AgentError::Internal {
             message: format!("{id} has run out of revisions"),
         })?;
-        let (sealed, key) = SealedSecret::seal(rng, id, revision, &meta, &body)?;
+        let (sealed, key) = SealedSecret::seal(rng, &self.keys, id, revision, &meta, &body)?;
         let mut grants: Vec<Grant> = Vec::new();
         for grant in entry
             .stored
@@ -266,7 +271,13 @@ impl Session {
             if grants.iter().any(|g| g.recipient == grant.recipient) {
                 continue;
             }
-            grants.push(Grant::seal(rng, &sealed, &key, grant.recipient)?);
+            grants.push(Grant::seal(
+                rng,
+                &self.keys,
+                &sealed,
+                &key,
+                grant.recipient,
+            )?);
         }
         let stored = StoredSecret {
             secret: sealed,
@@ -325,8 +336,8 @@ impl Session {
             created_at: now,
             updated_at: now,
         };
-        let (sealed, key) = SealedSecret::seal(rng, id, 1, &meta, &body)?;
-        let grant = Grant::seal(rng, &sealed, &key, *self.keys.public_key())?;
+        let (sealed, key) = SealedSecret::seal(rng, &self.keys, id, 1, &meta, &body)?;
+        let grant = Grant::seal(rng, &self.keys, &sealed, &key, *self.keys.public_key())?;
         let stored = StoredSecret {
             secret: sealed,
             grants: vec![grant],
@@ -408,9 +419,7 @@ mod tests {
     use rand::rngs::StdRng;
     use silo_core::AccountRecord;
     use silo_core::crypto::KdfParams;
-    use silo_core::vault::{
-        EnvSet, EnvVar, FolderPath, Login, Note, SecretBody, SecretKind, Tag,
-    };
+    use silo_core::vault::{EnvSet, EnvVar, FolderPath, Login, Note, SecretBody, SecretKind, Tag};
 
     fn setup() -> (tempfile::TempDir, Store, StdRng) {
         let dir = tempfile::tempdir().unwrap();
@@ -711,6 +720,15 @@ mod tests {
         let updated = session
             .update(&store, &mut rng, 20, change(Some(1), "new"))
             .unwrap();
+        // Both revisions and their grants carry this account's signature.
+        let signer = session.identity().signing_key;
+        let current = store.load_all().unwrap().remove(0);
+        let replaced = store.history(added.id).unwrap().remove(0);
+        for stored in [&current, &replaced] {
+            assert_eq!(stored.secret.verify(&signer), Ok(()));
+            assert_eq!(stored.grants[0].verify(&stored.secret, &signer), Ok(()));
+        }
+        assert_eq!((current.secret.revision, replaced.secret.revision), (2, 1));
         assert_eq!(updated.id, added.id);
         assert_eq!(updated.revision, 2);
         assert_eq!(updated.meta.created_at, 10);

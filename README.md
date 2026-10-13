@@ -374,7 +374,10 @@ only round-trips `silo_core::version()`.
   key), sealed secrets (fresh data key per revision, metadata and body sealed
   separately with XChaCha20-Poly1305, CBOR inside), grants (data key wrapped to a
   recipient public key). Every ciphertext is bound to its context through associated
-  data. No IO; builds for `wasm32`.
+  data. Each account also has an Ed25519 signing key, derived from its X25519 secret
+  key, that signs every new revision and grant; the fingerprint covers both public
+  keys. A server login key is derived from the master key for sync, and KDF
+  parameters from elsewhere must meet a minimum. No IO; builds for `wasm32`.
 - **`silo-agent`.** `~/.silo` layout with 0700/0600 permissions and atomic
   writes. `Session` opens every readable secret's metadata on unlock and bodies on
   demand. Line-delimited JSON protocol over a Unix socket with `status`, `unlock`,
@@ -406,8 +409,9 @@ only round-trips `silo_core::version()`.
 
 Known gaps:
 
-- Grants are not signed, so a recipient cannot prove who shared with them.
-  Documented in `crypto/mod.rs`; lands with the sync layer.
+- Revisions and grants written before signing existed carry no signature, and
+  nothing checks signatures yet. Sync will sign old revisions on upload and
+  accept only revisions signed by the account's own key.
 - The agent does not verify the peer's uid on the socket; it relies on file modes.
 - Killing the agent leaves a stale socket; the next `unlock` cleans it up.
 - The native host forwards passwords typed into the popup to the agent; the
@@ -420,7 +424,9 @@ Known gaps:
 Next steps, in order:
 
 1. Card kind on the CLI.
-2. Server: SQLite schema for blobs and grants, auth, push/pull; agent sync.
+2. Sync: server (SQLite, invites, accounts with mutual connections, device
+   tokens, push/pull with signed revisions and tombstones), then agent sync
+   with `silo sync` commands. Signing keys are done.
 3. Extension: signed builds; the Safari extension inside the desktop app.
 4. Sharing end to end with invites and fingerprint verification; signed grants.
 5. Desktop UI over the agent, then login and card autofill, then mobile.

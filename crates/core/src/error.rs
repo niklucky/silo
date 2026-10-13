@@ -23,8 +23,17 @@ pub enum Error {
     #[error("decryption failed: wrong key or tampered data")]
     Decrypt,
 
+    #[error("not signed")]
+    Unsigned,
+
+    #[error("signature does not verify for the expected signer")]
+    BadSignature,
+
     #[error("grant is addressed to a different account")]
     NotRecipient,
+
+    #[error("password hashing parameters are weaker than the minimum ({0})")]
+    WeakKdf(String),
 
     #[error("key derivation failed: {0}")]
     Kdf(String),

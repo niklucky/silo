@@ -11,6 +11,8 @@ use crate::error::{Error, Result};
 pub const MASTER_KEY_LEN: usize = 32;
 pub const SALT_LEN: usize = 16;
 
+const SERVER_AUTH_INFO: &[u8] = b"silo/v1/server-auth";
+
 /// Password hashing algorithm. Only Argon2id exists today; the field is here so
 /// the record format can carry a successor without a version bump.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +42,12 @@ impl KdfParams {
     pub const RECOMMENDED_ITERATIONS: u32 = 3;
     pub const RECOMMENDED_PARALLELISM: u32 = 1;
 
+    /// The least a host accepts from somewhere else, such as a sync server
+    /// telling a new device how to hash the password. Weaker parameters would
+    /// make the password cheap to guess from the login key sent back.
+    pub const MINIMUM_MEMORY_KIB: u32 = Self::RECOMMENDED_MEMORY_KIB;
+    pub const MINIMUM_ITERATIONS: u32 = Self::RECOMMENDED_ITERATIONS;
+
     /// Recommended parameters with a fresh random salt.
     pub fn recommended(rng: &mut impl CryptoRng) -> Self {
         Self::new(
@@ -68,6 +76,22 @@ impl KdfParams {
             parallelism,
             salt,
         }
+    }
+
+    /// Fails with [`Error::WeakKdf`] if these parameters are below the minimum.
+    pub fn check_minimum(&self) -> Result<()> {
+        let KdfAlgorithm::Argon2id = self.algorithm;
+        if self.memory_kib < Self::MINIMUM_MEMORY_KIB || self.iterations < Self::MINIMUM_ITERATIONS
+        {
+            return Err(Error::WeakKdf(format!(
+                "{} KiB and {} passes, need {} KiB and {}",
+                self.memory_kib,
+                self.iterations,
+                Self::MINIMUM_MEMORY_KIB,
+                Self::MINIMUM_ITERATIONS
+            )));
+        }
+        Ok(())
     }
 
     /// Stretches a password into the master key. Deliberately slow.
@@ -101,11 +125,34 @@ impl MasterKey {
             .expect("32 bytes is a valid HKDF-SHA256 output length");
         out
     }
+
+    /// The key that proves the password to a sync server. HKDF keeps it
+    /// independent of the account wrapping key, so the server learns nothing
+    /// that opens the account record.
+    pub fn server_auth_key(&self) -> AuthKey {
+        AuthKey(self.subkey(SERVER_AUTH_INFO))
+    }
 }
 
 impl core::fmt::Debug for MasterKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("MasterKey(..)")
+    }
+}
+
+/// Server login key, derived from the master key. Sent to the sync server,
+/// which stores only its hash.
+pub struct AuthKey(Zeroizing<[u8; 32]>);
+
+impl AuthKey {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for AuthKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("AuthKey(..)")
     }
 }
 
@@ -136,6 +183,29 @@ mod tests {
         let key = testing::weak_kdf(&mut rng).derive(b"pw").unwrap();
         assert_ne!(key.subkey(b"a"), key.subkey(b"b"));
         assert_eq!(key.subkey(b"a"), key.subkey(b"a"));
+    }
+
+    #[test]
+    fn server_auth_key_is_separate_from_wrapping_keys() {
+        let mut rng = testing::rng(7);
+        let key = testing::weak_kdf(&mut rng).derive(b"pw").unwrap();
+        let auth = key.server_auth_key();
+        assert_eq!(auth.as_bytes(), key.server_auth_key().as_bytes());
+        assert_ne!(*auth.as_bytes(), *key.subkey(b"secret/v1/account-key-wrap"));
+        assert_ne!(*auth.as_bytes(), *key.0);
+    }
+
+    #[test]
+    fn minimum_parameters_are_enforced() {
+        let mut rng = testing::rng(8);
+        assert_eq!(KdfParams::recommended(&mut rng).check_minimum(), Ok(()));
+        assert!(matches!(
+            testing::weak_kdf(&mut rng).check_minimum(),
+            Err(Error::WeakKdf(_))
+        ));
+        let mut fewer_passes = KdfParams::recommended(&mut rng);
+        fewer_passes.iterations = 1;
+        assert!(fewer_passes.check_minimum().is_err());
     }
 
     #[test]

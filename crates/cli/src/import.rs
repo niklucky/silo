@@ -10,9 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use silo_agent::Client;
 use silo_agent::protocol::{ListFilter, NewSecret, Reply, Request, SecretUpdate};
-use silo_core::vault::{
-    FolderPath, Login, SecretBody, SecretId, SecretKind, Tag, Url, url_match,
-};
+use silo_core::vault::{FolderPath, Login, SecretBody, SecretId, SecretKind, Tag, Url, url_match};
 
 use crate::commands::{connected, tags, unexpected};
 use crate::format;

@@ -6,9 +6,9 @@
 //! ← {"err":{"code":"locked"}}
 //! ```
 
+use serde::{Deserialize, Serialize};
 use silo_core::crypto::PublicKey;
 use silo_core::vault::{FolderPath, SecretBody, SecretId, SecretKind, SecretMeta, Tag};
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]

@@ -8,6 +8,10 @@
 //! per secret revision:   random data key
 //! data key ───XChaCha20-Poly1305───▶ meta ciphertext, body ciphertext
 //! data key ───X25519 + HKDF + XChaCha20-Poly1305───▶ wrapped for each grantee (a grant)
+//!
+//! account X25519 secret key ───HKDF("signing-key")───▶ account Ed25519 signing key
+//! signing key ───Ed25519───▶ signs each revision and each grant
+//! master key ───HKDF("server-auth")───▶ server login key (proves the password to a sync server)
 //! ```
 //!
 //! The account keypair is random, not derived from the password, so changing the
@@ -25,19 +29,27 @@
 //! RustCrypto primitives are used; nothing here is a custom construction beyond
 //! the standard ECIES-style key wrap in [`WrappedKey`].
 //!
-//! Known gap: grants are not signed, so a recipient cannot yet prove *who* shared
-//! a secret with them. Signing arrives together with the sync layer.
+//! Signatures make authorship checkable. Anyone who knows an account's public
+//! key can seal a revision and grant it to that account, a sync server
+//! included, so a host only trusts revisions and grants signed by a key it
+//! already knows: its own account's, or later a verified contact's.
+//!
+//! Newer domain strings start with `b"silo/v1/..."`; the older ones above keep
+//! their `secret/` prefix.
 
 mod aead;
 pub(crate) mod bytes;
 mod kdf;
 mod keys;
+mod sign;
 mod wrap;
 
 pub use aead::{Ciphertext, Nonce};
-pub use kdf::{KdfParams, MasterKey};
+pub use kdf::{AuthKey, KdfParams, MasterKey};
 pub use keys::{DataKey, Fingerprint, KEY_LEN, PublicKey, SecretKey};
 pub use rand_core::CryptoRng;
+pub use sign::{SIGNATURE_LEN, Signature, SigningPublicKey};
 pub use wrap::WrappedKey;
 
 pub(crate) use aead::{open, seal};
+pub(crate) use sign::SigningKey;

@@ -11,10 +11,10 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use silo_core::AccountRecord;
-use silo_core::vault::{Grant, SealedSecret, SecretId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use silo_core::AccountRecord;
+use silo_core::vault::{Grant, SealedSecret, SecretId};
 
 use crate::paths::Paths;
 
@@ -261,8 +261,10 @@ mod tests {
             updated_at: 0,
         };
         let body = SecretBody::Note(Note { text: "hi".into() });
+        let kdf = KdfParams::new(&mut rng, 256, 1, 1);
+        let (_, keys) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
         let id = SecretId::from_random_bytes([1; 16]);
-        let (sealed, _) = SealedSecret::seal(&mut rng, id, 1, &meta, &body).unwrap();
+        let (sealed, _) = SealedSecret::seal(&mut rng, &keys, id, 1, &meta, &body).unwrap();
         let stored = StoredSecret {
             secret: sealed,
             grants: vec![],
@@ -275,7 +277,7 @@ mod tests {
         // An update archives the old revision; it is not loaded as a secret.
         assert!(store.history(id).unwrap().is_empty());
         store.archive(&stored).unwrap();
-        let (second, _) = SealedSecret::seal(&mut rng, id, 2, &meta, &body).unwrap();
+        let (second, _) = SealedSecret::seal(&mut rng, &keys, id, 2, &meta, &body).unwrap();
         let newer = StoredSecret {
             secret: second,
             grants: vec![],
