@@ -237,6 +237,29 @@ impl Grant {
     }
 }
 
+/// One revision of a secret together with every grant on it: what a store
+/// keeps per secret and what sync moves between hosts and the server.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSecret {
+    pub secret: SealedSecret,
+    pub grants: Vec<Grant>,
+}
+
+impl StoredSecret {
+    /// Checks that `signer` signed the revision and every grant, and that each
+    /// grant belongs to this revision.
+    pub fn verify(&self, signer: &SigningPublicKey) -> Result<()> {
+        self.secret.verify(signer)?;
+        for grant in &self.grants {
+            if !grant.covers(&self.secret) {
+                return Err(Error::BadSignature);
+            }
+            grant.verify(&self.secret, signer)?;
+        }
+        Ok(())
+    }
+}
+
 fn aad(domain: &[u8], id: SecretId, revision: u32) -> Vec<u8> {
     let mut aad = Vec::with_capacity(domain.len() + 16 + 4);
     aad.extend_from_slice(domain);

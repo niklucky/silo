@@ -17,6 +17,9 @@ pub enum Error {
     #[error("invalid tag {0:?}: {1}")]
     InvalidTag(String, &'static str),
 
+    #[error("invalid username {0:?}: {1}")]
+    InvalidUsername(String, &'static str),
+
     #[error("wrong password or corrupted account record")]
     Unlock,
 

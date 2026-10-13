@@ -1,11 +1,474 @@
 //! Sync protocol between hosts and the server.
 //!
-//! Planned shape, to be implemented in the next step:
+//! The server stores opaque encrypted revisions, their grants and signed
+//! tombstones, and never sees plaintext or keys. Clients push revisions on top
+//! of the one they last saw and pull changes since a cursor. This module holds
+//! the wire types (JSON over HTTPS, under `/v1`) and the signed objects only
+//! sync needs; transport is supplied by the host.
 //!
-//! - The server stores opaque encrypted blobs, version numbers and grants. It never
-//!   sees plaintext or keys.
-//! - Clients push new versions and pull changes since a cursor.
-//! - Grants reference a secret and a grantee public key; "shared with whom" is a
-//!   query over this table.
+//! ```text
+//! GET    /v1/prelogin/{username}        → PreloginReply            (no auth)
+//! POST   /v1/register   RegisterRequest → SessionReply             (no auth, invite)
+//! POST   /v1/login      LoginRequest    → SessionReply             (no auth)
+//! POST   /v1/logout                     → 204                      revokes this device
+//! GET    /v1/account                    → AccountReply
+//! GET    /v1/devices                    → DevicesReply
+//! DELETE /v1/devices/{id}               → 204
+//! GET    /v1/connections                → ConnectionsReply
+//! PUT    /v1/connections/{username}     → ConnectionInfo           request, or accept theirs
+//! DELETE /v1/connections/{username}     → 204                      cancel, decline or remove
+//! GET    /v1/changes?since=N&limit=M    → ChangesReply
+//! POST   /v1/push       PushRequest     → PushReply
+//! ```
 //!
-//! This module defines the wire types only. Transport is supplied by the host.
+//! Everything but the first three needs `Authorization: Bearer <device token>`.
+//! Errors come back as [`ErrorReply`] with a matching HTTP status.
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::account::{AccountKeys, AccountRecord, Identity};
+use crate::crypto::{AuthKey, KdfParams, Signature, SigningPublicKey};
+use crate::error::{Error, Result};
+use crate::vault::{SecretId, StoredSecret};
+
+/// Current format of [`Tombstone`].
+pub const TOMBSTONE_FORMAT: u8 = 1;
+
+pub const USERNAME_MAX_LEN: usize = 32;
+
+const TOMBSTONE_SIGNATURE_DOMAIN: &[u8] = b"silo/v1/sig/tombstone";
+const REGISTER_SIGNATURE_DOMAIN: &[u8] = b"silo/v1/sig/register";
+
+/// Checks a username and returns it lowercased: 1 to 32 characters from
+/// `a-z`, `0-9`, `.`, `_`, `-`, starting with a letter or digit.
+pub fn normalize_username(name: &str) -> Result<String> {
+    let name = name.trim().to_ascii_lowercase();
+    let invalid = |why| Err(Error::InvalidUsername(name.clone(), why));
+    if name.is_empty() {
+        return invalid("empty");
+    }
+    if name.len() > USERNAME_MAX_LEN {
+        return invalid("longer than 32 characters");
+    }
+    if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return invalid("must start with a letter or digit");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return invalid("only letters, digits, '.', '_' and '-' are allowed");
+    }
+    Ok(name)
+}
+
+/// Proves to the server that whoever registers `username` holds the signing
+/// key of `keys.identity()`, so nobody can register someone else's keys.
+/// Sign the name as [`normalize_username`] returns it; the server checks that.
+pub fn sign_registration(keys: &AccountKeys, username: &str) -> Signature {
+    keys.signing_key()
+        .sign(&registration_digest(username, &keys.identity()))
+}
+
+pub fn verify_registration(identity: &Identity, username: &str, proof: &Signature) -> Result<()> {
+    proof.verify(
+        &identity.signing_key,
+        &registration_digest(username, identity),
+    )
+}
+
+fn registration_digest(username: &str, identity: &Identity) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(REGISTER_SIGNATURE_DOMAIN)
+        .chain_update((username.len() as u64).to_be_bytes())
+        .chain_update(username.as_bytes())
+        .chain_update(identity.public_key.as_bytes())
+        .chain_update(identity.signing_key.as_bytes())
+        .finalize()
+        .into()
+}
+
+/// A signed record that a secret was deleted at `revision`. The server keeps
+/// it in place of the secret so other devices learn of the deletion, and so a
+/// server cannot make a secret disappear without the owner's signature.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub format: u8,
+    pub secret_id: SecretId,
+    /// The revision that was deleted.
+    pub revision: u32,
+    pub deleted_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Signature>,
+}
+
+impl Tombstone {
+    pub fn seal(author: &AccountKeys, secret_id: SecretId, revision: u32, deleted_at: u64) -> Self {
+        let mut tombstone = Self {
+            format: TOMBSTONE_FORMAT,
+            secret_id,
+            revision,
+            deleted_at,
+            signature: None,
+        };
+        tombstone.signature = Some(author.signing_key().sign(&tombstone.digest()));
+        tombstone
+    }
+
+    /// Errors as [`SealedSecret::verify`](crate::vault::SealedSecret::verify).
+    pub fn verify(&self, signer: &SigningPublicKey) -> Result<()> {
+        if self.format != TOMBSTONE_FORMAT {
+            return Err(Error::UnsupportedFormat(self.format));
+        }
+        self.signature
+            .as_ref()
+            .ok_or(Error::Unsigned)?
+            .verify(signer, &self.digest())
+    }
+
+    fn digest(&self) -> [u8; 32] {
+        Sha256::new()
+            .chain_update(TOMBSTONE_SIGNATURE_DOMAIN)
+            .chain_update([self.format])
+            .chain_update(self.secret_id.as_bytes())
+            .chain_update(self.revision.to_be_bytes())
+            .chain_update(self.deleted_at.to_be_bytes())
+            .finalize()
+            .into()
+    }
+}
+
+// ---------- accounts and devices ----------
+
+/// How to hash the password for `username`. Unknown usernames get made-up
+/// parameters that stay the same between requests, so this does not reveal
+/// which accounts exist. Check them with [`KdfParams::check_minimum`] first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreloginReply {
+    pub kdf: KdfParams,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterRequest {
+    pub invite: String,
+    pub username: String,
+    pub account: AccountRecord,
+    pub identity: Identity,
+    /// [`sign_registration`] over `username` and `identity`.
+    pub proof: Signature,
+    pub auth_key: AuthKey,
+    pub device_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub auth_key: AuthKey,
+    pub device_name: String,
+}
+
+/// A new device session. `token` goes into `Authorization: Bearer` from now on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionReply {
+    pub device_id: String,
+    pub token: String,
+    #[serde(flatten)]
+    pub account: AccountReply,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountReply {
+    pub username: String,
+    pub account: AccountRecord,
+    pub identity: Identity,
+    /// Goes up when the account record changes (a new password).
+    pub account_version: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub created_at: u64,
+    pub last_seen_at: u64,
+    /// The device making this request.
+    pub current: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesReply {
+    pub devices: Vec<DeviceInfo>,
+}
+
+// ---------- connections ----------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    /// You asked; they have not accepted yet.
+    Outgoing,
+    /// They asked; accept with `PUT /v1/connections/{username}`.
+    Incoming,
+    Connected,
+}
+
+/// Another account you are connected to or about to be. Its identity is
+/// shown only once both sides agreed; compare its fingerprint out of band
+/// before sharing anything.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionInfo {
+    pub username: String,
+    pub state: ConnectionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Identity>,
+    pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionsReply {
+    pub connections: Vec<ConnectionInfo>,
+}
+
+// ---------- push and pull ----------
+
+/// One change a device sends. Accepted only on top of the server's current
+/// revision of that secret (`0` for a new one), and only from its owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PushItem {
+    /// A new revision, newer than `base_revision`, with all of its grants.
+    /// Also brings a deleted secret back when `base_revision` is the deleted one.
+    Put {
+        base_revision: u32,
+        entry: StoredSecret,
+    },
+    /// Deletes the revision named in the tombstone.
+    Delete { tombstone: Tombstone },
+}
+
+impl PushItem {
+    pub fn secret_id(&self) -> SecretId {
+        match self {
+            Self::Put { entry, .. } => entry.secret.id,
+            Self::Delete { tombstone } => tombstone.secret_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushRequest {
+    pub items: Vec<PushItem>,
+}
+
+/// The outcome of one [`PushItem`], in the same position as in the request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PushResult {
+    Ok {
+        seq: u64,
+    },
+    /// The server has moved on; `current` is what it holds now.
+    Conflict {
+        current: Box<Change>,
+    },
+    /// Malformed, badly signed, or not the pusher's to change. Sending it
+    /// again will not help.
+    Rejected {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushReply {
+    pub results: Vec<PushResult>,
+}
+
+/// The current state of one secret the device can read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Change {
+    Put { seq: u64, entry: StoredSecret },
+    Delete { seq: u64, tombstone: Tombstone },
+}
+
+impl Change {
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::Put { seq, .. } | Self::Delete { seq, .. } => *seq,
+        }
+    }
+
+    pub fn secret_id(&self) -> SecretId {
+        match self {
+            Self::Put { entry, .. } => entry.secret.id,
+            Self::Delete { tombstone, .. } => tombstone.secret_id,
+        }
+    }
+
+    pub fn revision(&self) -> u32 {
+        match self {
+            Self::Put { entry, .. } => entry.secret.revision,
+            Self::Delete { tombstone, .. } => tombstone.revision,
+        }
+    }
+}
+
+/// Changes after the requested cursor, oldest first. Ask again with
+/// `since=cursor` while `more` is true.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangesReply {
+    pub changes: Vec<Change>,
+    pub cursor: u64,
+    pub more: bool,
+    pub account_version: u32,
+}
+
+// ---------- errors ----------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    Invalid,
+    InviteInvalid,
+    UsernameTaken,
+    IdentityTaken,
+    RateLimited,
+    Internal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorBody {
+    pub code: ErrorCode,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorReply {
+    pub error: ErrorBody,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing;
+    use crate::vault::{Note, SealedSecret, SecretBody, SecretKind, SecretMeta};
+
+    fn account(rng: &mut rand_chacha::ChaCha20Rng) -> AccountKeys {
+        let kdf = testing::weak_kdf(rng);
+        AccountRecord::create(rng, b"pw", kdf).unwrap().1
+    }
+
+    #[test]
+    fn usernames() {
+        assert_eq!(normalize_username(" Nikita ").unwrap(), "nikita");
+        assert_eq!(normalize_username("a.b_c-9").unwrap(), "a.b_c-9");
+        for bad in ["", "-x", ".x", "a b", "ä", "a/b", &"x".repeat(33)] {
+            assert!(normalize_username(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn registration_proof_binds_username_and_keys() {
+        let mut rng = testing::rng(40);
+        let alice = account(&mut rng);
+        let bob = account(&mut rng);
+        let proof = sign_registration(&alice, "alice");
+
+        assert_eq!(
+            verify_registration(&alice.identity(), "alice", &proof),
+            Ok(())
+        );
+        assert_eq!(
+            verify_registration(&alice.identity(), "alice2", &proof),
+            Err(Error::BadSignature)
+        );
+        // Bob cannot register Alice's keys: he cannot sign as her.
+        assert_eq!(
+            verify_registration(&alice.identity(), "bob", &sign_registration(&bob, "bob")),
+            Err(Error::BadSignature)
+        );
+        let mut mixed = alice.identity();
+        mixed.public_key = *bob.public_key();
+        assert_eq!(
+            verify_registration(&mixed, "alice", &proof),
+            Err(Error::BadSignature)
+        );
+    }
+
+    #[test]
+    fn tombstones_are_signed() {
+        let mut rng = testing::rng(41);
+        let alice = account(&mut rng);
+        let bob = account(&mut rng);
+        let id = SecretId::from_random_bytes([9; 16]);
+        let tombstone = Tombstone::seal(&alice, id, 3, 100);
+        let signer = alice.identity().signing_key;
+
+        assert_eq!(tombstone.verify(&signer), Ok(()));
+        assert_eq!(
+            tombstone.verify(&bob.identity().signing_key),
+            Err(Error::BadSignature)
+        );
+        let mut older = tombstone.clone();
+        older.revision = 2;
+        assert_eq!(older.verify(&signer), Err(Error::BadSignature));
+        let mut unsigned = tombstone.clone();
+        unsigned.signature = None;
+        assert_eq!(unsigned.verify(&signer), Err(Error::Unsigned));
+    }
+
+    #[test]
+    fn wire_shapes() {
+        let mut rng = testing::rng(42);
+        let alice = account(&mut rng);
+        let meta = SecretMeta {
+            title: "n".into(),
+            kind: SecretKind::Note,
+            folder: Default::default(),
+            tags: vec![],
+            urls: vec![],
+            created_at: 0,
+            updated_at: 0,
+        };
+        let body = SecretBody::Note(Note { text: "x".into() });
+        let id = SecretId::from_random_bytes([1; 16]);
+        let (secret, _) = SealedSecret::seal(&mut rng, &alice, id, 1, &meta, &body).unwrap();
+        let entry = StoredSecret {
+            secret,
+            grants: vec![],
+        };
+
+        let item = PushItem::Put {
+            base_revision: 0,
+            entry: entry.clone(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["op"], "put");
+        assert_eq!(json["base_revision"], 0);
+        assert_eq!(serde_json::from_value::<PushItem>(json).unwrap(), item);
+
+        let result = PushResult::Conflict {
+            current: Box::new(Change::Delete {
+                seq: 7,
+                tombstone: Tombstone::seal(&alice, id, 1, 5),
+            }),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["status"], "conflict");
+        assert_eq!(json["current"]["kind"], "delete");
+        assert_eq!(json["current"]["seq"], 7);
+        assert_eq!(serde_json::from_value::<PushResult>(json).unwrap(), result);
+
+        let auth = AuthKey::from_bytes([1; 32]);
+        let json = serde_json::to_string(&auth).unwrap();
+        assert_eq!(json, "\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"");
+        let back: AuthKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.as_bytes(), auth.as_bytes());
+    }
+}

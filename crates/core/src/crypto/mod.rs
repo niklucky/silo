@@ -45,7 +45,7 @@ mod sign;
 mod wrap;
 
 pub use aead::{Ciphertext, Nonce};
-pub use kdf::{AuthKey, KdfParams, MasterKey};
+pub use kdf::{AuthKey, KdfAlgorithm, KdfParams, MasterKey};
 pub use keys::{DataKey, Fingerprint, KEY_LEN, PublicKey, SecretKey};
 pub use rand_core::CryptoRng;
 pub use sign::{SIGNATURE_LEN, Signature, SigningPublicKey};

@@ -16,7 +16,7 @@ mod secret;
 mod urls;
 
 pub use path::{FolderPath, Tag};
-pub use sealed::{Grant, SealedSecret};
+pub use sealed::{Grant, SealedSecret, StoredSecret};
 pub use secret::{
     Card, EnvSet, EnvVar, File, Login, Note, SecretBody, SecretId, SecretKind, SecretMeta,
 };

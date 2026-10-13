@@ -11,19 +11,13 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use silo_core::AccountRecord;
-use silo_core::vault::{Grant, SealedSecret, SecretId};
+use silo_core::vault::SecretId;
+pub use silo_core::vault::StoredSecret;
 
 use crate::paths::Paths;
-
-/// The latest revision of one secret together with every grant on it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoredSecret {
-    pub secret: SealedSecret,
-    pub grants: Vec<Grant>,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -216,7 +210,7 @@ mod tests {
     use rand::SeedableRng;
     use silo_core::crypto::KdfParams;
     use silo_core::vault::SecretKind;
-    use silo_core::vault::{FolderPath, Note, SecretBody, SecretMeta};
+    use silo_core::vault::{FolderPath, Note, SealedSecret, SecretBody, SecretMeta};
 
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777

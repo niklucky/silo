@@ -15,7 +15,7 @@ crates/
   core/                    silo-core: crypto, vault model, sync protocol. No platform IO.
   agent/                   silo-agent: on-disk store, unlock session, Unix-socket protocol, client
   cli/                     silo (CLI, clap) and silo-native-host (browser bridge)
-  server/                  silo-server: axum + SQLite (SQLite not wired yet)
+  server/                  silo-server: sync server, axum + SQLite
   wasm/                    silo-wasm: wasm-bindgen surface over core for the extension
 apps/
   desktop/                 Tauri 2 + React + Vite; src-tauri/ is a workspace member
@@ -55,7 +55,8 @@ means that field needs raising.
 | -------------------------------------- | ----------------------------------------- |
 | Build and test native crates           | `cargo build` · `cargo test`              |
 | Run the CLI                            | `cargo run -p silo-cli -- version`      |
-| Run the server                         | `cargo run -p silo-server` then `curl localhost:8787/health` |
+| Run the sync server                    | `cargo run -p silo-server` then `curl localhost:8787/health` |
+| Create an account invite               | `cargo run -p silo-server -- invite`      |
 | Build WASM + JS glue                   | `pnpm build:wasm`                         |
 | Regenerate desktop TS bindings         | `pnpm bindings:desktop`                   |
 | Desktop app, dev mode                  | `pnpm dev:desktop`                        |
@@ -367,8 +368,9 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
 ## Status
 
 Core, agent and CLI are implemented and tested for local, single-user work. The
-extension fills HTTP Basic Auth and login forms in Firefox/Zen, Chrome and Safari. The desktop app still
-only round-trips `silo_core::version()`.
+extension fills HTTP Basic Auth and login forms in Firefox/Zen, Chrome and Safari.
+The sync server is implemented and tested on its own; the agent does not talk to
+it yet. The desktop app still only round-trips `silo_core::version()`.
 
 - **`silo-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
   key), sealed secrets (fresh data key per revision, metadata and body sealed
@@ -390,6 +392,20 @@ only round-trips `silo_core::version()`.
 - **`silo`.** init, unlock, lock, status, agent run/stop, ls, add
   login/env/file/note, get, edit, restore, import, rm, run, export, file pull, history, match, browser
   install/uninstall/status. `silo-native-host` bridges browsers to the agent.
+- **`silo-server`.** axum over one SQLite file (`--db`, default
+  `silo-server.db`; schema versioned with `user_version`). Accounts are created
+  with a one-time invite (`silo-server invite`) and a proof that the registrant
+  holds the account's signing key; login sends the server login key, stored as
+  a SHA-256 hash, and returns a revocable device token. Prelogin answers
+  unknown usernames with stable made-up KDF parameters; failed logins back off
+  per username. Accounts connect to each other mutually (one asks, the other
+  accepts) and only then see each other's identity or may grant to each other.
+  Push takes revisions on top of the current one (`base_revision`) and signed
+  tombstones, checks signatures, ownership and grant recipients, and answers
+  each item with ok, conflict (with the current state) or rejected. Pull
+  returns, by a server-wide change counter, every secret the account holds a
+  grant for; owners see all grants, others only their own. Every revision is
+  kept. Wire types and endpoints are in `silo_core::sync`.
 - **Extension.** Firefox: `onHeadersReceived` retries a Basic `401` with an
   injected `Authorization` header, re-validated per navigation, so the browser
   cache stays empty and lock/remove work. Chrome: `onAuthRequired` with
@@ -424,11 +440,12 @@ Known gaps:
 Next steps, in order:
 
 1. Card kind on the CLI.
-2. Sync: server (SQLite, invites, accounts with mutual connections, device
-   tokens, push/pull with signed revisions and tombstones), then agent sync
-   with `silo sync` commands. Signing keys are done.
+2. Sync in the agent: `silo sync register/login/status/devices/logout`,
+   push/pull with conflicts kept in history, background sync while unlocked.
+   Then deploying the server (TLS proxy, backups).
 3. Extension: signed builds; the Safari extension inside the desktop app.
-4. Sharing end to end with invites and fingerprint verification; signed grants.
+4. Sharing end to end: connections and fingerprint checks in the CLI, grants to
+   connected accounts, revocation notices.
 5. Desktop UI over the agent, then login and card autofill, then mobile.
 
 Hardening still to do: set a real CSP in `tauri.conf.json` (currently `null`, the

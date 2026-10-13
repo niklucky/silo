@@ -141,12 +141,33 @@ impl core::fmt::Debug for MasterKey {
 }
 
 /// Server login key, derived from the master key. Sent to the sync server,
-/// which stores only its hash.
+/// which stores only its hash. Serializes as base64 for that one purpose.
 pub struct AuthKey(Zeroizing<[u8; 32]>);
 
 impl AuthKey {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+impl Serialize for AuthKey {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> core::result::Result<S::Ok, S::Error> {
+        bytes::serialize(self.0.as_ref(), serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthKey {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> core::result::Result<Self, D::Error> {
+        bytes::deserialize_array(deserializer).map(Self::from_bytes)
     }
 }
 
