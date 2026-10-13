@@ -9,6 +9,7 @@
 //! $SILO_HOME              default ~/.silo, mode 0700
 //! ├── account.json        AccountRecord: KDF params, public key, wrapped secret key
 //! ├── vault/<id>.json     StoredSecret: latest SealedSecret plus its grants
+//! ├── sync.json           sync server, device token and progress, if syncing
 //! ├── agent.sock          Unix socket, mode 0600  (override: SILO_AGENT_SOCKET)
 //! └── agent.log           stdout/stderr of a detached agent
 //! ```
@@ -23,6 +24,7 @@ pub mod protocol;
 pub mod server;
 pub mod session;
 pub mod store;
+pub mod sync;
 
 pub use client::{Client, ClientError};
 pub use paths::Paths;

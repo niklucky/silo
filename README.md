@@ -115,6 +115,9 @@ permissions restrict to your user.
 | `SILO_AGENT_SOCKET` | Socket path (default `$SILO_HOME/agent.sock`)      |
 | `SILO_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
 
+With sync set up, `$SILO_HOME/sync.json` (mode 0600) holds the server address,
+the device token and sync progress.
+
 Unix only for now (sockets, file modes). Windows needs named pipes; later.
 
 ### Importing
@@ -129,6 +132,54 @@ password is reported as already saved, another password is listed, and
 adds nothing. `--dry-run` shows the plan, `--folder` and `--tag` place the new
 logins. Rows without a password are skipped. Delete the CSV afterwards: it holds
 every password in plain text.
+
+## Sync
+
+A `silo-server` keeps the vaults of its accounts in step across devices. It
+stores sealed revisions and never sees a key, a password or a plaintext secret.
+
+```sh
+# on the server
+silo-server invite                  # one-time code for one account, valid 7 days
+silo-server                         # serves on 127.0.0.1:8787 (--db, SILO_SERVER_ADDR)
+
+# the device that has the vault
+silo sync register https://silo.example.com -u nikita --invite k3f9q-2xw7m-p4hzc-8vd1n
+# every other device; on a new machine this creates the vault from the server
+silo sync login https://silo.example.com -u nikita
+silo status                         # same fingerprint on every device
+
+silo sync                           # sync now
+silo sync status                    # last sync, changes waiting, errors
+silo sync devices                   # this account's devices; --revoke ID locks one out
+silo sync logout                    # revoke this device and stop syncing; the vault stays
+```
+
+While unlocked, the agent syncs on unlock, two seconds after each change, and
+every five minutes. Plain `http://` is accepted for `localhost` only; anything
+else needs HTTPS, which a proxy in front of the server provides.
+
+What makes it safe to sync through a server you may not fully trust:
+
+- The password never leaves the device. Login sends a key derived from it with
+  HKDF, separate from the key that opens the account, and the client refuses
+  password hashing settings weaker than its own minimum, so a server cannot
+  ask for a cheap hash.
+- Every revision, grant and deletion is signed with the account's Ed25519 key.
+  A device accepts only what its own account signed; anything else the server
+  hands out is ignored and counted in `silo sync` output. A revision older than
+  one the device has already seen is ignored too.
+- The server knows usernames, device names, how many secrets an account has,
+  their sizes and when they change. Nothing else.
+
+Changes made on two devices before they sync are kept, never overwritten. When
+both changed the same secret, the newer edit becomes current and the other one
+stays in history on every device (`silo history`). An edit also beats a
+deletion: deleting on one device while editing on another keeps the edited
+secret. `silo sync` lists every such conflict and which side won.
+
+A device's history covers what it has seen since it joined; revisions made on
+other devices in between are fetched to fill the gaps.
 
 ## Browser extension: HTTP Basic Auth
 
@@ -360,13 +411,15 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
   Run `pnpm bindings:desktop` after changing a command; commit the result.
 - **Extension.** No Rust in the browser: `apps/extension/lib/agent.ts` opens one
   native-messaging port to `silo-native-host`, which forwards each JSON request
-  to the agent socket and refuses `shutdown`, `remove` and `history`. `lib/protocol.ts`
+  to the agent socket and refuses `shutdown`, `remove`, `history` and the sync
+  setup methods (`sync_register`, `sync_login`, `sync_logout`,
+  `sync_revoke_device`). `lib/protocol.ts`
   mirrors the agent's wire types by hand. The extension id and host name live in
   both `wxt.config.ts` and `crates/cli/src/browser.rs`; change both or neither.
 - **Safari.** Safari cannot start a native host. `browser.runtime.sendNativeMessage`
   goes to the app extension inside `Silo for Safari.app`
   (`apps/safari/Extension/SafariWebExtensionHandler.swift`), which sends each
-  request to `~/.silo/agent.sock` and refuses the same three methods. Its
+  request to `~/.silo/agent.sock` and refuses the same methods. Its
   sandbox allows connecting to that socket and nothing else
   (`Extension.entitlements`). It cannot start the agent; run `silo unlock`
   first. The extension files are copied into the app at build time from
@@ -379,8 +432,8 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
 
 Core, agent and CLI are implemented and tested for local, single-user work. The
 extension fills HTTP Basic Auth and login forms in Firefox/Zen, Chrome and Safari.
-The sync server is implemented and tested on its own; the agent does not talk to
-it yet. The desktop app still only round-trips `silo_core::version()`.
+Sync between devices works through `silo-server`; the server is not deployed
+anywhere yet. The desktop app still only round-trips `silo_core::version()`.
 
 - **`silo-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
   key), sealed secrets (fresh data key per revision, metadata and body sealed
@@ -398,10 +451,13 @@ it yet. The desktop app still only round-trips `silo_core::version()`.
   data key, re-grants every current recipient, refuses a stale base revision,
   and archives the replaced revision under `vault/history/<id>/`. Selector
   resolution by id, `folder/title` path, or unique title. Client with detached
-  spawn.
+  spawn. Sync (`src/sync/`): setup, a blocking `ureq` client, and an engine that
+  pulls, resolves conflicts and pushes in rounds without holding the agent's
+  lock during network calls; a background thread runs it while unlocked.
 - **`silo`.** init, unlock, lock, status, agent run/stop, ls, add
   login/env/file/note, get, edit, restore, import, rm, run, export, file pull, history, match, browser
-  install/uninstall/status. `silo-native-host` bridges browsers to the agent.
+  install/uninstall/status, sync register/login/status/devices/logout.
+  `silo-native-host` bridges browsers to the agent.
 - **`silo-server`.** axum over one SQLite file (`--db`, default
   `silo-server.db`; schema versioned with `user_version`). Accounts are created
   with a one-time invite (`silo-server invite`) and a proof that the registrant
@@ -440,9 +496,13 @@ it yet. The desktop app still only round-trips `silo_core::version()`.
 
 Known gaps:
 
-- Revisions and grants written before signing existed carry no signature, and
-  nothing checks signatures yet. Sync will sign old revisions on upload and
-  accept only revisions signed by the account's own key.
+- Revisions written before signing existed stay unsigned on disk until sync
+  uploads them (it signs them first). The agent does not check signatures of
+  its own files; it trusts the local disk.
+- A password change has no command yet. The server keeps a versioned account
+  record for it, but devices do not fetch a changed record on their own; `silo
+  sync logout` and `login` again picks it up.
+- Secrets shared by other accounts are ignored on pull until sharing lands.
 - The agent does not verify the peer's uid on the socket; it relies on file modes.
 - Killing the agent leaves a stale socket; the next `unlock` cleans it up.
 - The native host forwards passwords typed into the popup to the agent; the
@@ -455,9 +515,7 @@ Known gaps:
 Next steps, in order:
 
 1. Card kind on the CLI.
-2. Sync in the agent: `silo sync register/login/status/devices/logout`,
-   push/pull with conflicts kept in history, background sync while unlocked.
-   Then deploying the server (TLS proxy, backups).
+2. Deploying the server: VPS, TLS proxy, backups.
 3. Extension: signed builds; the Safari extension inside the desktop app.
 4. Sharing end to end: connections and fingerprint checks in the CLI, grants to
    connected accounts, revocation notices.

@@ -13,7 +13,7 @@ use silo_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBody
 use zeroize::Zeroize;
 
 use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand};
-use crate::{browser, edit, format, import, prompt};
+use crate::{browser, edit, format, import, prompt, sync};
 
 pub fn run(command: Command) -> Result<()> {
     match command {
@@ -67,6 +67,7 @@ pub fn run(command: Command) -> Result<()> {
         } => import::run(&file, &folder, &tag, replace, dry_run),
         Command::Match { url, site, json } => match_url(&url, site, json),
         Command::Browser { command } => browser::run(command),
+        Command::Sync { command } => sync::run(command),
     }
 }
 
@@ -198,6 +199,9 @@ fn status(json: bool) -> Result<()> {
             } else {
                 println!("Vault:       locked (run `silo unlock`)");
             }
+            if let Ok(mut agent) = connect(&paths) {
+                println!("Sync:        {}", sync::summary_line(&mut agent)?);
+            }
         }
     }
     Ok(())
@@ -209,6 +213,7 @@ fn agent_run() -> Result<()> {
     server::run(server::Config {
         store,
         default_ttl: server::DEFAULT_TTL,
+        sync_interval: Some(server::DEFAULT_SYNC_INTERVAL),
     })
     .context("agent failed")
 }
@@ -226,7 +231,7 @@ fn agent_stop() -> Result<()> {
 }
 
 /// Connects to the agent, starting it detached if needed.
-fn ensure_agent(paths: &Paths) -> Result<Client> {
+pub(crate) fn ensure_agent(paths: &Paths) -> Result<Client> {
     let exe = std::env::current_exe().context("locating the secret binary")?;
     client::connect_or_spawn(paths, || {
         client::spawn_detached(&exe, &["agent", "run"], paths)

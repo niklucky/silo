@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! <home>/account.json
+//! <home>/sync.json                          sync settings, device token, progress
 //! <home>/vault/<id>.json                    latest revision of each secret
 //! <home>/vault/history/<id>/<revision>.json revisions replaced by an update
 //! ```
@@ -69,6 +70,29 @@ impl Store {
         write_json(&self.paths.account_file(), record)
     }
 
+    /// Sync settings, if this vault syncs with a server.
+    pub fn read_sync<T: DeserializeOwned>(&self) -> Result<Option<T>, StoreError> {
+        let path = self.paths.sync_file();
+        if !path.is_file() {
+            return Ok(None);
+        }
+        read_json(&path).map(Some)
+    }
+
+    pub fn write_sync<T: Serialize>(&self, state: &T) -> Result<(), StoreError> {
+        write_json(&self.paths.sync_file(), state)
+    }
+
+    pub fn delete_sync(&self) -> Result<(), StoreError> {
+        let path = self.paths.sync_file();
+        match fs::remove_file(&path) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                Err(StoreError::Io { path, source: err })
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Loads the latest revision of every secret. Order is unspecified; callers sort.
     pub fn load_all(&self) -> Result<Vec<StoredSecret>, StoreError> {
         json_files(&self.paths.vault_dir())?
@@ -104,6 +128,13 @@ impl Store {
             &dir.join(format!("{}.json", stored.secret.revision)),
             stored,
         )
+    }
+
+    /// True if this revision of the secret is in history.
+    pub fn has_archived(&self, id: SecretId, revision: u32) -> bool {
+        self.history_dir(id)
+            .join(format!("{revision}.json"))
+            .is_file()
     }
 
     /// Earlier revisions of one secret, newest first.

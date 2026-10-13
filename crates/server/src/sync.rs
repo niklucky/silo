@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use silo_core::sync::{
-    Change, ChangesReply, PushItem, PushReply, PushRequest, PushResult, Tombstone,
+    Change, ChangesReply, HistoryReply, HistoryRequest, PushItem, PushReply, PushRequest,
+    PushResult, Tombstone,
 };
 use silo_core::vault::{Grant, SealedSecret, StoredSecret};
 
@@ -18,6 +19,8 @@ use crate::error::{ApiError, ApiResult};
 pub const MAX_PUSH_ITEMS: usize = 500;
 pub const DEFAULT_CHANGES_LIMIT: usize = 200;
 pub const MAX_CHANGES_LIMIT: usize = 1000;
+pub const MAX_HISTORY_QUERIES: usize = 500;
+pub const MAX_HISTORY_REVISIONS: usize = 1000;
 
 /// Applies every item in one transaction. Each gets its own result; a
 /// conflict or rejection does not stop the others.
@@ -93,6 +96,50 @@ pub fn changes(
         more,
         account_version: accounts::account_version(conn, me.id)?,
     })
+}
+
+/// Revisions between two numbers for each query, as far as the account
+/// holds a grant for them. Owners see every grant, others only their own.
+pub fn history(conn: &Connection, auth: &Auth, request: HistoryRequest) -> ApiResult<HistoryReply> {
+    if request.items.len() > MAX_HISTORY_QUERIES {
+        return Err(ApiError::invalid(format!(
+            "at most {MAX_HISTORY_QUERIES} queries per request"
+        )));
+    }
+    let me = &auth.account;
+    let mut revisions = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT r.revision, r.data, s.owner_id FROM revisions r JOIN secrets s ON s.id = r.secret_id
+         WHERE r.secret_id = ?1 AND r.revision > ?2 AND r.revision < ?3
+           AND EXISTS (SELECT 1 FROM grants g
+                       WHERE g.secret_id = r.secret_id AND g.revision = r.revision
+                         AND g.recipient = ?4)
+         ORDER BY r.revision",
+    )?;
+    for query in &request.items {
+        let id = query.secret_id.to_string();
+        let rows = stmt
+            .query_map(
+                params![id, query.after, query.before, &me.public_key.as_bytes()[..]],
+                |row| {
+                    Ok((
+                        row.get::<_, u32>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (revision, data, owner_id) in rows {
+            if revisions.len() >= MAX_HISTORY_REVISIONS {
+                return Ok(HistoryReply { revisions });
+            }
+            let secret: SealedSecret = serde_json::from_str(&data)?;
+            let grants = grants_for(conn, &id, revision, owner_id != me.id, me)?;
+            revisions.push(StoredSecret { secret, grants });
+        }
+    }
+    Ok(HistoryReply { revisions })
 }
 
 struct SecretRow {
@@ -264,28 +311,37 @@ fn current_change(
         |r| r.get(0),
     )?;
     let secret: SealedSecret = serde_json::from_str(&data)?;
-    let only_mine = row.owner_id != viewer.id;
-    let mut stmt = conn.prepare(
-        "SELECT data FROM grants
-         WHERE secret_id = ?1 AND revision = ?2 AND (?3 = 0 OR recipient = ?4)
-         ORDER BY recipient",
+    let grants = grants_for(
+        conn,
+        id,
+        row.current_revision,
+        row.owner_id != viewer.id,
+        viewer,
     )?;
-    let grants = stmt
-        .query_map(
-            params![
-                id,
-                row.current_revision,
-                only_mine,
-                &viewer.public_key.as_bytes()[..]
-            ],
-            |r| r.get::<_, String>(0),
-        )?
-        .map(|json| Ok(serde_json::from_str::<Grant>(&json?)?))
-        .collect::<ApiResult<Vec<_>>>()?;
     Ok(Change::Put {
         seq: row.seq,
         entry: StoredSecret { secret, grants },
     })
+}
+
+fn grants_for(
+    conn: &Connection,
+    id: &str,
+    revision: u32,
+    only_mine: bool,
+    viewer: &Account,
+) -> ApiResult<Vec<Grant>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT data FROM grants
+         WHERE secret_id = ?1 AND revision = ?2 AND (?3 = 0 OR recipient = ?4)
+         ORDER BY recipient",
+    )?;
+    stmt.query_map(
+        params![id, revision, only_mine, &viewer.public_key.as_bytes()[..]],
+        |r| r.get::<_, String>(0),
+    )?
+    .map(|json| Ok(serde_json::from_str::<Grant>(&json?)?))
+    .collect()
 }
 
 fn next_seq(conn: &Connection) -> ApiResult<u64> {

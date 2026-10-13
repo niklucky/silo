@@ -8,7 +8,7 @@
 //!
 //! Only the extension named in the manifest written by `silo browser install`
 //! can start it. The bridge forwards requests to the agent socket, starting the
-//! agent if needed, and refuses the two methods a web-facing client never needs.
+//! agent if needed, and refuses the methods a web-facing client never needs.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -80,10 +80,17 @@ impl Bridge {
     }
 
     fn handle(&mut self, request: &Request) -> Response {
-        // Nothing a browser does needs to delete secrets or read old revisions.
+        // Nothing a browser does needs to delete secrets, read old revisions,
+        // or change where the vault syncs.
         if matches!(
             request,
-            Request::Shutdown | Request::Remove { .. } | Request::History { .. }
+            Request::Shutdown
+                | Request::Remove { .. }
+                | Request::History { .. }
+                | Request::SyncRegister { .. }
+                | Request::SyncLogin { .. }
+                | Request::SyncLogout
+                | Request::SyncRevokeDevice { .. }
         ) {
             return Response::Err(AgentError::Invalid {
                 message: "this method is not available through the browser".to_owned(),
@@ -216,6 +223,7 @@ mod tests {
             server::run(server::Config {
                 store,
                 default_ttl: server::DEFAULT_TTL,
+                sync_interval: None,
             })
         });
         for _ in 0..200 {

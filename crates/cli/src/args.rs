@@ -142,6 +142,51 @@ pub enum Command {
         #[command(subcommand)]
         command: BrowserCommand,
     },
+    /// Sync with a silo-server; without a subcommand, sync now
+    Sync {
+        #[command(subcommand)]
+        command: Option<SyncCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SyncCommand {
+    /// Put this vault's account on a server, with an invite from its admin
+    Register {
+        /// Server address, e.g. https://silo.example.com
+        server: String,
+        #[arg(short, long)]
+        username: String,
+        /// One-time code from `silo-server invite`
+        #[arg(long)]
+        invite: String,
+        /// Name in the device list (default: this machine's name)
+        #[arg(long)]
+        device: Option<String>,
+    },
+    /// Log this machine in to an account; on a new machine this creates the vault
+    Login {
+        /// Server address, e.g. https://silo.example.com
+        server: String,
+        #[arg(short, long)]
+        username: String,
+        /// Name in the device list (default: this machine's name)
+        #[arg(long)]
+        device: Option<String>,
+    },
+    /// Show where this vault syncs and how the last sync went
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the account's devices, or revoke one
+    Devices {
+        /// Revoke this device id; it can no longer sync
+        #[arg(long, value_name = "ID")]
+        revoke: Option<String>,
+    },
+    /// Stop syncing and revoke this device; the local vault stays
+    Logout,
 }
 
 #[derive(Subcommand)]
