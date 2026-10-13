@@ -53,10 +53,11 @@ pub struct SyncReport {
     pub skipped: usize,
 }
 
-/// A run in progress: what it did so far, and the revisions it skipped over
-/// that should go into local history.
+/// A run in progress: when it started, what it did so far, and the revisions
+/// it skipped over that should go into local history.
 #[derive(Default)]
 struct Progress {
+    now: u64,
     report: SyncReport,
     gaps: Vec<HistoryQuery>,
 }
@@ -123,7 +124,10 @@ fn run_with(
     client: &HttpClient,
     now: &dyn Fn() -> u64,
 ) -> Result<SyncReport, SyncError> {
-    let mut progress = Progress::default();
+    let mut progress = Progress {
+        now: now(),
+        ..Progress::default()
+    };
     let mut rng = rand::rng();
 
     loop {
@@ -152,6 +156,11 @@ fn run_with(
             break;
         }
     }
+    // Every upload that reached the server was in that pull.
+    access.with_vault(|v| {
+        v.state.uploading.clear();
+        v.save()
+    })?;
 
     for _ in 0..MAX_ROUNDS {
         let items = access.with_vault(plan_push)?;
@@ -159,6 +168,10 @@ fn run_with(
             break;
         }
         for chunk in items.chunks(PUSH_BATCH) {
+            access.with_vault(|v| {
+                begin_push(v, chunk);
+                v.save()
+            })?;
             let reply = client.push(&PushRequest {
                 items: chunk.to_vec(),
             })?;
@@ -171,7 +184,7 @@ fn run_with(
             }
             access.with_vault(|v| {
                 for (item, result) in chunk.iter().zip(reply.results) {
-                    apply_result(v, &mut rng, item, result, &mut progress, now)?;
+                    apply_result(v, &mut rng, item, result, &mut progress)?;
                 }
                 v.save()
             })?;
@@ -235,8 +248,14 @@ fn apply_put(
     }
     let known = v.state.known.get(&id).copied();
 
+    let uploaded_here = v.state.uploading.get(&id) == Some(&revision);
     if let Some(deleted) = v.state.deletes.get(&id) {
-        if revision > deleted.revision {
+        if revision > deleted.revision && uploaded_here {
+            // This device's own upload, sent before the deletion: the
+            // deletion covers it.
+            let tombstone = v.session.tombstone(id, revision, progress.now);
+            v.state.deletes.insert(id, tombstone);
+        } else if revision > deleted.revision {
             // Edited elsewhere after the revision deleted here: the edit wins.
             v.state.deletes.remove(&id);
             v.session.accept(v.store, remote, false)?;
@@ -252,6 +271,13 @@ fn apply_put(
     v.state.deleted_remotely.remove(&id);
 
     let Some(local) = v.session.stored(id) else {
+        if uploaded_here {
+            // Uploaded from here and deleted before the server confirmed it.
+            v.state.known.remove(&id);
+            let tombstone = v.session.tombstone(id, revision, progress.now);
+            v.state.deletes.insert(id, tombstone);
+            return Ok(());
+        }
         v.session.accept(v.store, remote, false)?;
         v.state.known.insert(id, revision);
         progress.report.pulled += 1;
@@ -265,6 +291,16 @@ fn apply_put(
         // Older than what this device has already seen: a server rolling a
         // secret back. Ignore it.
         progress.report.skipped += 1;
+        return Ok(());
+    }
+    if v.store
+        .history(id)?
+        .iter()
+        .any(|h| h.secret.revision == revision && h.secret.digest() == remote.secret.digest())
+    {
+        // A revision made here, which reached the server without this device
+        // hearing back; the ones after it are still to send.
+        v.state.known.insert(id, revision);
         return Ok(());
     }
     if known == Some(local.secret.revision) {
@@ -289,8 +325,16 @@ fn resolve_conflict(
     let base = remote.secret.revision;
     let (theirs_meta, theirs_body) = v.session.open_parts(&remote)?;
 
-    progress.gap(id, v.state.known.get(&id).copied(), base);
-    let (mine, mine_meta) = rebase_local(v, rng, id, base, 1)?;
+    let known = v.state.known.get(&id).copied();
+    let after = match known {
+        Some(known) => known,
+        // No baseline: never synced from here, or the server lost data. A
+        // revision made here may have the number the server gave theirs.
+        None if v.store.has_archived(id, base) => base.saturating_sub(1),
+        None => base,
+    };
+    progress.gap(id, known, base);
+    let (mine, mine_meta) = rebase_local(v, rng, id, after, base, 1)?;
     v.store.archive(&remote)?;
     let outcome = if mine_meta.updated_at > theirs_meta.updated_at {
         "kept yours, theirs is in history"
@@ -307,15 +351,16 @@ fn resolve_conflict(
     Ok(())
 }
 
-/// Moves the revisions made here since the server's last known one on top of
-/// the server's `base`, oldest first, so none shares a number with a revision
-/// from elsewhere: they become `base + 1`, `base + 2`, … and the newest stays
+/// Moves the revisions made here after `after` on top of the server's
+/// `base`, oldest first, so none shares a number with a revision from
+/// elsewhere: they become `base + 1`, `base + 2`, … and the newest stays
 /// current. `spare` more numbers must be left after it. Returns the newest's
 /// revision and meta.
 fn rebase_local(
     v: &mut Vault<'_>,
     rng: &mut impl CryptoRng,
     id: SecretId,
+    after: u32,
     base: u32,
     spare: u32,
 ) -> Result<(u32, SecretMeta), SyncError> {
@@ -324,9 +369,6 @@ fn rebase_local(
         .stored(id)
         .cloned()
         .ok_or_else(|| SyncError::Protocol(format!("{id} vanished during sync")))?;
-    // Without a known revision (never synced, or the server lost its data),
-    // only what is above the server's revision is unknown to it.
-    let after = v.state.known.get(&id).copied().unwrap_or(base);
     let mut chain: Vec<StoredSecret> = v
         .store
         .history(id)?
@@ -392,7 +434,8 @@ fn apply_delete(
             // Changed here since: the edit wins and goes back up as a restore,
             // on top of the deleted revision.
             progress.gap(id, known, tombstone.revision.saturating_add(1));
-            rebase_local(v, rng, id, tombstone.revision, 0)?;
+            let after = known.unwrap_or(tombstone.revision);
+            rebase_local(v, rng, id, after, tombstone.revision, 0)?;
             v.state.deleted_remotely.insert(id, tombstone.revision);
             v.state.known.insert(id, tombstone.revision);
             progress.report.conflicts.push(format!(
@@ -455,15 +498,28 @@ fn plan_push(v: &mut Vault<'_>) -> Result<Vec<PushItem>, SyncError> {
     Ok(items)
 }
 
+/// Notes the revisions about to be sent, before sending them.
+fn begin_push(v: &mut Vault<'_>, items: &[PushItem]) {
+    for item in items {
+        if let PushItem::Put { entry, .. } = item {
+            v.state
+                .uploading
+                .insert(entry.secret.id, entry.secret.revision);
+        }
+    }
+}
+
 fn apply_result(
     v: &mut Vault<'_>,
     rng: &mut impl CryptoRng,
     item: &PushItem,
     result: PushResult,
     progress: &mut Progress,
-    now: &dyn Fn() -> u64,
 ) -> Result<(), SyncError> {
     let id = item.secret_id();
+    if matches!(item, PushItem::Put { .. }) {
+        v.state.uploading.remove(&id);
+    }
     match (item, result) {
         (PushItem::Put { entry, .. }, PushResult::Ok { .. }) => {
             let revision = entry.secret.revision;
@@ -476,9 +532,8 @@ fn apply_result(
                 // Deleted here while the upload was on its way: what the
                 // server has now must go too, or the next pull brings it back.
                 v.state.known.remove(&id);
-                v.state
-                    .deletes
-                    .insert(id, v.session.tombstone(id, revision, now()));
+                let tombstone = v.session.tombstone(id, revision, progress.now);
+                v.state.deletes.insert(id, tombstone);
             }
         }
         (PushItem::Delete { .. }, PushResult::Ok { .. }) => {
@@ -510,6 +565,20 @@ fn apply_result(
     Ok(())
 }
 
+/// Records that a secret was deleted here, so the next sync deletes it on
+/// the server too if the server has it.
+pub fn record_deletion(state: &mut SyncState, session: &Session, id: SecretId, now: u64) {
+    state.rejected.remove(&id);
+    if state.deleted_remotely.remove(&id).is_some() {
+        // Already deleted on the server; only the local edit was keeping it.
+        state.known.remove(&id);
+    } else if let Some(revision) = state.known.remove(&id) {
+        state
+            .deletes
+            .insert(id, session.tombstone(id, revision, now));
+    }
+}
+
 fn path(v: &Vault<'_>, id: SecretId) -> String {
     v.session.path_of(id).unwrap_or_else(|| id.to_string())
 }
@@ -525,63 +594,171 @@ mod tests {
     use silo_core::crypto::KdfParams;
     use silo_core::vault::{FolderPath, Note, SecretBody};
 
-    #[test]
-    fn a_deletion_during_an_upload_deletes_the_upload() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Paths::new(dir.path())).unwrap();
-        let mut rng = StdRng::seed_from_u64(7);
-        let kdf = KdfParams::new(&mut rng, 256, 1, 1);
-        let (record, _) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
-        store.write_account(&record).unwrap();
-        let (mut session, _) = Session::unlock(&store, b"pw").unwrap();
-        session
-            .add(
-                &store,
-                &mut rng,
-                1,
-                NewSecret {
-                    title: "new".into(),
-                    folder: FolderPath::default(),
-                    tags: vec![],
-                    urls: vec![],
-                    basic_auth: false,
-                    body: SecretBody::Note(Note { text: "x".into() }),
+    struct Setup {
+        _dir: tempfile::TempDir,
+        store: Store,
+        session: Session,
+        state: SyncState,
+        rng: StdRng,
+    }
+
+    impl Setup {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(Paths::new(dir.path())).unwrap();
+            let mut rng = StdRng::seed_from_u64(7);
+            let kdf = KdfParams::new(&mut rng, 256, 1, 1);
+            let (record, _) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
+            store.write_account(&record).unwrap();
+            let (session, _) = Session::unlock(&store, b"pw").unwrap();
+            Self {
+                _dir: dir,
+                store,
+                session,
+                state: SyncState::default(),
+                rng,
+            }
+        }
+
+        fn add(&mut self) -> SecretId {
+            let new = NewSecret {
+                title: "new".into(),
+                folder: FolderPath::default(),
+                tags: vec![],
+                urls: vec![],
+                basic_auth: false,
+                body: SecretBody::Note(Note { text: "x".into() }),
+            };
+            self.session
+                .add(&self.store, &mut self.rng, 1, new)
+                .unwrap()
+                .id
+        }
+
+        fn vault(&mut self) -> (Vault<'_>, &mut StdRng) {
+            (
+                Vault {
+                    store: &self.store,
+                    session: &mut self.session,
+                    state: &mut self.state,
                 },
+                &mut self.rng,
             )
+        }
+    }
+
+    /// The one upload `plan_push` has for `id`.
+    fn upload(v: &mut Vault<'_>, id: SecretId) -> (PushItem, StoredSecret) {
+        let items = plan_push(v).unwrap();
+        let item = items
+            .into_iter()
+            .find(|item| item.secret_id() == id)
             .unwrap();
-        let mut state = SyncState::default();
-        let mut v = Vault {
-            store: &store,
-            session: &mut session,
-            state: &mut state,
+        let PushItem::Put { entry, .. } = &item else {
+            panic!("{item:?}")
         };
-        let mut progress = Progress::default();
+        let entry = entry.clone();
+        (item, entry)
+    }
 
-        let items = plan_push(&mut v).unwrap();
-        let [PushItem::Put { entry, .. }] = &items[..] else {
-            panic!("{items:?}")
-        };
-        let id = entry.secret.id;
-        // Removed while the push is on its way; never synced, so the agent
-        // recorded no deletion.
-        v.session.remove_id(v.store, id).unwrap();
-        let ok = PushResult::Ok { seq: 1 };
-        apply_result(&mut v, &mut rng, &items[0], ok, &mut progress, &|| 5).unwrap();
-
-        assert!(!v.state.known.contains_key(&id));
-        assert_eq!(v.state.deletes[&id].revision, entry.secret.revision);
-        // The upload coming back in a pull stays deleted…
-        let change = Change::Put {
-            seq: 1,
-            entry: entry.clone(),
-        };
-        apply_change(&mut v, &mut rng, change, &mut progress).unwrap();
+    fn assert_deletes_on_next_push(v: &mut Vault<'_>, id: SecretId, revision: u32) {
         assert!(v.session.stored(id).is_none());
-        // …and the next push deletes it on the server.
-        let items = plan_push(&mut v).unwrap();
+        assert!(!v.state.known.contains_key(&id));
+        let items = plan_push(v).unwrap();
         assert!(
-            matches!(&items[..], [PushItem::Delete { tombstone }] if tombstone.secret_id == id),
+            matches!(&items[..], [PushItem::Delete { tombstone }]
+                if tombstone.secret_id == id && tombstone.revision == revision),
             "{items:?}"
         );
+    }
+
+    #[test]
+    fn a_deletion_during_an_upload_deletes_the_upload() {
+        let mut setup = Setup::new();
+        let id = setup.add();
+        let (mut v, rng) = setup.vault();
+        let mut progress = Progress::default();
+        let (item, entry) = upload(&mut v, id);
+        begin_push(&mut v, std::slice::from_ref(&item));
+        // Removed while the push is on its way; never synced, so there is no
+        // deletion to record.
+        v.session.remove_id(v.store, id).unwrap();
+        record_deletion(v.state, v.session, id, 5);
+        let ok = PushResult::Ok { seq: 1 };
+        apply_result(&mut v, rng, &item, ok, &mut progress).unwrap();
+        // The upload coming back in a pull stays deleted.
+        let change = Change::Put { seq: 1, entry };
+        apply_change(&mut v, rng, change, &mut progress).unwrap();
+        assert_deletes_on_next_push(&mut v, id, 1);
+    }
+
+    #[test]
+    fn a_deletion_during_an_upload_whose_reply_is_lost_deletes_it() {
+        let mut setup = Setup::new();
+        let new = setup.add();
+        let (mut v, rng) = setup.vault();
+        let mut progress = Progress::default();
+
+        // A first upload.
+        let (item, entry) = upload(&mut v, new);
+        begin_push(&mut v, std::slice::from_ref(&item));
+        v.session.remove_id(v.store, new).unwrap();
+        record_deletion(v.state, v.session, new, 5);
+        // The reply never arrives; the next pull has the upload.
+        let change = Change::Put { seq: 1, entry };
+        apply_change(&mut v, rng, change, &mut progress).unwrap();
+        assert_deletes_on_next_push(&mut v, new, 1);
+    }
+
+    #[test]
+    fn a_deletion_during_an_edit_upload_whose_reply_is_lost_deletes_it() {
+        let mut setup = Setup::new();
+        let id = setup.add();
+        let (mut v, rng) = setup.vault();
+        let mut progress = Progress::default();
+        v.state.known.insert(id, 1);
+        let current = v.session.stored(id).unwrap().clone();
+        let (meta, body) = v.session.open_parts(&current).unwrap();
+        v.session
+            .reseal(v.store, rng, id, 2, &meta, &body, true)
+            .unwrap();
+
+        let (item, entry) = upload(&mut v, id);
+        begin_push(&mut v, std::slice::from_ref(&item));
+        v.session.remove_id(v.store, id).unwrap();
+        record_deletion(v.state, v.session, id, 5);
+        assert_eq!(v.state.deletes[&id].revision, 1);
+        let change = Change::Put { seq: 2, entry };
+        apply_change(&mut v, rng, change, &mut progress).unwrap();
+        assert_deletes_on_next_push(&mut v, id, 2);
+    }
+
+    #[test]
+    fn an_own_revision_coming_back_is_not_a_conflict() {
+        let mut setup = Setup::new();
+        let id = setup.add();
+        let (mut v, rng) = setup.vault();
+        let mut progress = Progress::default();
+        v.state.known.insert(id, 1);
+        let current = v.session.stored(id).unwrap().clone();
+        let (meta, body) = v.session.open_parts(&current).unwrap();
+        v.session
+            .reseal(v.store, rng, id, 2, &meta, &body, true)
+            .unwrap();
+        let (item, entry) = upload(&mut v, id);
+        begin_push(&mut v, std::slice::from_ref(&item));
+        // Edited again before the lost reply; revision 2 is in history now.
+        v.session
+            .reseal(v.store, rng, id, 3, &meta, &body, true)
+            .unwrap();
+        let change = Change::Put { seq: 2, entry };
+        apply_change(&mut v, rng, change, &mut progress).unwrap();
+        assert!(
+            progress.report.conflicts.is_empty(),
+            "{:?}",
+            progress.report
+        );
+        assert_eq!(v.state.known[&id], 2);
+        assert_eq!(v.session.stored(id).unwrap().secret.revision, 3);
     }
 }

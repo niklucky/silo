@@ -411,6 +411,52 @@ fn every_offline_edit_survives_a_conflict() {
 }
 
 #[test]
+fn edits_made_while_logged_out_survive_logging_in_again() {
+    // Without the baseline, as after a logout by an older version.
+    for keep_baseline in [true, false] {
+        let server = Server::start();
+        let mut laptop = Device::start(true);
+        laptop.add_note("notes/shared", "base");
+        laptop.add_note("notes/other", "other");
+        laptop.register(&server, "nikita");
+        laptop.sync();
+        let mut desktop = Device::start(false);
+        desktop.login(&server, "nikita");
+        desktop.sync();
+
+        laptop.call(Request::SyncLogout);
+        if !keep_baseline {
+            std::fs::remove_file(laptop.paths.sync_baseline_file()).unwrap();
+        }
+        laptop.edit_note("notes/shared", "laptop 1");
+        laptop.edit_note("notes/shared", "laptop 2");
+        laptop.call(Request::Remove {
+            selector: "notes/other".into(),
+        });
+        desktop.edit_note("notes/shared", "desktop");
+        desktop.sync();
+
+        laptop.login(&server, "nikita");
+        let report = laptop.sync();
+        assert_eq!(report.conflicts.len(), 1, "{report:?}");
+        desktop.sync();
+        let current = laptop.text("notes/shared");
+        assert_eq!(desktop.text("notes/shared"), current);
+        for device in [&mut laptop, &mut desktop] {
+            let mut texts = device.all_texts("notes/shared");
+            texts.sort();
+            texts.dedup();
+            assert_eq!(texts, ["base", "desktop", "laptop 1", "laptop 2"]);
+        }
+        // Only the baseline knows the server had what was deleted meanwhile.
+        if keep_baseline {
+            assert_eq!(desktop.text("notes/other"), None);
+            assert_eq!(laptop.text("notes/other"), None);
+        }
+    }
+}
+
+#[test]
 fn an_offline_edit_restores_a_secret_deleted_after_another_edit() {
     let server = Server::start();
     let mut laptop = Device::start(true);

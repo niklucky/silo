@@ -9,9 +9,9 @@ mod engine;
 mod http;
 mod state;
 
-pub use engine::{PUSH_BATCH, SyncReport, Vault, VaultAccess, run};
+pub use engine::{PUSH_BATCH, SyncReport, Vault, VaultAccess, record_deletion, run};
 pub use http::{HttpClient, normalize_server};
-pub use state::{Rejection, SyncState};
+pub use state::{Baseline, Rejection, SyncState};
 
 use silo_core::AccountKeys;
 use silo_core::account::AccountRecord;

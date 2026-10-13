@@ -64,6 +64,11 @@ impl Paths {
         self.home.join("sync.json")
     }
 
+    /// What is kept of the sync state after logging out.
+    pub fn sync_baseline_file(&self) -> PathBuf {
+        self.home.join("sync-baseline.json")
+    }
+
     pub fn socket_file(&self) -> &Path {
         &self.socket
     }

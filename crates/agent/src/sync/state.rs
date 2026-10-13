@@ -32,6 +32,12 @@ pub struct SyncState {
     /// Revisions the server refused; not sent again until they change.
     #[serde(default)]
     pub rejected: BTreeMap<SecretId, Rejection>,
+    /// Revisions sent in a push whose result has not come back yet. If one
+    /// reached the server after all and its secret was deleted here in the
+    /// meantime, the next pull turns it into a deletion instead of bringing
+    /// it back. Cleared once a pull has seen everything up to now.
+    #[serde(default)]
+    pub uploading: BTreeMap<SecretId, u32>,
     #[serde(default)]
     pub last_sync: Option<u64>,
     #[serde(default)]
@@ -54,6 +60,50 @@ impl SyncState {
             account_version: session.account.account_version,
             ..Self::default()
         }
+    }
+}
+
+/// What `silo sync logout` keeps of the sync state: how far it pulled, which
+/// revisions the server is known to have, and the deletions still to send. Logging in to the
+/// same account on the same server again picks it up, so edits made in
+/// between are told apart from the server's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Baseline {
+    pub server: String,
+    pub username: String,
+    #[serde(default)]
+    pub cursor: u64,
+    #[serde(default)]
+    pub known: BTreeMap<SecretId, u32>,
+    #[serde(default)]
+    pub deletes: BTreeMap<SecretId, Tombstone>,
+    #[serde(default)]
+    pub deleted_remotely: BTreeMap<SecretId, u32>,
+}
+
+impl SyncState {
+    pub fn baseline(&self) -> Baseline {
+        Baseline {
+            server: self.server.clone(),
+            username: self.username.clone(),
+            cursor: self.cursor,
+            known: self.known.clone(),
+            deletes: self.deletes.clone(),
+            deleted_remotely: self.deleted_remotely.clone(),
+        }
+    }
+
+    /// Takes over a baseline from an earlier login to the same account on
+    /// the same server. Returns false and changes nothing for any other.
+    pub fn resume(&mut self, baseline: Baseline) -> bool {
+        if baseline.server != self.server || baseline.username != self.username {
+            return false;
+        }
+        self.cursor = baseline.cursor;
+        self.known = baseline.known;
+        self.deletes = baseline.deletes;
+        self.deleted_remotely = baseline.deleted_remotely;
+        true
     }
 }
 

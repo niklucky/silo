@@ -116,7 +116,9 @@ permissions restrict to your user.
 | `SILO_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
 
 With sync set up, `$SILO_HOME/sync.json` (mode 0600) holds the server address,
-the device token and sync progress.
+the device token and sync progress. `silo sync logout` keeps the progress in
+`sync-baseline.json`, so after logging in again to the same account, edits and
+deletions made in between still sync as yours.
 
 Unix only for now (sockets, file modes). Windows needs named pipes; later.
 

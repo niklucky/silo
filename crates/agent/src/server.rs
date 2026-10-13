@@ -17,12 +17,13 @@ use zeroize::Zeroize;
 
 use silo_core::AccountKeys;
 use silo_core::sync::ErrorCode;
-use silo_core::vault::SecretId;
 
 use crate::protocol::{AgentError, Reply, Request, Response, StatusInfo, SyncStatusInfo};
 use crate::session::Session;
 use crate::store::Store;
-use crate::sync::{self, HttpClient, SyncError, SyncReport, SyncState, Vault, VaultAccess};
+use crate::sync::{
+    self, Baseline, HttpClient, SyncError, SyncReport, SyncState, Vault, VaultAccess,
+};
 
 /// How long a vault stays unlocked unless the client asks otherwise.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(12 * 60 * 60);
@@ -283,7 +284,7 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
                 .and_then(|s| {
                     let removed = s.remove(store, &selector)?;
                     if let Some(sync) = sync {
-                        record_deletion(sync, s, removed.id, now);
+                        sync::record_deletion(sync, s, removed.id, now);
                         store.write_sync(sync)?;
                     }
                     Ok(removed)
@@ -312,18 +313,6 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
         | Request::SyncRevokeDevice { .. } => unreachable!("handled in dispatch"),
     };
     result.into()
-}
-
-/// A deleted secret the server has goes up as a tombstone on the next sync.
-fn record_deletion(sync: &mut SyncState, session: &Session, id: SecretId, now: u64) {
-    sync.rejected.remove(&id);
-    if sync.deleted_remotely.remove(&id).is_some() {
-        // Already deleted on the server; only the local edit was keeping it.
-        sync.known.remove(&id);
-    } else if let Some(revision) = sync.known.remove(&id) {
-        sync.deletes
-            .insert(id, session.tombstone(id, revision, now));
-    }
 }
 
 fn nudge(shared: &Shared) {
@@ -429,7 +418,7 @@ fn sync_register(
         &device,
     )?;
     let mut state = lock_state(shared);
-    state.start_syncing(sync_state, keys)?;
+    state.start_syncing(sync_state, keys, false)?;
     let status = state.sync_status();
     drop(state);
     log("sync set up (registered)");
@@ -469,7 +458,7 @@ fn sync_login(
     if local.as_ref() != Some(&record) {
         state.store.write_account(&record)?;
     }
-    state.start_syncing(sync_state, keys)?;
+    state.start_syncing(sync_state, keys, true)?;
     let status = state.sync_status();
     drop(state);
     log("sync set up (logged in)");
@@ -497,6 +486,9 @@ fn sync_logout(shared: &Shared) -> Result<Reply, SyncError> {
         }
     };
     let mut state = lock_state(shared);
+    if let Some(sync) = &state.sync {
+        state.store.write_sync_baseline(&sync.baseline())?;
+    }
     state.store.delete_sync()?;
     state.sync = None;
     log("sync stopped (logged out)");
@@ -557,15 +549,41 @@ impl State {
         Ok(Reply::Unlocked(self.status()))
     }
 
-    fn start_syncing(&mut self, sync: SyncState, keys: AccountKeys) -> Result<(), SyncError> {
-        self.store.write_sync(&sync)?;
-        self.sync = Some(sync);
+    /// With `resume`, picks up what an earlier login to the same account
+    /// left behind; a new registration starts from nothing.
+    fn start_syncing(
+        &mut self,
+        mut sync: SyncState,
+        keys: AccountKeys,
+        resume: bool,
+    ) -> Result<(), SyncError> {
         if self.session.is_none() {
             let (session, _) = Session::open(&self.store, keys)?;
             self.session = Some(session);
             self.expires_at = Some(Instant::now() + self.default_ttl);
             log("unlocked");
         }
+        let session = self.session.as_ref().expect("opened above");
+        if resume
+            && let Some(baseline) = self.store.read_sync_baseline::<Baseline>()?
+            && sync.resume(baseline)
+        {
+            // Secrets the server had that were deleted here while logged out.
+            let now = crate::unix_now();
+            let gone: Vec<_> = sync
+                .known
+                .keys()
+                .filter(|id| session.stored(**id).is_none())
+                .copied()
+                .collect();
+            for id in gone {
+                sync::record_deletion(&mut sync, session, id, now);
+            }
+            log("sync resumed from the previous login");
+        }
+        self.store.write_sync(&sync)?;
+        self.store.delete_sync_baseline()?;
+        self.sync = Some(sync);
         Ok(())
     }
 
