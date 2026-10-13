@@ -130,6 +130,17 @@ impl Store {
         )
     }
 
+    /// Drops one revision from history, if it is there.
+    pub fn unarchive(&self, id: SecretId, revision: u32) -> Result<(), StoreError> {
+        let path = self.history_dir(id).join(format!("{revision}.json"));
+        match fs::remove_file(&path) {
+            Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                Err(StoreError::Io { path, source })
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// True if this revision of the secret is in history.
     pub fn has_archived(&self, id: SecretId, revision: u32) -> bool {
         self.history_dir(id)

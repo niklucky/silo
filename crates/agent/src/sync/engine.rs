@@ -10,14 +10,18 @@
 //! theirs newer:  R → R+1 = yours → R+2 = theirs again
 //! ```
 //!
-//! An edit also wins over a deletion, whichever side made which.
+//! "Yours" is every revision made here since the last sync, renumbered in
+//! order on top of R, not just the latest.
+//!
+//! An edit also wins over a deletion, whichever side made which; local edits
+//! are renumbered on top of the deleted revision the same way.
 
 use serde::{Deserialize, Serialize};
 use silo_core::crypto::CryptoRng;
 use silo_core::sync::{
     Change, HistoryQuery, HistoryRequest, PushItem, PushRequest, PushResult, Tombstone,
 };
-use silo_core::vault::{SecretId, StoredSecret};
+use silo_core::vault::{SecretId, SecretMeta, StoredSecret};
 
 use super::SyncError;
 use super::http::HttpClient;
@@ -100,7 +104,7 @@ pub trait VaultAccess {
 pub fn run(access: &impl VaultAccess, now: &dyn Fn() -> u64) -> Result<SyncReport, SyncError> {
     let client =
         access.with_vault(|v| Ok(HttpClient::new(&v.state.server)?.with_token(&v.state.token)))?;
-    let result = run_with(access, &client);
+    let result = run_with(access, &client, now);
     let error = result.as_ref().err().map(ToString::to_string);
     let recorded = access.with_vault(|v| {
         if error.is_none() {
@@ -114,7 +118,11 @@ pub fn run(access: &impl VaultAccess, now: &dyn Fn() -> u64) -> Result<SyncRepor
     Ok(report)
 }
 
-fn run_with(access: &impl VaultAccess, client: &HttpClient) -> Result<SyncReport, SyncError> {
+fn run_with(
+    access: &impl VaultAccess,
+    client: &HttpClient,
+    now: &dyn Fn() -> u64,
+) -> Result<SyncReport, SyncError> {
     let mut progress = Progress::default();
     let mut rng = rand::rng();
 
@@ -163,7 +171,7 @@ fn run_with(access: &impl VaultAccess, client: &HttpClient) -> Result<SyncReport
             }
             access.with_vault(|v| {
                 for (item, result) in chunk.iter().zip(reply.results) {
-                    apply_result(v, &mut rng, item, result, &mut progress)?;
+                    apply_result(v, &mut rng, item, result, &mut progress, now)?;
                 }
                 v.save()
             })?;
@@ -207,7 +215,7 @@ fn apply_change(
 ) -> Result<(), SyncError> {
     match change {
         Change::Put { entry, .. } => apply_put(v, rng, entry, progress),
-        Change::Delete { tombstone, .. } => apply_delete(v, tombstone, progress),
+        Change::Delete { tombstone, .. } => apply_delete(v, rng, tombstone, progress),
     }
 }
 
@@ -279,27 +287,16 @@ fn resolve_conflict(
 ) -> Result<(), SyncError> {
     let id = remote.secret.id;
     let base = remote.secret.revision;
-    let next = base
-        .checked_add(1)
-        .filter(|n| n.checked_add(1).is_some())
-        .ok_or_else(|| SyncError::Protocol(format!("{id} has run out of revisions")))?;
     let (theirs_meta, theirs_body) = v.session.open_parts(&remote)?;
-    let local = v
-        .session
-        .stored(id)
-        .cloned()
-        .ok_or_else(|| SyncError::Protocol(format!("{id} vanished during sync")))?;
-    let (mine_meta, mine_body) = v.session.open_parts(&local)?;
 
     progress.gap(id, v.state.known.get(&id).copied(), base);
+    let (mine, mine_meta) = rebase_local(v, rng, id, base, 1)?;
     v.store.archive(&remote)?;
-    v.session
-        .reseal(v.store, rng, id, next, &mine_meta, &mine_body, false)?;
     let outcome = if mine_meta.updated_at > theirs_meta.updated_at {
         "kept yours, theirs is in history"
     } else {
         v.session
-            .reseal(v.store, rng, id, next + 1, &theirs_meta, &theirs_body, true)?;
+            .reseal(v.store, rng, id, mine + 1, &theirs_meta, &theirs_body, true)?;
         "kept theirs, yours is in history"
     };
     v.state.known.insert(id, base);
@@ -310,8 +307,63 @@ fn resolve_conflict(
     Ok(())
 }
 
+/// Moves the revisions made here since the server's last known one on top of
+/// the server's `base`, oldest first, so none shares a number with a revision
+/// from elsewhere: they become `base + 1`, `base + 2`, … and the newest stays
+/// current. `spare` more numbers must be left after it. Returns the newest's
+/// revision and meta.
+fn rebase_local(
+    v: &mut Vault<'_>,
+    rng: &mut impl CryptoRng,
+    id: SecretId,
+    base: u32,
+    spare: u32,
+) -> Result<(u32, SecretMeta), SyncError> {
+    let current = v
+        .session
+        .stored(id)
+        .cloned()
+        .ok_or_else(|| SyncError::Protocol(format!("{id} vanished during sync")))?;
+    // Without a known revision (never synced, or the server lost its data),
+    // only what is above the server's revision is unknown to it.
+    let after = v.state.known.get(&id).copied().unwrap_or(base);
+    let mut chain: Vec<StoredSecret> = v
+        .store
+        .history(id)?
+        .into_iter()
+        .filter(|h| h.secret.revision > after && h.secret.revision < current.secret.revision)
+        .collect();
+    chain.reverse();
+    chain.push(current);
+    let opened = chain
+        .iter()
+        .map(|stored| v.session.open_parts(stored))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let count = u32::try_from(opened.len()).ok();
+    let newest = count
+        .and_then(|n| base.checked_add(n))
+        .filter(|n| n.checked_add(spare).is_some())
+        .ok_or_else(|| SyncError::Protocol(format!("{id} has run out of revisions")))?;
+    for old in &chain[..chain.len() - 1] {
+        v.store.unarchive(id, old.secret.revision)?;
+    }
+    for (revision, (meta, body)) in (base + 1..=newest).zip(&opened) {
+        // The first replaces the current revision, which is in `opened`
+        // already; each later one moves the one before it into history.
+        v.session
+            .reseal(v.store, rng, id, revision, meta, body, revision > base + 1)?;
+    }
+    let (meta, _) = opened
+        .into_iter()
+        .next_back()
+        .expect("the chain ends with current");
+    Ok((newest, meta))
+}
+
 fn apply_delete(
     v: &mut Vault<'_>,
+    rng: &mut impl CryptoRng,
     tombstone: Tombstone,
     progress: &mut Progress,
 ) -> Result<(), SyncError> {
@@ -337,7 +389,10 @@ fn apply_delete(
             progress.report.removed += 1;
         }
         Some(_) => {
-            // Changed here since: the edit wins and goes back up as a restore.
+            // Changed here since: the edit wins and goes back up as a restore,
+            // on top of the deleted revision.
+            progress.gap(id, known, tombstone.revision.saturating_add(1));
+            rebase_local(v, rng, id, tombstone.revision, 0)?;
             v.state.deleted_remotely.insert(id, tombstone.revision);
             v.state.known.insert(id, tombstone.revision);
             progress.report.conflicts.push(format!(
@@ -406,14 +461,25 @@ fn apply_result(
     item: &PushItem,
     result: PushResult,
     progress: &mut Progress,
+    now: &dyn Fn() -> u64,
 ) -> Result<(), SyncError> {
     let id = item.secret_id();
     match (item, result) {
         (PushItem::Put { entry, .. }, PushResult::Ok { .. }) => {
-            v.state.known.insert(id, entry.secret.revision);
+            let revision = entry.secret.revision;
             v.state.deleted_remotely.remove(&id);
             v.state.rejected.remove(&id);
             progress.report.pushed += 1;
+            if v.session.stored(id).is_some() {
+                v.state.known.insert(id, revision);
+            } else {
+                // Deleted here while the upload was on its way: what the
+                // server has now must go too, or the next pull brings it back.
+                v.state.known.remove(&id);
+                v.state
+                    .deletes
+                    .insert(id, v.session.tombstone(id, revision, now()));
+            }
         }
         (PushItem::Delete { .. }, PushResult::Ok { .. }) => {
             v.state.deletes.remove(&id);
@@ -421,16 +487,16 @@ fn apply_result(
             progress.report.pushed += 1;
         }
         (_, PushResult::Conflict { current }) => apply_change(v, rng, *current, progress)?,
-        (PushItem::Put { entry, .. }, PushResult::Rejected { message }) => {
-            let revision = v
-                .session
-                .stored(id)
-                .map_or(entry.secret.revision, |s| s.secret.revision);
+        (PushItem::Put { .. }, PushResult::Rejected { message }) => {
             progress
                 .report
                 .rejected
                 .push(format!("{}: {message}", path(v, id)));
-            v.state.rejected.insert(id, Rejection { revision, message });
+            // Deleted here meanwhile: nothing left to hold back.
+            if let Some(stored) = v.session.stored(id) {
+                let revision = stored.secret.revision;
+                v.state.rejected.insert(id, Rejection { revision, message });
+            }
         }
         (PushItem::Delete { .. }, PushResult::Rejected { message }) => {
             v.state.deletes.remove(&id);
@@ -446,4 +512,76 @@ fn apply_result(
 
 fn path(v: &Vault<'_>, id: SecretId) -> String {
     v.session.path_of(id).unwrap_or_else(|| id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use crate::protocol::NewSecret;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use silo_core::AccountRecord;
+    use silo_core::crypto::KdfParams;
+    use silo_core::vault::{FolderPath, Note, SecretBody};
+
+    #[test]
+    fn a_deletion_during_an_upload_deletes_the_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Paths::new(dir.path())).unwrap();
+        let mut rng = StdRng::seed_from_u64(7);
+        let kdf = KdfParams::new(&mut rng, 256, 1, 1);
+        let (record, _) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
+        store.write_account(&record).unwrap();
+        let (mut session, _) = Session::unlock(&store, b"pw").unwrap();
+        session
+            .add(
+                &store,
+                &mut rng,
+                1,
+                NewSecret {
+                    title: "new".into(),
+                    folder: FolderPath::default(),
+                    tags: vec![],
+                    urls: vec![],
+                    basic_auth: false,
+                    body: SecretBody::Note(Note { text: "x".into() }),
+                },
+            )
+            .unwrap();
+        let mut state = SyncState::default();
+        let mut v = Vault {
+            store: &store,
+            session: &mut session,
+            state: &mut state,
+        };
+        let mut progress = Progress::default();
+
+        let items = plan_push(&mut v).unwrap();
+        let [PushItem::Put { entry, .. }] = &items[..] else {
+            panic!("{items:?}")
+        };
+        let id = entry.secret.id;
+        // Removed while the push is on its way; never synced, so the agent
+        // recorded no deletion.
+        v.session.remove_id(v.store, id).unwrap();
+        let ok = PushResult::Ok { seq: 1 };
+        apply_result(&mut v, &mut rng, &items[0], ok, &mut progress, &|| 5).unwrap();
+
+        assert!(!v.state.known.contains_key(&id));
+        assert_eq!(v.state.deletes[&id].revision, entry.secret.revision);
+        // The upload coming back in a pull stays deleted…
+        let change = Change::Put {
+            seq: 1,
+            entry: entry.clone(),
+        };
+        apply_change(&mut v, &mut rng, change, &mut progress).unwrap();
+        assert!(v.session.stored(id).is_none());
+        // …and the next push deletes it on the server.
+        let items = plan_push(&mut v).unwrap();
+        assert!(
+            matches!(&items[..], [PushItem::Delete { tombstone }] if tombstone.secret_id == id),
+            "{items:?}"
+        );
+    }
 }

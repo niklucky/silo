@@ -381,6 +381,73 @@ fn conflicts_keep_both_versions() {
 }
 
 #[test]
+fn every_offline_edit_survives_a_conflict() {
+    let server = Server::start();
+    let mut laptop = Device::start(true);
+    laptop.add_note("notes/shared", "base");
+    laptop.register(&server, "nikita");
+    laptop.sync();
+    let mut desktop = Device::start(false);
+    desktop.login(&server, "nikita");
+    desktop.sync();
+
+    // Two edits on the laptop while the desktop's edit gets there first.
+    laptop.edit_note("notes/shared", "laptop 1");
+    laptop.edit_note("notes/shared", "laptop 2");
+    desktop.edit_note("notes/shared", "desktop");
+    desktop.sync();
+    let report = laptop.sync();
+    assert_eq!(report.conflicts.len(), 1, "{report:?}");
+    desktop.sync();
+
+    let current = laptop.text("notes/shared");
+    assert_eq!(desktop.text("notes/shared"), current);
+    for device in [&mut laptop, &mut desktop] {
+        let mut texts = device.all_texts("notes/shared");
+        texts.sort();
+        texts.dedup();
+        assert_eq!(texts, ["base", "desktop", "laptop 1", "laptop 2"]);
+    }
+}
+
+#[test]
+fn an_offline_edit_restores_a_secret_deleted_after_another_edit() {
+    let server = Server::start();
+    let mut laptop = Device::start(true);
+    laptop.add_note("notes/shared", "base");
+    laptop.register(&server, "nikita");
+    laptop.sync();
+    let mut desktop = Device::start(false);
+    desktop.login(&server, "nikita");
+    desktop.sync();
+
+    // The desktop edits and then deletes while the laptop edits offline: the
+    // deleted revision has the same number as the laptop's edit, then a
+    // higher one.
+    for edits in [1, 2] {
+        laptop.edit_note("notes/shared", &format!("offline {edits}"));
+        for n in 0..edits {
+            desktop.edit_note("notes/shared", &format!("desktop {n}"));
+        }
+        desktop.sync();
+        desktop.call(Request::Remove {
+            selector: "notes/shared".into(),
+        });
+        desktop.sync();
+
+        let report = laptop.sync();
+        assert_eq!(report.conflicts.len(), 1, "{report:?}");
+        assert_eq!(report.pushed, 1, "{report:?}");
+        desktop.sync();
+        let expected = format!("offline {edits}");
+        assert_eq!(desktop.text("notes/shared"), Some(expected.clone()));
+        assert_eq!(laptop.text("notes/shared"), Some(expected));
+        assert_eq!(laptop.sync(), SyncReport::default());
+        assert_eq!(desktop.sync(), SyncReport::default());
+    }
+}
+
+#[test]
 fn revisions_not_signed_by_the_account_are_ignored() {
     let server = Server::start();
     let mut laptop = Device::start(true);
