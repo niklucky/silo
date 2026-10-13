@@ -148,6 +148,7 @@ fn entry(
         folder: FolderPath::root(),
         tags: vec![],
         urls: vec![],
+        basic_auth: false,
         created_at: 0,
         updated_at: 0,
     };

@@ -22,6 +22,8 @@ export interface ChallengeView {
   host: string;
   realm: string | null;
   state: "locked" | "no_match";
+  /** Paths of the saved logins the site refused. */
+  refused: string[];
 }
 
 /**
@@ -81,6 +83,8 @@ export type UiRequest =
       choice?: SaveChoice;
     }
   | { kind: "challenge_cancel"; id: string }
+  /** Popup: the logins `origin` refused as Basic Auth. */
+  | { kind: "basic_auth"; origin: string }
   /** Popup "Fill": ask the content scripts in a tab to fill this login. */
   | { kind: "fill_tab"; tabId: number; id: string };
 
@@ -96,6 +100,8 @@ export type UiResponse =
   | { kind: "save" }
   /** The same username is already saved for this site: ask, then save again with a choice. */
   | { kind: "conflict"; logins: SameSiteLogin[] }
+  /** Answer to `basic_auth`: login ids. */
+  | { kind: "basic_auth"; refused: string[] }
   /** Answer to `fill_tab`. */
   | { kind: "filled" }
   | { kind: "error"; message: string };

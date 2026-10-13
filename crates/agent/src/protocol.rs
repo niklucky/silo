@@ -69,6 +69,9 @@ pub struct NewSecret {
     pub tags: Vec<Tag>,
     #[serde(default)]
     pub urls: Vec<String>,
+    /// Logins only: answers HTTP Basic Auth on its URLs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub basic_auth: bool,
     pub body: SecretBody,
 }
 
@@ -89,6 +92,9 @@ pub struct SecretUpdate {
     pub tags: Option<Vec<Tag>>,
     #[serde(default)]
     pub urls: Option<Vec<String>>,
+    /// Logins only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basic_auth: Option<bool>,
     #[serde(default)]
     pub body: Option<SecretBody>,
 }

@@ -114,6 +114,9 @@ fn restoration(current: &SecretView, target: &SecretView) -> (SecretUpdate, Vec<
     if now.tags != then.tags {
         changed.push("tags");
     }
+    if now.basic_auth != then.basic_auth {
+        changed.push("basic auth");
+    }
     match (&current.body, &target.body) {
         (SecretBody::Login(a), SecretBody::Login(b)) => {
             for (name, differs) in [
@@ -142,6 +145,7 @@ fn restoration(current: &SecretView, target: &SecretView) -> (SecretUpdate, Vec<
         folder: (now.folder != then.folder).then(|| then.folder.clone()),
         tags: (now.tags != then.tags).then(|| then.tags.clone()),
         urls: (now.urls != then.urls).then(|| then.urls.clone()),
+        basic_auth: (now.basic_auth != then.basic_auth).then_some(then.basic_auth),
         body: (current.body != target.body).then(|| target.body.clone()),
     };
     (update, changed)
@@ -155,6 +159,8 @@ impl EditArgs {
             && self.password.is_none()
             && !self.generate
             && self.notes.is_none()
+            && !self.basic_auth
+            && !self.no_basic_auth
             && self.add_url.is_empty()
             && self.rm_url.is_empty()
             && self.add_tag.is_empty()
@@ -173,6 +179,7 @@ struct Changes {
     password: Option<Zeroizing<String>>,
     generated: bool,
     notes: Option<String>,
+    basic_auth: Option<bool>,
     urls: ListEdit,
     tags: ListEdit,
     set: Vec<(String, String)>,
@@ -247,6 +254,7 @@ impl Changes {
             password,
             generated,
             notes: args.notes,
+            basic_auth: (args.basic_auth || args.no_basic_auth).then_some(args.basic_auth),
             urls: ListEdit {
                 replace: None,
                 add: args.add_url,
@@ -269,8 +277,11 @@ impl Changes {
         [
             (
                 SecretKind::Login,
-                "--username, --password, --generate and --notes",
-                self.username.is_some() || self.password.is_some() || self.notes.is_some(),
+                "--username, --password, --generate, --notes and --basic-auth",
+                self.username.is_some()
+                    || self.password.is_some()
+                    || self.notes.is_some()
+                    || self.basic_auth.is_some(),
             ),
             (
                 SecretKind::EnvSet,
@@ -305,6 +316,14 @@ fn ask(view: &SecretView) -> Result<Changes> {
                 bail!("passwords do not match");
             }
             changes.password = Some(password);
+        }
+        let current = if view.meta.basic_auth { "yes" } else { "no" };
+        if let Some(answer) = prompt::line("Answers Basic Auth (yes/no)", current)? {
+            changes.basic_auth = Some(match answer.to_ascii_lowercase().as_str() {
+                "y" | "yes" => true,
+                "n" | "no" => false,
+                _ => bail!("expected yes or no, got {answer:?}"),
+            });
         }
     }
     if let Some(urls) = prompt::line("URLs", &view.meta.urls.join(", "))? {
@@ -342,6 +361,7 @@ fn apply(view: &SecretView, changes: Changes) -> Result<(SecretUpdate, Vec<&'sta
         folder: None,
         tags: None,
         urls: None,
+        basic_auth: None,
         body: None,
     };
     let mut changed = Vec::new();
@@ -372,6 +392,13 @@ fn apply(view: &SecretView, changes: Changes) -> Result<(SecretUpdate, Vec<&'sta
     if new_tags != current_tags {
         update.tags = Some(tags(&new_tags)?);
         changed.push("tags");
+    }
+
+    if let Some(basic_auth) = changes.basic_auth
+        && basic_auth != view.meta.basic_auth
+    {
+        update.basic_auth = Some(basic_auth);
+        changed.push("basic auth");
     }
 
     let mut body = view.body.clone();
@@ -468,6 +495,7 @@ mod tests {
                 folder: FolderPath::parse("work").unwrap(),
                 tags: tags.iter().map(|t| Tag::new(t).unwrap()).collect(),
                 urls: urls.iter().map(|u| (*u).to_owned()).collect(),
+                basic_auth: false,
                 created_at: 1,
                 updated_at: 1,
             },

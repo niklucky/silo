@@ -558,6 +558,7 @@ mod tests {
             folder: Default::default(),
             tags: vec![],
             urls: vec![],
+            basic_auth: false,
             created_at: 0,
             updated_at: 0,
         };

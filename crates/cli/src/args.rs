@@ -191,6 +191,9 @@ pub enum AddCommand {
         tag: Vec<String>,
         #[arg(long)]
         notes: Option<String>,
+        /// Answers HTTP Basic Auth on its URLs: the browser tries it first there
+        #[arg(long)]
+        basic_auth: bool,
     },
     /// Environment variable set from KEY=VALUE arguments and/or a dotenv file
     Env {
@@ -239,6 +242,12 @@ pub struct EditArgs {
     /// Login: new notes ("" clears them)
     #[arg(long)]
     pub notes: Option<String>,
+    /// Login: answers HTTP Basic Auth on its URLs
+    #[arg(long, conflicts_with = "no_basic_auth")]
+    pub basic_auth: bool,
+    /// Login: no longer answers HTTP Basic Auth
+    #[arg(long)]
+    pub no_basic_auth: bool,
     /// Add a URL pattern
     #[arg(long = "add-url")]
     pub add_url: Vec<String>,

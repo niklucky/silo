@@ -12,6 +12,7 @@
     "build:safari": "wxt build -b safari",
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
+    "test": "node --test tests/*.test.cjs",
     "typecheck": "tsc --noEmit",
     "postinstall": "wxt prepare"
   },

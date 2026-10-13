@@ -223,6 +223,7 @@ impl Session {
             folder,
             tags,
             urls,
+            basic_auth,
             body,
             ..
         } = update;
@@ -254,6 +255,10 @@ impl Session {
         }
         if let Some(urls) = urls {
             meta.urls = urls;
+        }
+        if let Some(basic_auth) = basic_auth {
+            meta.basic_auth = basic_auth;
+            check_basic_auth(&meta)?;
         }
         meta.updated_at = now;
 
@@ -317,6 +322,7 @@ impl Session {
             folder,
             mut tags,
             urls,
+            basic_auth,
             body,
         } = new;
         let title = validate_title(&title)?;
@@ -333,9 +339,11 @@ impl Session {
             folder,
             tags,
             urls,
+            basic_auth,
             created_at: now,
             updated_at: now,
         };
+        check_basic_auth(&meta)?;
         let (sealed, key) = SealedSecret::seal(rng, &self.keys, id, 1, &meta, &body)?;
         let grant = Grant::seal(rng, &self.keys, &sealed, &key, *self.keys.public_key())?;
         let stored = StoredSecret {
@@ -411,6 +419,18 @@ fn validate_title(title: &str) -> Result<String, AgentError> {
     Ok(trimmed.to_owned())
 }
 
+fn check_basic_auth(meta: &SecretMeta) -> Result<(), AgentError> {
+    if meta.basic_auth && meta.kind != SecretKind::Login {
+        return Err(AgentError::Invalid {
+            message: format!(
+                "{} is not a login, so it cannot answer Basic Auth",
+                display_path(meta)
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +458,7 @@ mod tests {
             folder: FolderPath::parse(folder).unwrap(),
             tags: tags.iter().map(|t| Tag::new(t).unwrap()).collect(),
             urls: vec![],
+            basic_auth: false,
             body: SecretBody::Note(Note { text: text.into() }),
         }
     }
@@ -464,6 +485,7 @@ mod tests {
             folder: FolderPath::parse("projects/api").unwrap(),
             tags: vec![Tag::new("dev").unwrap(), Tag::new("dev").unwrap()],
             urls: vec![],
+            basic_auth: false,
             body: SecretBody::EnvSet(EnvSet {
                 vars: vec![EnvVar {
                     key: "DB_URL".into(),
@@ -576,6 +598,7 @@ mod tests {
             folder: FolderPath::parse("dev").unwrap(),
             tags: vec![],
             urls: urls.iter().map(|u| (*u).to_owned()).collect(),
+            basic_auth: false,
             body: SecretBody::Login(Login {
                 username: "u".into(),
                 password: "p".into(),
@@ -631,6 +654,7 @@ mod tests {
             folder: FolderPath::parse("web").unwrap(),
             tags: vec![],
             urls: urls.iter().map(|u| (*u).to_owned()).collect(),
+            basic_auth: false,
             body: SecretBody::Login(Login {
                 username: username.into(),
                 password: "old".into(),
@@ -689,6 +713,60 @@ mod tests {
     }
 
     #[test]
+    fn basic_auth_is_for_logins_only() {
+        let (_dir, store, mut rng) = setup();
+        let (mut session, _) = Session::unlock(&store, b"pw").unwrap();
+        let gate = NewSecret {
+            basic_auth: true,
+            ..login("gate", "admin", &["example.com"])
+        };
+        assert!(
+            session
+                .add(&store, &mut rng, 1, gate)
+                .unwrap()
+                .meta
+                .basic_auth
+        );
+        let not_a_login = NewSecret {
+            basic_auth: true,
+            ..note("notes/n", "x", &[])
+        };
+        assert!(matches!(
+            session.add(&store, &mut rng, 2, not_a_login),
+            Err(AgentError::Invalid { .. })
+        ));
+
+        session
+            .add(&store, &mut rng, 3, note("notes/n", "x", &[]))
+            .unwrap();
+        let mark = |selector: &str, basic_auth| SecretUpdate {
+            selector: selector.into(),
+            revision: None,
+            title: None,
+            folder: None,
+            tags: None,
+            urls: None,
+            basic_auth: Some(basic_auth),
+            body: None,
+        };
+        assert!(matches!(
+            session.update(&store, &mut rng, 4, mark("notes/n", true)),
+            Err(AgentError::Invalid { .. })
+        ));
+        let cleared = session
+            .update(&store, &mut rng, 5, mark("web/gate", false))
+            .unwrap();
+        assert!(!cleared.meta.basic_auth);
+
+        // It survives sealing: a fresh unlock reads it back from disk.
+        session
+            .update(&store, &mut rng, 6, mark("web/gate", true))
+            .unwrap();
+        let (reloaded, _) = Session::unlock(&store, b"pw").unwrap();
+        assert!(reloaded.get("web/gate").unwrap().meta.basic_auth);
+    }
+
+    #[test]
     fn update_makes_a_new_revision_and_keeps_the_old_one() {
         let (_dir, store, mut rng) = setup();
         let (mut session, _) = Session::unlock(&store, b"pw").unwrap();
@@ -710,6 +788,7 @@ mod tests {
                 "cutstoryapp.com".into(),
                 "https://dev.cutstoryapp.com".into(),
             ]),
+            basic_auth: None,
             body: Some(SecretBody::Login(Login {
                 username: "nikita".into(),
                 password: password.into(),
@@ -781,6 +860,7 @@ mod tests {
             folder: None,
             tags: None,
             urls: None,
+            basic_auth: None,
             body: None,
         };
         let renamed = session.update(&store, &mut rng, 50, rename).unwrap();
@@ -813,6 +893,7 @@ mod tests {
             folder: FolderPath::root(),
             tags: vec![],
             urls: vec!["https://example.com".into()],
+            basic_auth: false,
             body: SecretBody::Login(Login {
                 username: "u".into(),
                 password: "p".into(),

@@ -66,6 +66,10 @@ pub struct SecretMeta {
     /// Origins or URL patterns this secret applies to (logins, Basic Auth).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
+    /// A login that answers HTTP Basic Auth on its URLs: tried first there,
+    /// offered last in sign-in forms. Logins only.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub basic_auth: bool,
     /// Unix seconds, supplied by the host.
     pub created_at: u64,
     /// Unix seconds, supplied by the host.

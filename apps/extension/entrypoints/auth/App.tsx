@@ -231,7 +231,14 @@ export default function App() {
   return (
     <main className="card">
       {site}
-      <p>No saved login for this site. Enter it once:</p>
+      {challenge.refused.length === 0 ? (
+        <p>No saved login for this site. Enter it once:</p>
+      ) : (
+        <p>
+          The site refused {challenge.refused.length === 1 ? "the saved login" : "the saved logins"}{" "}
+          {challenge.refused.join(", ")}. Enter the right one:
+        </p>
+      )}
       <form
         onSubmit={(e) => {
           e.preventDefault();

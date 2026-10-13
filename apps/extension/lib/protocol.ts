@@ -13,6 +13,8 @@ export interface SecretMeta {
   folder: string;
   tags?: string[];
   urls?: string[];
+  /** A login that answers HTTP Basic Auth: tried first there, offered last in sign-in forms. */
+  basic_auth?: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -68,6 +70,7 @@ export interface NewSecret {
   folder?: string;
   tags?: string[];
   urls?: string[];
+  basic_auth?: boolean;
   body: SecretBody;
 }
 
@@ -80,6 +83,7 @@ export interface SecretUpdate {
   folder?: string;
   tags?: string[];
   urls?: string[];
+  basic_auth?: boolean;
   body?: SecretBody;
 }
 
@@ -140,6 +144,10 @@ export function describe(error: AgentError): string {
     default:
       return error.message;
   }
+}
+
+export function isBasicAuth(meta: SecretMeta): boolean {
+  return meta.basic_auth === true;
 }
 
 /** `folder/title`, or just the title at the root. */
