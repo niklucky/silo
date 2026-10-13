@@ -5,9 +5,13 @@
 //! Unlocking yields [`AccountKeys`], which stay in memory only.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::crypto::{self, Ciphertext, CryptoRng, Fingerprint, KdfParams, PublicKey, SecretKey};
+use crate::crypto::{
+    self, Ciphertext, CryptoRng, Fingerprint, KdfParams, MasterKey, PublicKey, SecretKey,
+    SigningKey, SigningPublicKey,
+};
 use crate::error::{Error, Result};
 
 /// Current on-disk / on-wire format of [`AccountRecord`].
@@ -15,6 +19,7 @@ pub const ACCOUNT_FORMAT: u8 = 1;
 
 const ACCOUNT_WRAP_INFO: &[u8] = b"secret/v1/account-key-wrap";
 const ACCOUNT_AAD_DOMAIN: &[u8] = b"secret/v1/account";
+const IDENTITY_FINGERPRINT_DOMAIN: &[u8] = b"silo/v1/identity";
 
 /// Stored description of an account. Contains no secrets; safe on disk and server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,23 +30,66 @@ pub struct AccountRecord {
     pub wrapped_secret_key: Ciphertext,
 }
 
+/// The public half of an account: what others need to share with it (the
+/// X25519 key) and to check what it wrote (the Ed25519 key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Identity {
+    pub public_key: PublicKey,
+    pub signing_key: SigningPublicKey,
+}
+
+impl Identity {
+    /// What people compare out of band before trusting each other. Covers
+    /// both keys, so a server cannot swap either one unnoticed.
+    pub fn fingerprint(&self) -> Fingerprint {
+        let digest = Sha256::new()
+            .chain_update(IDENTITY_FINGERPRINT_DOMAIN)
+            .chain_update(self.public_key.as_bytes())
+            .chain_update(self.signing_key.as_bytes())
+            .finalize();
+        Fingerprint::from_digest(digest.into())
+    }
+}
+
 /// Unlocked account keys. Zeroed on drop; never serialized.
 pub struct AccountKeys {
     secret_key: SecretKey,
     public_key: PublicKey,
+    signing_key: SigningKey,
 }
 
 impl AccountKeys {
+    fn new(secret_key: SecretKey) -> Self {
+        let public_key = secret_key.public_key();
+        let signing_key = SigningKey::derive(&secret_key);
+        Self {
+            secret_key,
+            public_key,
+            signing_key,
+        }
+    }
+
     pub fn public_key(&self) -> &PublicKey {
         &self.public_key
     }
 
+    pub fn identity(&self) -> Identity {
+        Identity {
+            public_key: self.public_key,
+            signing_key: self.signing_key.public_key(),
+        }
+    }
+
     pub fn fingerprint(&self) -> Fingerprint {
-        self.public_key.fingerprint()
+        self.identity().fingerprint()
     }
 
     pub(crate) fn secret_key(&self) -> &SecretKey {
         &self.secret_key
+    }
+
+    pub(crate) fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
     }
 }
 
@@ -60,16 +108,9 @@ impl AccountRecord {
         password: &[u8],
         kdf: KdfParams,
     ) -> Result<(Self, AccountKeys)> {
-        let secret_key = SecretKey::generate(rng);
-        let public_key = secret_key.public_key();
-        let record = Self::wrap(rng, password, kdf, &secret_key, public_key)?;
-        Ok((
-            record,
-            AccountKeys {
-                secret_key,
-                public_key,
-            },
-        ))
+        let keys = AccountKeys::new(SecretKey::generate(rng));
+        let record = Self::wrap(rng, password, kdf, &keys.secret_key, keys.public_key)?;
+        Ok((record, keys))
     }
 
     /// Derives the wrapping key from `password` and unwraps the secret key.
@@ -79,7 +120,17 @@ impl AccountRecord {
         if self.format != ACCOUNT_FORMAT {
             return Err(Error::UnsupportedFormat(self.format));
         }
-        let wrap_key = self.kdf.derive(password)?.subkey(ACCOUNT_WRAP_INFO);
+        self.unlock_with(&self.kdf.derive(password)?)
+    }
+
+    /// Unwraps the secret key with a master key the caller already derived
+    /// from this record's KDF parameters, for example while logging in to a
+    /// sync server, which needs the same master key for its login key.
+    pub fn unlock_with(&self, master: &MasterKey) -> Result<AccountKeys> {
+        if self.format != ACCOUNT_FORMAT {
+            return Err(Error::UnsupportedFormat(self.format));
+        }
+        let wrap_key = master.subkey(ACCOUNT_WRAP_INFO);
         let plain = crypto::open(&wrap_key, &aad(&self.public_key), &self.wrapped_secret_key)
             .map_err(|_| Error::Unlock)?;
         let mut bytes = Zeroizing::new([0u8; crypto::KEY_LEN]);
@@ -87,14 +138,11 @@ impl AccountRecord {
             return Err(Error::Unlock);
         }
         bytes.copy_from_slice(&plain);
-        let secret_key = SecretKey::from_bytes(bytes);
-        if secret_key.public_key() != self.public_key {
+        let keys = AccountKeys::new(SecretKey::from_bytes(bytes));
+        if keys.public_key != self.public_key {
             return Err(Error::Unlock);
         }
-        Ok(AccountKeys {
-            secret_key,
-            public_key: self.public_key,
-        })
+        Ok(keys)
     }
 
     /// Re-wraps the same keypair under a new password and fresh KDF parameters.
@@ -156,6 +204,27 @@ mod tests {
         assert_eq!(unlocked.public_key(), keys.public_key());
         assert_eq!(unlocked.fingerprint(), keys.fingerprint());
         assert_eq!(record.unlock(b"wrong").unwrap_err(), Error::Unlock);
+    }
+
+    #[test]
+    fn unlock_with_a_master_key_and_identity() {
+        let mut rng = testing::rng(24);
+        let kdf = testing::weak_kdf(&mut rng);
+        let (record, keys) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
+
+        let master = record.kdf.derive(b"pw").unwrap();
+        let unlocked = record.unlock_with(&master).unwrap();
+        assert_eq!(unlocked.identity(), keys.identity());
+        assert_eq!(unlocked.identity().public_key, record.public_key);
+
+        let wrong = record.kdf.derive(b"nope").unwrap();
+        assert_eq!(record.unlock_with(&wrong).unwrap_err(), Error::Unlock);
+
+        // The fingerprint covers both keys.
+        let mut other = keys.identity();
+        other.signing_key = SigningPublicKey::from_bytes([7; 32]);
+        assert_ne!(other.fingerprint(), keys.fingerprint());
+        assert_ne!(keys.fingerprint(), record.public_key.fingerprint());
     }
 
     #[test]

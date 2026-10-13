@@ -11,19 +11,13 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use silo_core::AccountRecord;
-use silo_core::vault::{Grant, SealedSecret, SecretId};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use silo_core::AccountRecord;
+use silo_core::vault::SecretId;
+pub use silo_core::vault::StoredSecret;
 
 use crate::paths::Paths;
-
-/// The latest revision of one secret together with every grant on it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoredSecret {
-    pub secret: SealedSecret,
-    pub grants: Vec<Grant>,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -216,7 +210,7 @@ mod tests {
     use rand::SeedableRng;
     use silo_core::crypto::KdfParams;
     use silo_core::vault::SecretKind;
-    use silo_core::vault::{FolderPath, Note, SecretBody, SecretMeta};
+    use silo_core::vault::{FolderPath, Note, SealedSecret, SecretBody, SecretMeta};
 
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
@@ -261,8 +255,10 @@ mod tests {
             updated_at: 0,
         };
         let body = SecretBody::Note(Note { text: "hi".into() });
+        let kdf = KdfParams::new(&mut rng, 256, 1, 1);
+        let (_, keys) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
         let id = SecretId::from_random_bytes([1; 16]);
-        let (sealed, _) = SealedSecret::seal(&mut rng, id, 1, &meta, &body).unwrap();
+        let (sealed, _) = SealedSecret::seal(&mut rng, &keys, id, 1, &meta, &body).unwrap();
         let stored = StoredSecret {
             secret: sealed,
             grants: vec![],
@@ -275,7 +271,7 @@ mod tests {
         // An update archives the old revision; it is not loaded as a secret.
         assert!(store.history(id).unwrap().is_empty());
         store.archive(&stored).unwrap();
-        let (second, _) = SealedSecret::seal(&mut rng, id, 2, &meta, &body).unwrap();
+        let (second, _) = SealedSecret::seal(&mut rng, &keys, id, 2, &meta, &body).unwrap();
         let newer = StoredSecret {
             secret: second,
             grants: vec![],

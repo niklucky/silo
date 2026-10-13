@@ -6,12 +6,28 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[lib]
+name = "silo_server"
+
 [[bin]]
 name = "silo-server"
 path = "src/main.rs"
 
 [dependencies]
 silo-core.workspace = true
+anyhow.workspace = true
 axum.workspace = true
-tokio.workspace = true
+base64.workspace = true
+clap = { workspace = true, features = ["env"] }
+hkdf.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower.workspace = true

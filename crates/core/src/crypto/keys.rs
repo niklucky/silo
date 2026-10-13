@@ -124,6 +124,10 @@ impl fmt::Debug for SecretKey {
 pub struct Fingerprint([u8; 32]);
 
 impl Fingerprint {
+    pub(crate) fn from_digest(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

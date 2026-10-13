@@ -16,6 +16,7 @@ argon2 = { version = "0.6", default-features = false, features = ["alloc", "zero
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 ciborium = "0.2"
+ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
 hkdf = "0.13"
 psl = "2.1.240"
 rand_core = "0.10"

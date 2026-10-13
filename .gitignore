@@ -19,5 +19,10 @@ dist/
 .vscode/*
 !.vscode/extensions.json
 
+# Local sync server data
+*.db
+*.db-shm
+*.db-wal
+
 # Safari app
 /apps/safari/build/

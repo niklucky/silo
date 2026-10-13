@@ -103,10 +103,7 @@ fn unlock(ttl: Option<Duration>) -> Result<()> {
     let paths = Paths::from_env()?;
     let store = Store::open(paths.clone())?;
     if !store.has_account() {
-        bail!(
-            "no account in {}; run `silo init`",
-            paths.home().display()
-        );
+        bail!("no account in {}; run `silo init`", paths.home().display());
     }
     let mut agent = ensure_agent(&paths)?;
     let password = prompt::password("Master password")?;
