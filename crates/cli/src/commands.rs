@@ -310,6 +310,7 @@ fn add(command: AddCommand) -> Result<()> {
             url,
             tag,
             notes,
+            basic_auth,
         } => {
             let (folder, title) = split_path(&path)?;
             let password = match password {
@@ -321,6 +322,7 @@ fn add(command: AddCommand) -> Result<()> {
                 folder,
                 tags: tags(&tag)?,
                 urls: url,
+                basic_auth,
                 body: SecretBody::Login(Login {
                     username,
                     password,
@@ -360,6 +362,7 @@ fn add(command: AddCommand) -> Result<()> {
                 folder,
                 tags: tags(&tag)?,
                 urls: vec![],
+                basic_auth: false,
                 body: SecretBody::EnvSet(set),
             }
         }
@@ -376,6 +379,7 @@ fn add(command: AddCommand) -> Result<()> {
                 folder,
                 tags: tags(&tag)?,
                 urls: vec![],
+                basic_auth: false,
                 body: SecretBody::File(File {
                     name,
                     mime: None,
@@ -400,6 +404,7 @@ fn add(command: AddCommand) -> Result<()> {
                 folder,
                 tags: tags(&tag)?,
                 urls: vec![],
+                basic_auth: false,
                 body: SecretBody::Note(Note { text }),
             }
         }
@@ -501,6 +506,9 @@ fn print_view(view: &SecretView) {
     }
     if !view.meta.urls.is_empty() {
         println!("  urls:     {}", view.meta.urls.join(", "));
+    }
+    if view.meta.basic_auth {
+        println!("  basic auth: yes");
     }
     println!("  updated:  {}", format::timestamp(view.meta.updated_at));
     println!();
@@ -652,9 +660,12 @@ fn match_url(url: &str, site: bool, json: bool) -> Result<()> {
     }
     let rows: Vec<Vec<String>> = items
         .iter()
-        .map(|s| vec![s.path(), s.meta.urls.join(", ")])
+        .map(|s| {
+            let basic_auth = if s.meta.basic_auth { "yes" } else { "" };
+            vec![s.path(), s.meta.urls.join(", "), basic_auth.to_owned()]
+        })
         .collect();
-    println!("{}", format::table(&["PATH", "URLS"], &rows));
+    println!("{}", format::table(&["PATH", "URLS", "BASIC AUTH"], &rows));
     Ok(())
 }
 

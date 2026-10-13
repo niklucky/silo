@@ -310,6 +310,7 @@ mod tests {
             folder: FolderPath::parse("projects/api").unwrap(),
             tags: vec![Tag::new("dev").unwrap()],
             urls: vec![],
+            basic_auth: false,
             created_at: 1_700_000_000,
             updated_at: 1_700_000_000,
         };
@@ -454,6 +455,7 @@ mod tests {
             folder: FolderPath::parse("work/staging").unwrap(),
             tags: vec![],
             urls: vec!["https://staging.example.com".into()],
+            basic_auth: false,
             created_at: 1,
             updated_at: 2,
         };

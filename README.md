@@ -189,6 +189,16 @@ prefix. A bare host matches any scheme, port and path; an explicit scheme pins
 scheme and port; a path must match at a segment boundary. The most specific
 pattern wins; `silo match <url>` shows the ranking.
 
+A site can have several logins: the app's own accounts and the one Basic Auth
+gate in front of them. Logins marked as Basic Auth answer the `401` first, and
+go last in the login-form menu. The extension marks a login itself when it gets
+through a challenge or is saved from the sign-in page below; by hand:
+`silo add login ... --basic-auth`, or `silo edit web/example.com --basic-auth`
+(`--no-basic-auth` to undo). `silo get` and `silo match` show the mark. When the
+site refuses a login, the extension tries the next one (at most three), then
+shows its sign-in page naming the refused logins. Refusals are forgotten when
+the vault locks or the login's password changes.
+
 Browsers remember Basic Auth credentials they have used until they restart, and
 an extension can neither read nor clear that cache. So the extension never
 feeds it: a `401` is answered by retrying the request with the extension's own

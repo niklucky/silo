@@ -2,7 +2,8 @@ import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { browser } from "wxt/browser";
 import type { AuthEvent, UiRequest, UiResponse } from "@/lib/messages";
 import type { AgentError, Reply, Request, SecretSummary, StatusInfo } from "@/lib/protocol";
-import { describe, secretPath } from "@/lib/protocol";
+import { describe, isBasicAuth, secretPath } from "@/lib/protocol";
+import { originOf } from "@/lib/util";
 
 type View =
   | { state: "loading" }
@@ -40,6 +41,7 @@ export default function App() {
   const [tab, setTab] = useState<{ id: number; url: string } | null>(null);
   const tabUrl = tab?.url ?? null;
   const [matches, setMatches] = useState<SecretSummary[]>([]);
+  const [refused, setRefused] = useState<string[]>([]);
   const [events, setEvents] = useState<AuthEvent[]>([]);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +81,11 @@ export default function App() {
         if (typeof reply === "object" && "matches" in reply) setMatches(reply.matches);
       })
       .catch(() => setMatches([]));
+    send({ kind: "basic_auth", origin: originOf(tabUrl) })
+      .then((response) => {
+        if (response.kind === "basic_auth") setRefused(response.refused);
+      })
+      .catch(() => undefined);
   }, [view.state, tabUrl]);
 
   async function unlock(event: FormEvent) {
@@ -211,11 +218,12 @@ export default function App() {
             </p>
           ) : (
             <ul className="matches">
-              {matches.map((m, i) => (
+              {matches.map((m) => (
                 <li key={m.id}>
                   <span>
                     {secretPath(m.meta)}
-                    {i === 0 && <em>Basic Auth</em>}
+                    {isBasicAuth(m.meta) && <em>Basic Auth</em>}
+                    {refused.includes(m.id) && <em className="refused">refused</em>}
                   </span>
                   <button onClick={() => void fill(m.id)}>Fill</button>
                 </li>
@@ -239,7 +247,7 @@ export default function App() {
                 <span className={`outcome ${e.outcome}`}>{label(e.outcome)}</span>
                 <span className="origin" title={e.detail ?? e.origin}>
                   {e.origin}
-                  {e.detail && (e.outcome === "filled" || e.outcome === "saved") ? ` → ${e.detail}` : ""}
+                  {e.detail && e.outcome !== "error" ? ` → ${e.detail}` : ""}
                 </span>
               </li>
             ))}

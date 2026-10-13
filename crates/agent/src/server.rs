@@ -345,6 +345,7 @@ mod tests {
             folder: FolderPath::parse("notes").unwrap(),
             tags: vec![],
             urls: vec![],
+            basic_auth: false,
             body: SecretBody::Note(Note {
                 text: "world".into(),
             }),

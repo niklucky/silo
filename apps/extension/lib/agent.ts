@@ -11,7 +11,7 @@ import type {
   SecretView,
   StatusInfo,
 } from "./protocol";
-import { describe, secretPath } from "./protocol";
+import { describe, isBasicAuth, secretPath } from "./protocol";
 
 /** Name of the native messaging host; must match `silo browser install`. */
 export const HOST_NAME = "dev.silo.agent";
@@ -46,6 +46,10 @@ export interface Credentials {
   password: string;
   /** `folder/title` of the login used, for the activity log. */
   path: string;
+  /** The login's id; absent for "use once" credentials. */
+  id?: string;
+  /** The login answers Basic Auth. */
+  basicAuth?: boolean;
 }
 
 /**
@@ -162,17 +166,24 @@ export class Agent {
     throw unexpected(reply);
   }
 
-  /** Username and password of the best login for `url`, or null when none is saved. */
-  async credentialsFor(url: string): Promise<Credentials | null> {
-    const [best] = await this.matches(url);
-    if (!best) return null;
-    const view = await this.get(best.id);
+  /** Username and password of the login `id`, or null when it is not a login. */
+  async credentials(id: string): Promise<Credentials | null> {
+    const view = await this.get(id);
     if (!("login" in view.body)) return null;
     return {
       username: view.body.login.username,
       password: view.body.login.password,
       path: secretPath(view.meta),
+      id: view.id,
+      basicAuth: isBasicAuth(view.meta),
     };
+  }
+
+  /** Marks login `id` as answering Basic Auth, unless it already does. */
+  async markBasicAuth(id: string): Promise<void> {
+    const view = await this.get(id);
+    if (isBasicAuth(view.meta)) return;
+    await this.update({ selector: view.id, revision: view.revision, basic_auth: true });
   }
 }
 

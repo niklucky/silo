@@ -16,7 +16,7 @@ import {
   type UiResponse,
   type UpdateTarget,
 } from "@/lib/messages";
-import { secretPath } from "@/lib/protocol";
+import { isBasicAuth, type SecretSummary, secretPath } from "@/lib/protocol";
 import { loadSettings, saveSettings } from "@/lib/settings";
 import { errorText, originOf } from "@/lib/util";
 
@@ -32,6 +32,8 @@ const LOCK_CHECK_MS = 5_000;
 const BYPASS_MS = 15_000;
 /** An auth page left open longer than this is stale. */
 const CHALLENGE_TTL_MS = 10 * 60_000;
+/** A 401 tries at most this many saved logins before asking: each refused one is a failed sign-in. */
+const MAX_BASIC_TRIES = 3;
 /** The form-fill menu lists at most this many logins. */
 const MAX_OPTIONS = 8;
 /** A save looks at this many same-site logins for the same username, and offers at most MAX_CONFLICTS. */
@@ -124,8 +126,15 @@ export default defineBackground({
     const sessions = new Map<string, { creds: Credentials; at: number }>();
     const rules = import.meta.env.FIREFOX ? null : new HeaderRules();
     void rules?.reset();
-    /** Chromium and Safari: the credentials each request to a session origin went out with. */
+    /** The credentials each request to a session origin went out with. */
     const sentWith = new Map<string, Credentials>();
+    /**
+     * Credentials a server answered with another 401, by origin. They are
+     * skipped until the vault locks; a changed password is tried again.
+     */
+    const refused = new Map<string, Credentials[]>();
+    /** Logins already being marked for Basic Auth, so a page load asks the agent once. */
+    const marking = new Set<string>();
     /** "Use once" credentials: this browser session only, never stored. */
     const transient = new Map<string, Credentials>();
     const refreshing = new Map<string, Promise<Lookup>>();
@@ -165,13 +174,20 @@ export default defineBackground({
     async function endAllSessions(): Promise<void> {
       sessions.clear();
       transient.clear();
+      refused.clear();
       await rules?.clear().catch(() => undefined);
     }
 
-    async function lookup(url: string): Promise<Lookup> {
+    /** The best login for `url` that the origin has not refused, Basic Auth logins first. */
+    async function lookup(origin: string, url: string): Promise<Lookup> {
       try {
-        const found = await agent.credentialsFor(url);
-        return found ? { kind: "found", creds: found } : { kind: "none" };
+        const skip = refused.get(origin) ?? [];
+        const matches = await agent.matches(url);
+        for (const match of basicAuth(matches, "first").slice(0, MAX_BASIC_TRIES)) {
+          const creds = await agent.credentials(match.id);
+          if (creds && !skip.some((c) => sameCredentials(c, creds))) return { kind: "found", creds };
+        }
+        return { kind: "none" };
       } catch (err) {
         if (err instanceof AgentError && err.code === "locked") return { kind: "locked" };
         return { kind: "error", message: errorText(err) };
@@ -186,7 +202,7 @@ export default defineBackground({
     function refresh(origin: string, url: string): Promise<Lookup> {
       let inflight = refreshing.get(origin);
       if (!inflight) {
-        inflight = lookup(url)
+        inflight = lookup(origin, url)
           .then(async (result): Promise<Lookup> => {
             if (result.kind === "none") {
               const once = transient.get(origin);
@@ -203,9 +219,38 @@ export default defineBackground({
       return inflight;
     }
 
+    /**
+     * The server answered `sent` with another 401: skip it from now on, so the
+     * next lookup gets the next saved login, and end the session it came from.
+     */
+    async function refuse(origin: string, sent: Credentials): Promise<void> {
+      const list = refused.get(origin) ?? [];
+      if (!list.some((c) => sameCredentials(c, sent))) {
+        refused.set(origin, [...list, sent]);
+        record({ origin, outcome: "rejected", detail: sent.path });
+      }
+      const once = transient.get(origin);
+      if (once && sameCredentials(once, sent)) transient.delete(origin);
+      const current = sessions.get(origin)?.creds;
+      if (current && sameCredentials(current, sent)) await endSession(origin);
+    }
+
+    /** A page load that went out with `sent` got through: mark the login so it goes first from now on. */
+    function accept(origin: string, sent: Credentials): void {
+      const { id } = sent;
+      if (!id || sent.basicAuth || marking.has(id)) return;
+      marking.add(id);
+      agent.markBasicAuth(id).then(
+        () => record({ origin, outcome: "saved", detail: `${sent.path} (marked for Basic Auth)` }),
+        // Locked, removed or edited meanwhile: the next page load after the lock tries again.
+        () => marking.delete(id),
+      );
+    }
+
     /** Leaves the request to the browser and notes why. */
     function giveUp(details: RequestDetails, origin: string, result: Exclude<Lookup, { kind: "found" }>) {
       requests.set(details.requestId, "lookup_failed");
+      sentWith.delete(details.requestId);
       if (result.kind === "locked") {
         badge("!");
         record({ origin, outcome: "locked" });
@@ -241,9 +286,11 @@ export default defineBackground({
         host: new URL(details.url).host,
         realm,
         state,
+        refused: (refused.get(origin) ?? []).map((c) => c.path),
         at: Date.now(),
       });
       requests.set(details.requestId, "lookup_failed");
+      sentWith.delete(details.requestId);
       record({ origin, outcome: "asked" });
       return `${browser.runtime.getURL("/auth.html")}?id=${id}`;
     }
@@ -282,6 +329,7 @@ export default defineBackground({
         }
       }
       requests.set(details.requestId, "injected");
+      sentWith.set(details.requestId, creds);
       return { requestHeaders: withAuthorization(details.requestHeaders ?? [], creds) };
     }
 
@@ -289,11 +337,14 @@ export default defineBackground({
       if (details.statusCode !== 401) return {};
       const challenge = basicChallenge(details.responseHeaders);
       if (!challenge) return {};
-      // Already tried for this request: let onAuthRequired decide.
-      if (requests.has(details.requestId)) return {};
+      const state = requests.get(details.requestId);
+      if (state === "lookup_failed") return {};
       // A redirect re-issues the request as GET, so other methods take the fallback.
       if (details.method !== "GET" && details.method !== "HEAD") return {};
       const origin = originOf(details.url);
+      // The server refused what we sent: retry with the next saved login, or ask.
+      const sent = sentWith.get(details.requestId);
+      if (state === "injected" && sent) await refuse(origin, sent);
       const result = await refresh(origin, details.url);
       if (result.kind === "found") {
         badge("");
@@ -382,11 +433,9 @@ export default defineBackground({
           const current = sessions.get(origin)?.creds;
           if (current && !sameCredentials(current, sent) && canReload(details)) return reload(details);
         }
-        // The server rejected what we sent; step aside so the browser can ask.
-        await endSession(origin);
-        transient.delete(origin);
-        record({ origin, outcome: "rejected" });
-        return {};
+        if (!sent) return {};
+        // The server refused what we sent: try the next saved login, or ask.
+        await refuse(origin, sent);
       }
       if (state === "lookup_failed") return {};
       const result = await refresh(origin, details.url);
@@ -395,6 +444,7 @@ export default defineBackground({
         record({ origin, outcome: "filled", detail: result.creds.path });
         if (!import.meta.env.FIREFOX && canReload(details)) return reload(details);
         requests.set(details.requestId, "injected");
+        sentWith.set(details.requestId, result.creds);
         return { authCredentials: { username: result.creds.username, password: result.creds.password } };
       }
       if (result.kind !== "error" && !import.meta.env.FIREFOX && canTakeOver(details, origin)) {
@@ -457,7 +507,11 @@ export default defineBackground({
       requests.delete(details.requestId);
       sentWith.delete(details.requestId);
     };
-    browser.webRequest.onCompleted.addListener(forget, ALL_URLS);
+    browser.webRequest.onCompleted.addListener((details) => {
+      const sent = sentWith.get(details.requestId);
+      if (sent && details.type === "main_frame" && details.statusCode !== 401) accept(originOf(details.url), sent);
+      forget(details);
+    }, ALL_URLS);
     browser.webRequest.onErrorOccurred.addListener(forget, ALL_URLS);
 
     // ---- Saving next to logins of the same site. --------------------------------
@@ -680,7 +734,8 @@ export default defineBackground({
       try {
         switch (message.kind) {
           case "page_logins": {
-            const matches = await agent.matches(url);
+            // On a sign-in form the site's own logins come first.
+            const matches = basicAuth(await agent.matches(url), "last");
             const logins: LoginOption[] = [];
             for (const summary of matches.slice(0, MAX_OPTIONS)) {
               const view = await agent.get(summary.id);
@@ -794,19 +849,24 @@ export default defineBackground({
             path: folder ? `${folder}/${title}` : title,
           };
           if (message.remember) {
+            creds.basicAuth = true;
             try {
               const resolved = await resolveSave(challenge.url, creds.username, message.choice);
               if ("conflicts" in resolved) return { kind: "conflict", logins: resolved.conflicts };
               if (resolved.target) {
                 creds.path = await overwrite(resolved.target, challenge.url, creds.username, creds.password);
+                await agent.markBasicAuth(resolved.target.id);
+                creds.id = resolved.target.id;
               } else {
                 const added = await agent.add({
                   title,
                   folder: folder || undefined,
+                  basic_auth: true,
                   urls: [challenge.origin],
                   body: { login: { username: creds.username, password: creds.password, totp: null, notes: "" } },
                 });
                 creds.path = secretPath(added.meta);
+                creds.id = added.id;
               }
             } catch (err) {
               if (err instanceof AgentError) return { kind: "error", message: err.message };
@@ -816,6 +876,9 @@ export default defineBackground({
           } else {
             transient.set(challenge.origin, creds);
           }
+          // Typed in by hand: worth another try even if the site refused it before.
+          const skip = refused.get(challenge.origin)?.filter((c) => !sameCredentials(c, creds));
+          if (skip) refused.set(challenge.origin, skip);
           await startSession(challenge.origin, creds);
           challenges.delete(challenge.id);
           record({ origin: challenge.origin, outcome: "filled", detail: creds.path });
@@ -827,6 +890,10 @@ export default defineBackground({
           challenges.delete(challenge.id);
           bypass.set(challenge.origin, Date.now() + BYPASS_MS);
           return { kind: "continue", url: challenge.url };
+        }
+        case "basic_auth": {
+          const refusedIds = (refused.get(message.origin) ?? []).flatMap((c) => (c.id ? [c.id] : []));
+          return { kind: "basic_auth", refused: refusedIds };
         }
         case "fill_tab": {
           const request: TabMessage = { kind: "fill", id: message.id };
@@ -857,6 +924,13 @@ export default defineBackground({
     );
   },
 });
+
+/** `matches` in their order, with the Basic Auth logins moved to the front or the back. */
+function basicAuth(matches: SecretSummary[], where: "first" | "last"): SecretSummary[] {
+  const marked = matches.filter((m) => isBasicAuth(m.meta));
+  const rest = matches.filter((m) => !isBasicAuth(m.meta));
+  return where === "first" ? [...marked, ...rest] : [...rest, ...marked];
+}
 
 function sameCredentials(a: Credentials, b: Credentials): boolean {
   return a.username === b.username && a.password === b.password;

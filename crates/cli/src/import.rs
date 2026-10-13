@@ -254,6 +254,7 @@ impl Action {
                 folder: folder.clone(),
                 tags: tags.to_vec(),
                 urls: self.url.iter().cloned().collect(),
+                basic_auth: false,
                 body: SecretBody::Login(self.login.clone()),
             }),
             Kind::Differs {
@@ -273,6 +274,7 @@ impl Action {
                     folder: None,
                     tags: None,
                     urls: None,
+                    basic_auth: None,
                     body: Some(SecretBody::Login(login)),
                 })
             }
