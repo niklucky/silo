@@ -32,12 +32,14 @@ pub struct SyncState {
     /// Revisions the server refused; not sent again until they change.
     #[serde(default)]
     pub rejected: BTreeMap<SecretId, Rejection>,
-    /// Revisions sent in a push whose result has not come back yet. If one
-    /// reached the server after all and its secret was deleted here in the
-    /// meantime, the next pull turns it into a deletion instead of bringing
-    /// it back. Cleared once a pull has seen everything up to now.
+    /// Revisions sent in a push whose result has not come back yet, by the
+    /// hex digest of the sealed revision: the number alone could also be
+    /// another device's. If one reached the server after all and its secret
+    /// was deleted here in the meantime, the next pull turns it into a
+    /// deletion instead of bringing it back. Cleared once a pull has seen
+    /// everything up to now.
     #[serde(default)]
-    pub uploading: BTreeMap<SecretId, u32>,
+    pub in_flight: BTreeMap<SecretId, String>,
     #[serde(default)]
     pub last_sync: Option<u64>,
     #[serde(default)]
@@ -64,7 +66,8 @@ impl SyncState {
 }
 
 /// What `silo sync logout` keeps of the sync state: how far it pulled, which
-/// revisions the server is known to have, and the deletions still to send. Logging in to the
+/// revisions the server is known to have, the deletions still to send, and
+/// the uploads it never heard back about. Logging in to the
 /// same account on the same server again picks it up, so edits made in
 /// between are told apart from the server's.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +82,8 @@ pub struct Baseline {
     pub deletes: BTreeMap<SecretId, Tombstone>,
     #[serde(default)]
     pub deleted_remotely: BTreeMap<SecretId, u32>,
+    #[serde(default)]
+    pub in_flight: BTreeMap<SecretId, String>,
 }
 
 impl SyncState {
@@ -90,6 +95,7 @@ impl SyncState {
             known: self.known.clone(),
             deletes: self.deletes.clone(),
             deleted_remotely: self.deleted_remotely.clone(),
+            in_flight: self.in_flight.clone(),
         }
     }
 
@@ -103,6 +109,7 @@ impl SyncState {
         self.known = baseline.known;
         self.deletes = baseline.deletes;
         self.deleted_remotely = baseline.deleted_remotely;
+        self.in_flight = baseline.in_flight;
         true
     }
 }

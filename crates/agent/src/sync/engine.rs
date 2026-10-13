@@ -158,7 +158,7 @@ fn run_with(
     }
     // Every upload that reached the server was in that pull.
     access.with_vault(|v| {
-        v.state.uploading.clear();
+        v.state.in_flight.clear();
         v.save()
     })?;
 
@@ -248,7 +248,7 @@ fn apply_put(
     }
     let known = v.state.known.get(&id).copied();
 
-    let uploaded_here = v.state.uploading.get(&id) == Some(&revision);
+    let uploaded_here = v.state.in_flight.get(&id) == Some(&digest_hex(&remote));
     if let Some(deleted) = v.state.deletes.get(&id) {
         if revision > deleted.revision && uploaded_here {
             // This device's own upload, sent before the deletion: the
@@ -502,9 +502,7 @@ fn plan_push(v: &mut Vault<'_>) -> Result<Vec<PushItem>, SyncError> {
 fn begin_push(v: &mut Vault<'_>, items: &[PushItem]) {
     for item in items {
         if let PushItem::Put { entry, .. } = item {
-            v.state
-                .uploading
-                .insert(entry.secret.id, entry.secret.revision);
+            v.state.in_flight.insert(entry.secret.id, digest_hex(entry));
         }
     }
 }
@@ -518,7 +516,7 @@ fn apply_result(
 ) -> Result<(), SyncError> {
     let id = item.secret_id();
     if matches!(item, PushItem::Put { .. }) {
-        v.state.uploading.remove(&id);
+        v.state.in_flight.remove(&id);
     }
     match (item, result) {
         (PushItem::Put { entry, .. }, PushResult::Ok { .. }) => {
@@ -577,6 +575,16 @@ pub fn record_deletion(state: &mut SyncState, session: &Session, id: SecretId, n
             .deletes
             .insert(id, session.tombstone(id, revision, now));
     }
+}
+
+/// Identifies one sealed revision: two devices can both make a revision 2.
+fn digest_hex(stored: &StoredSecret) -> String {
+    stored
+        .secret
+        .digest()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn path(v: &Vault<'_>, id: SecretId) -> String {
@@ -694,20 +702,65 @@ mod tests {
 
     #[test]
     fn a_deletion_during_an_upload_whose_reply_is_lost_deletes_it() {
+        // Also with a logout and login before the next sync.
+        for relogin in [false, true] {
+            let mut setup = Setup::new();
+            let new = setup.add();
+            let (mut v, rng) = setup.vault();
+            let mut progress = Progress::default();
+
+            // A first upload.
+            let (item, entry) = upload(&mut v, new);
+            begin_push(&mut v, std::slice::from_ref(&item));
+            v.session.remove_id(v.store, new).unwrap();
+            record_deletion(v.state, v.session, new, 5);
+            // The reply never arrives; the next pull has the upload.
+            if relogin {
+                let baseline = v.state.baseline();
+                *v.state = SyncState::default();
+                assert!(v.state.resume(baseline));
+            }
+            let change = Change::Put { seq: 1, entry };
+            apply_change(&mut v, rng, change, &mut progress).unwrap();
+            assert_deletes_on_next_push(&mut v, new, 1);
+        }
+    }
+
+    #[test]
+    fn another_devices_edit_with_the_same_number_beats_the_deletion() {
         let mut setup = Setup::new();
-        let new = setup.add();
+        let id = setup.add();
         let (mut v, rng) = setup.vault();
         let mut progress = Progress::default();
-
-        // A first upload.
-        let (item, entry) = upload(&mut v, new);
+        v.state.known.insert(id, 1);
+        let current = v.session.stored(id).unwrap().clone();
+        let (meta, body) = v.session.open_parts(&current).unwrap();
+        v.session
+            .reseal(v.store, rng, id, 2, &meta, &body, true)
+            .unwrap();
+        // Revision 2 from here goes out but never reaches the server…
+        let (item, _) = upload(&mut v, id);
         begin_push(&mut v, std::slice::from_ref(&item));
-        v.session.remove_id(v.store, new).unwrap();
-        record_deletion(v.state, v.session, new, 5);
-        // The reply never arrives; the next pull has the upload.
-        let change = Change::Put { seq: 1, entry };
+        // …while another device makes its own revision 2.
+        let theirs = v
+            .session
+            .reseal(v.store, rng, id, 2, &meta, &body, false)
+            .unwrap();
+        v.session.remove_id(v.store, id).unwrap();
+        record_deletion(v.state, v.session, id, 5);
+
+        let change = Change::Put {
+            seq: 2,
+            entry: theirs.clone(),
+        };
         apply_change(&mut v, rng, change, &mut progress).unwrap();
-        assert_deletes_on_next_push(&mut v, new, 1);
+        assert_eq!(progress.report.conflicts.len(), 1, "{:?}", progress.report);
+        assert!(v.state.deletes.is_empty());
+        assert_eq!(
+            v.session.stored(id).unwrap().secret.digest(),
+            theirs.secret.digest()
+        );
+        assert!(plan_push(&mut v).unwrap().is_empty());
     }
 
     #[test]
