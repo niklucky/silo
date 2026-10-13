@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use rand::Rng;
 use rusqlite::{Connection, OptionalExtension, params};
+use silo_core::sync::ServerKey;
 
 use crate::error::{ApiError, ApiResult};
 
@@ -94,6 +95,8 @@ CREATE INDEX grants_by_recipient ON grants(recipient, secret_id, revision);
 
 /// Key of the random secret that makes up KDF parameters for unknown usernames.
 pub const PRELOGIN_SECRET: &str = "prelogin_secret";
+/// Key of the server's static X25519 secret, for registration key proofs.
+pub const SERVER_KEY: &str = "server_key";
 
 #[derive(Clone)]
 pub struct Db {
@@ -115,15 +118,29 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut conn)?;
-        let mut secret = [0u8; 32];
-        rand::rng().fill_bytes(&mut secret);
-        conn.execute(
-            "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
-            params![PRELOGIN_SECRET, &secret[..]],
-        )?;
+        for key in [PRELOGIN_SECRET, SERVER_KEY] {
+            let mut secret = [0u8; 32];
+            rand::rng().fill_bytes(&mut secret);
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+                params![key, &secret[..]],
+            )?;
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// The server's static key, created with the database.
+    pub fn server_key(&self) -> anyhow::Result<ServerKey> {
+        let bytes = self
+            .with(|conn| setting(conn, SERVER_KEY))
+            .map_err(|err| anyhow::anyhow!(err.message))?
+            .ok_or_else(|| anyhow::anyhow!("server key missing"))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("server key has the wrong length"))?;
+        Ok(ServerKey::from_bytes(bytes))
     }
 
     /// Runs `f` with the connection. Blocks; call from a blocking thread.

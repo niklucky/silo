@@ -116,15 +116,36 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Slows down password guessing per username: after a few failures, each
 /// further attempt has to wait twice as long as the last, up to a limit.
-/// Kept in memory; a restart forgets it.
-#[derive(Default)]
+///
+/// Kept in memory and bounded, since anyone can fail a login for any name:
+/// an entry is forgotten an hour after its last failure, and when the table
+/// is full the entry with the fewest failures goes first, so a flood of
+/// one-off names cannot push out a name someone is actually guessing at.
+/// A restart forgets everything. Guessing stays expensive regardless: every
+/// guess costs the guesser an Argon2 run for that account's salt.
 pub struct LoginLimiter {
     failures: Mutex<HashMap<String, (u32, Instant)>>,
+    capacity: usize,
+}
+
+impl Default for LoginLimiter {
+    fn default() -> Self {
+        Self::with_capacity(Self::CAPACITY)
+    }
 }
 
 impl LoginLimiter {
     const FREE_ATTEMPTS: u32 = 5;
     const MAX_WAIT: Duration = Duration::from_secs(15 * 60);
+    const FORGET_AFTER: Duration = Duration::from_secs(60 * 60);
+    const CAPACITY: usize = 10_000;
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            failures: Mutex::default(),
+            capacity,
+        }
+    }
 
     pub fn check(&self, username: &str) -> ApiResult<()> {
         let failures = self.failures.lock().unwrap_or_else(PoisonError::into_inner);
@@ -146,11 +167,24 @@ impl LoginLimiter {
 
     pub fn failed(&self, username: &str) {
         let mut failures = self.failures.lock().unwrap_or_else(PoisonError::into_inner);
-        let entry = failures
-            .entry(username.to_owned())
-            .or_insert((0, Instant::now()));
+        if !failures.contains_key(username) && failures.len() >= self.capacity {
+            failures.retain(|_, (_, last)| last.elapsed() < Self::FORGET_AFTER);
+            if failures.len() >= self.capacity
+                && let Some(evict) = failures
+                    .iter()
+                    .min_by_key(|(_, (count, last))| (*count, *last))
+                    .map(|(name, _)| name.clone())
+            {
+                failures.remove(&evict);
+            }
+        }
+        let now = Instant::now();
+        let entry = failures.entry(username.to_owned()).or_insert((0, now));
+        if now.duration_since(entry.1) >= Self::FORGET_AFTER {
+            entry.0 = 0;
+        }
         entry.0 = entry.0.saturating_add(1);
-        entry.1 = Instant::now();
+        entry.1 = now;
     }
 
     pub fn succeeded(&self, username: &str) {
@@ -163,6 +197,14 @@ impl LoginLimiter {
     fn wait_after(count: u32) -> Duration {
         let doublings = count.saturating_sub(Self::FREE_ATTEMPTS).min(16);
         (Duration::from_secs(1) * 2u32.pow(doublings)).min(Self::MAX_WAIT)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.failures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -201,5 +243,19 @@ mod tests {
         assert_eq!(LoginLimiter::wait_after(5), Duration::from_secs(1));
         assert_eq!(LoginLimiter::wait_after(8), Duration::from_secs(8));
         assert_eq!(LoginLimiter::wait_after(100), LoginLimiter::MAX_WAIT);
+    }
+
+    #[test]
+    fn limiter_stays_bounded_and_keeps_the_names_under_attack() {
+        let limiter = LoginLimiter::with_capacity(100);
+        for _ in 0..LoginLimiter::FREE_ATTEMPTS {
+            limiter.failed("target");
+        }
+        for i in 0..10_000 {
+            limiter.failed(&format!("nobody{i}"));
+        }
+        assert_eq!(limiter.len(), 100);
+        // One-off names pushed each other out, not the guessed-at account.
+        assert!(limiter.check("target").is_err());
     }
 }

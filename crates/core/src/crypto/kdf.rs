@@ -94,6 +94,18 @@ impl KdfParams {
         Ok(())
     }
 
+    /// True if the cost settings are exactly the recommended ones (any salt).
+    ///
+    /// A sync server accepts only this profile, so the parameters it reports
+    /// for an account look like the made-up ones it reports for usernames
+    /// that do not exist.
+    pub fn is_recommended_profile(&self) -> bool {
+        let KdfAlgorithm::Argon2id = self.algorithm;
+        self.memory_kib == Self::RECOMMENDED_MEMORY_KIB
+            && self.iterations == Self::RECOMMENDED_ITERATIONS
+            && self.parallelism == Self::RECOMMENDED_PARALLELISM
+    }
+
     /// Stretches a password into the master key. Deliberately slow.
     pub fn derive(&self, password: &[u8]) -> Result<MasterKey> {
         let KdfAlgorithm::Argon2id = self.algorithm;
@@ -227,6 +239,12 @@ mod tests {
         let mut fewer_passes = KdfParams::recommended(&mut rng);
         fewer_passes.iterations = 1;
         assert!(fewer_passes.check_minimum().is_err());
+
+        assert!(KdfParams::recommended(&mut rng).is_recommended_profile());
+        let mut stronger = KdfParams::recommended(&mut rng);
+        stronger.memory_kib *= 2;
+        assert!(stronger.check_minimum().is_ok());
+        assert!(!stronger.is_recommended_profile());
     }
 
     #[test]

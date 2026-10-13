@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use silo_core::sync::{
     AccountReply, ChangesReply, ConnectionInfo, ConnectionsReply, DevicesReply, LoginRequest,
-    PreloginReply, PushReply, PushRequest, RegisterRequest, SessionReply,
+    PreloginReply, PushReply, PushRequest, RegisterRequest, ServerInfo, ServerKey, SessionReply,
 };
 
 pub mod accounts;
@@ -39,19 +39,22 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub struct AppState {
     pub db: Db,
     pub limiter: Arc<LoginLimiter>,
+    pub server_key: Arc<ServerKey>,
 }
 
 impl AppState {
-    pub fn new(db: Db) -> Self {
-        Self {
+    pub fn new(db: Db) -> anyhow::Result<Self> {
+        Ok(Self {
+            server_key: Arc::new(db.server_key()?),
             db,
             limiter: Arc::default(),
-        }
+        })
     }
 }
 
 pub fn app(state: AppState) -> Router {
     let v1 = Router::new()
+        .route("/server", get(server_info))
         .route("/prelogin/{username}", get(prelogin))
         .route("/register", post(register))
         .route("/login", post(login))
@@ -110,6 +113,13 @@ fn body<T>(payload: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
         .map_err(|rejection| ApiError::invalid(rejection.body_text()))
 }
 
+async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
+    Json(ServerInfo {
+        public_key: state.server_key.public_key(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    })
+}
+
 async fn prelogin(
     State(state): State<AppState>,
     Path(username): Path<String>,
@@ -129,7 +139,9 @@ async fn register(
     let now = unix_now();
     state
         .db
-        .run(move |conn| accounts::register(conn, &mut rand::rng(), now, request))
+        .run(move |conn| {
+            accounts::register(conn, &mut rand::rng(), now, &state.server_key, request)
+        })
         .await
         .map(Json)
 }

@@ -68,7 +68,7 @@ async fn serve(db: Db, path: &std::path::Path, addr: &str) -> anyhow::Result<()>
         "silo-server listening on http://{addr}, data in {}",
         path.display()
     );
-    axum::serve(listener, app(AppState::new(db)))
+    axum::serve(listener, app(AppState::new(db)?))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())

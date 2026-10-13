@@ -7,7 +7,7 @@ use silo_core::account::{AccountRecord, Identity};
 use silo_core::crypto::{CryptoRng, KdfAlgorithm, KdfParams};
 use silo_core::sync::{
     self, AccountReply, DeviceInfo, ErrorCode, LoginRequest, PreloginReply, RegisterRequest,
-    SessionReply,
+    ServerKey, SessionReply,
 };
 
 use crate::auth::{self, Account, Auth, LoginLimiter, constant_time_eq, sha256};
@@ -96,21 +96,29 @@ pub fn register(
     conn: &mut Connection,
     rng: &mut impl CryptoRng,
     now: u64,
+    server_key: &ServerKey,
     request: RegisterRequest,
 ) -> ApiResult<SessionReply> {
     let username = normalize(&request.username)?;
     let device_name = device_name(&request.device_name)?;
-    request
-        .account
-        .kdf
-        .check_minimum()
-        .map_err(|err| ApiError::invalid(err.to_string()))?;
+    // One profile for everyone: prelogin then reports the same settings for
+    // every account as for names that do not exist, salt aside.
+    if !request.account.kdf.is_recommended_profile() {
+        return Err(ApiError::invalid(format!(
+            "this server takes only the recommended password hashing settings \
+             ({} KiB, {} passes, {} lane)",
+            KdfParams::RECOMMENDED_MEMORY_KIB,
+            KdfParams::RECOMMENDED_ITERATIONS,
+            KdfParams::RECOMMENDED_PARALLELISM
+        )));
+    }
     if request.account.public_key != request.identity.public_key {
         return Err(ApiError::invalid(
             "the account record and the identity name different public keys",
         ));
     }
-    sync::verify_registration(&request.identity, &username, &request.proof)
+    server_key
+        .verify_registration(&request.identity, &username, &request.proof)
         .map_err(|_| ApiError::invalid("the registration proof does not verify"))?;
 
     let tx = conn.transaction()?;

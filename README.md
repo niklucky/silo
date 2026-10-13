@@ -395,13 +395,18 @@ it yet. The desktop app still only round-trips `silo_core::version()`.
 - **`silo-server`.** axum over one SQLite file (`--db`, default
   `silo-server.db`; schema versioned with `user_version`). Accounts are created
   with a one-time invite (`silo-server invite`) and a proof that the registrant
-  holds the account's signing key; login sends the server login key, stored as
+  holds both secret keys (an Ed25519 signature and a MAC under an X25519 shared
+  secret with the server's static key, `GET /v1/server`), and only with the
+  recommended KDF profile, so prelogin cannot tell real accounts from made-up
+  ones; login sends the server login key, stored as
   a SHA-256 hash, and returns a revocable device token. Prelogin answers
   unknown usernames with stable made-up KDF parameters; failed logins back off
-  per username. Accounts connect to each other mutually (one asks, the other
+  per username, in a bounded table that forgets after an hour. Accounts connect to each other mutually (one asks, the other
   accepts) and only then see each other's identity or may grant to each other.
   Push takes revisions on top of the current one (`base_revision`) and signed
-  tombstones, checks signatures, ownership and grant recipients, and answers
+  tombstones (a put on a deleted secret must say `restore`, so an edit that
+  never saw the deletion conflicts instead of undoing it), checks signatures,
+  ownership and grant recipients, and answers
   each item with ok, conflict (with the current state) or rejected. Pull
   returns, by a server-wide change counter, every secret the account holds a
   grant for; owners see all grants, others only their own. Every revision is

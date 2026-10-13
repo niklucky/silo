@@ -39,7 +39,8 @@ pub fn push(
             PushItem::Put {
                 base_revision,
                 entry,
-            } => put(&tx, &auth.account, now, base_revision, entry)?,
+                restore,
+            } => put(&tx, &auth.account, now, base_revision, entry, restore)?,
             PushItem::Delete { tombstone } => delete(&tx, &auth.account, tombstone)?,
         });
     }
@@ -128,6 +129,7 @@ fn put(
     now: u64,
     base_revision: u32,
     entry: StoredSecret,
+    restore: bool,
 ) -> ApiResult<PushResult> {
     if entry.verify(&me.signing_key).is_err() {
         return rejected("the revision or a grant is not signed by this account");
@@ -157,7 +159,11 @@ fn put(
         Some(row) if row.owner_id != me.id => {
             return rejected("this secret belongs to another account");
         }
-        Some(row) if row.current_revision != base_revision => {
+        // A stale base, an edit that has not seen the deletion, or a restore
+        // of something that is no longer deleted.
+        Some(row)
+            if row.current_revision != base_revision || row.tombstone.is_some() != restore =>
+        {
             return conflict(tx, &id, &row, me);
         }
         Some(row) if revision <= row.current_revision => {

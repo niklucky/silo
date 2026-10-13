@@ -22,6 +22,7 @@ use crate::{AppState, Db, accounts, app};
 struct Server {
     app: Router,
     db: Db,
+    key: PublicKey,
 }
 
 struct User {
@@ -34,7 +35,8 @@ impl Server {
     fn new() -> Self {
         let db = Db::open_in_memory().unwrap();
         Self {
-            app: app(AppState::new(db.clone())),
+            app: app(AppState::new(db.clone()).unwrap()),
+            key: db.server_key().unwrap().public_key(),
             db,
         }
     }
@@ -87,7 +89,7 @@ impl Server {
             "username": name,
             "account": record,
             "identity": keys.identity(),
-            "proof": sync::sign_registration(keys, name),
+            "proof": sync::prove_registration(keys, name, &self.key).unwrap(),
             "auth_key": AuthKey::from_bytes(auth),
             "device_name": "laptop",
         })
@@ -174,6 +176,15 @@ fn put(base_revision: u32, entry: StoredSecret) -> PushItem {
     PushItem::Put {
         base_revision,
         entry,
+        restore: false,
+    }
+}
+
+fn restore(base_revision: u32, entry: StoredSecret) -> PushItem {
+    PushItem::Put {
+        base_revision,
+        entry,
+        restore: true,
     }
 }
 
@@ -248,12 +259,31 @@ async fn registration_needs_a_fresh_invite_and_your_own_keys() {
 
     // A proof signed for another name does not count.
     let mut body = server.register_body("bob", &keys, &record, [1; 32], &invite);
-    body["proof"] = serde_json::to_value(sync::sign_registration(&keys, "rob")).unwrap();
+    body["proof"] =
+        serde_json::to_value(sync::prove_registration(&keys, "rob", &server.key).unwrap()).unwrap();
     let (status, reply) = server.call("POST", "/v1/register", None, Some(body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
 
-    // Weak password hashing is refused, so prelogin never hands it out.
+    // Weak password hashing is refused, so prelogin never hands it out, and
+    // so is stronger hashing: prelogin would tell those accounts apart.
     let (weak_record, weak_keys) = new_weak_account();
+    let mut stronger = record.clone();
+    stronger.kdf.memory_kib *= 2;
+    let (status, reply) = server
+        .call(
+            "POST",
+            "/v1/register",
+            None,
+            Some(server.register_body("strong", &keys, &stronger, [1; 32], &invite)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("recommended")
+    );
     let (status, reply) = server
         .call(
             "POST",
@@ -514,7 +544,8 @@ async fn push_pull_conflict_delete_and_restore() {
         .await;
     assert!(matches!(conflict(&results[0]), Change::Delete { .. }));
 
-    // An edit made before the delete conflicts; on top of it, it brings the secret back.
+    // An edit made before the delete conflicts, whether its base is older or
+    // the deleted revision itself: it never saw the deletion.
     let results = server
         .push(
             &alice,
@@ -525,12 +556,106 @@ async fn push_pull_conflict_delete_and_restore() {
     let results = server
         .push(
             &alice,
-            vec![put(2, entry(&alice.keys, id, 3, "back", &[me]))],
+            vec![put(2, entry(&alice.keys, id, 3, "offline", &[me]))],
+        )
+        .await;
+    assert!(matches!(conflict(&results[0]), Change::Delete { .. }));
+    // Only an explicit restore brings it back.
+    let results = server
+        .push(
+            &alice,
+            vec![restore(2, entry(&alice.keys, id, 3, "back", &[me]))],
         )
         .await;
     assert_eq!(results[0], PushResult::Ok { seq: 4 });
     let pulled = server.changes(&alice, 3).await;
     assert!(matches!(&pulled.changes[..], [Change::Put { seq: 4, .. }]));
+    // And a restore of something no longer deleted conflicts.
+    let results = server
+        .push(
+            &alice,
+            vec![restore(3, entry(&alice.keys, id, 4, "again", &[me]))],
+        )
+        .await;
+    assert!(matches!(conflict(&results[0]), Change::Put { .. }));
+}
+
+#[tokio::test]
+async fn an_offline_edit_does_not_undo_a_deletion() {
+    // The reproduction from review: revision 1, an edit prepared on top of
+    // it elsewhere, then revision 1 deleted, then the edit pushed.
+    let server = Server::new();
+    let alice = server.register("alice").await;
+    let me = *alice.keys.public_key();
+    let id = new_id(20);
+    server
+        .push(
+            &alice,
+            vec![put(0, entry(&alice.keys, id, 1, "one", &[me]))],
+        )
+        .await;
+    let offline = entry(&alice.keys, id, 2, "two", &[me]);
+    let tombstone = Tombstone::seal(&alice.keys, id, 1, 50);
+    let results = server
+        .push(
+            &alice,
+            vec![PushItem::Delete {
+                tombstone: tombstone.clone(),
+            }],
+        )
+        .await;
+    assert_eq!(results[0], PushResult::Ok { seq: 2 });
+
+    let results = server.push(&alice, vec![put(1, offline)]).await;
+    assert_eq!(conflict(&results[0]), &Change::Delete { seq: 2, tombstone });
+    assert!(server.changes(&alice, 2).await.changes.is_empty());
+}
+
+#[tokio::test]
+async fn registration_cannot_claim_someone_elses_encryption_key() {
+    // The reproduction from review: Mallory copies Alice's public account
+    // record and pairs its X25519 key with her own signing key.
+    let server = Server::new();
+    let (alice_record, alice_keys) = new_account();
+    let (_, mallory_keys) = new_account();
+
+    let (status, info) = server.call("GET", "/v1/server", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        info["public_key"],
+        serde_json::to_value(server.key).unwrap()
+    );
+
+    let claimed = silo_core::account::Identity {
+        public_key: *alice_keys.public_key(),
+        signing_key: mallory_keys.identity().signing_key,
+    };
+    // Whatever she signs, she cannot make the key proof without Alice's
+    // secret key. (A signature that does verify over the claimed identity is
+    // covered in silo-core's `registration_proof_needs_both_secret_keys`.)
+    let proof = sync::prove_registration(&mallory_keys, "mallory", &server.key).unwrap();
+    let mut body = server.register_body(
+        "mallory",
+        &mallory_keys,
+        &alice_record,
+        [2; 32],
+        &server.invite(),
+    );
+    body["identity"] = serde_json::to_value(claimed).unwrap();
+    body["proof"] = serde_json::to_value(proof).unwrap();
+    let (status, reply) = server.call("POST", "/v1/register", None, Some(body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
+
+    // Alice can still register her real identity.
+    let body = server.register_body(
+        "alice",
+        &alice_keys,
+        &alice_record,
+        [1; 32],
+        &server.invite(),
+    );
+    let (status, reply) = server.call("POST", "/v1/register", None, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
 }
 
 #[tokio::test]

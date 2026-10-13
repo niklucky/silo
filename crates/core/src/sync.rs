@@ -7,6 +7,7 @@
 //! sync needs; transport is supplied by the host.
 //!
 //! ```text
+//! GET    /v1/server                     → ServerInfo               (no auth)
 //! GET    /v1/prelogin/{username}        → PreloginReply            (no auth)
 //! POST   /v1/register   RegisterRequest → SessionReply             (no auth, invite)
 //! POST   /v1/login      LoginRequest    → SessionReply             (no auth)
@@ -21,14 +22,17 @@
 //! POST   /v1/push       PushRequest     → PushReply
 //! ```
 //!
-//! Everything but the first three needs `Authorization: Bearer <device token>`.
+//! Everything but the first four needs `Authorization: Bearer <device token>`.
 //! Errors come back as [`ErrorReply`] with a matching HTTP status.
 
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::account::{AccountKeys, AccountRecord, Identity};
-use crate::crypto::{AuthKey, KdfParams, Signature, SigningPublicKey};
+use crate::crypto::bytes;
+use crate::crypto::{AuthKey, KdfParams, PublicKey, SecretKey, Signature, SigningPublicKey};
 use crate::error::{Error, Result};
 use crate::vault::{SecretId, StoredSecret};
 
@@ -39,6 +43,7 @@ pub const USERNAME_MAX_LEN: usize = 32;
 
 const TOMBSTONE_SIGNATURE_DOMAIN: &[u8] = b"silo/v1/sig/tombstone";
 const REGISTER_SIGNATURE_DOMAIN: &[u8] = b"silo/v1/sig/register";
+const REGISTER_KEY_PROOF_INFO: &[u8] = b"silo/v1/register-key-proof";
 
 /// Checks a username and returns it lowercased: 1 to 32 characters from
 /// `a-z`, `0-9`, `.`, `_`, `-`, starting with a letter or digit.
@@ -63,19 +68,87 @@ pub fn normalize_username(name: &str) -> Result<String> {
     Ok(name)
 }
 
-/// Proves to the server that whoever registers `username` holds the signing
-/// key of `keys.identity()`, so nobody can register someone else's keys.
-/// Sign the name as [`normalize_username`] returns it; the server checks that.
-pub fn sign_registration(keys: &AccountKeys, username: &str) -> Signature {
-    keys.signing_key()
-        .sign(&registration_digest(username, &keys.identity()))
+/// Shows the server that whoever registers `username` holds both secret keys
+/// of `identity`, so nobody can claim someone else's public keys:
+///
+/// - `signature`: the Ed25519 key signs the username and both public keys.
+/// - `key_proof`: a MAC under the X25519 shared secret between the account
+///   key and the server's static key ([`ServerInfo::public_key`]). Only the
+///   holder of the account's X25519 secret, or the server, can compute it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrationProof {
+    pub signature: Signature,
+    #[serde(
+        serialize_with = "bytes::serialize",
+        deserialize_with = "bytes::deserialize_array"
+    )]
+    pub key_proof: [u8; 32],
 }
 
-pub fn verify_registration(identity: &Identity, username: &str, proof: &Signature) -> Result<()> {
-    proof.verify(
-        &identity.signing_key,
-        &registration_digest(username, identity),
-    )
+/// Proves `keys` for registering `username` on the server whose static key is
+/// `server`. Use the name as [`normalize_username`] returns it; the server
+/// checks that.
+pub fn prove_registration(
+    keys: &AccountKeys,
+    username: &str,
+    server: &PublicKey,
+) -> Result<RegistrationProof> {
+    let identity = keys.identity();
+    let digest = registration_digest(username, &identity);
+    let shared = keys
+        .secret_key()
+        .diffie_hellman(server)
+        .ok_or(Error::BadSignature)?;
+    Ok(RegistrationProof {
+        signature: keys.signing_key().sign(&digest),
+        key_proof: key_proof(&shared, &identity.public_key, server, &digest),
+    })
+}
+
+/// The server's static X25519 key, used only to check the
+/// [`RegistrationProof::key_proof`] of new accounts.
+pub struct ServerKey(SecretKey);
+
+impl ServerKey {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(SecretKey::from_bytes(Zeroizing::new(bytes)))
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        self.0.public_key()
+    }
+
+    /// Fails with [`Error::BadSignature`] unless the proof shows possession of
+    /// both secret keys behind `identity`.
+    pub fn verify_registration(
+        &self,
+        identity: &Identity,
+        username: &str,
+        proof: &RegistrationProof,
+    ) -> Result<()> {
+        let digest = registration_digest(username, identity);
+        proof.signature.verify(&identity.signing_key, &digest)?;
+        let shared = self
+            .0
+            .diffie_hellman(&identity.public_key)
+            .ok_or(Error::BadSignature)?;
+        let expected = key_proof(&shared, &identity.public_key, &self.public_key(), &digest);
+        let diff = expected
+            .iter()
+            .zip(&proof.key_proof)
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+        if diff == 0 {
+            Ok(())
+        } else {
+            Err(Error::BadSignature)
+        }
+    }
+}
+
+impl core::fmt::Debug for ServerKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "ServerKey({:?})", self.public_key())
+    }
 }
 
 fn registration_digest(username: &str, identity: &Identity) -> [u8; 32] {
@@ -87,6 +160,27 @@ fn registration_digest(username: &str, identity: &Identity) -> [u8; 32] {
         .chain_update(identity.signing_key.as_bytes())
         .finalize()
         .into()
+}
+
+/// HKDF over the shared secret, salted with both public keys, expanded with
+/// the registration digest: a MAC only the two key holders can compute.
+fn key_proof(
+    shared: &[u8; 32],
+    account: &PublicKey,
+    server: &PublicKey,
+    digest: &[u8; 32],
+) -> [u8; 32] {
+    let mut salt = [0u8; 64];
+    salt[..32].copy_from_slice(account.as_bytes());
+    salt[32..].copy_from_slice(server.as_bytes());
+    let mut info = Vec::with_capacity(REGISTER_KEY_PROOF_INFO.len() + 32);
+    info.extend_from_slice(REGISTER_KEY_PROOF_INFO);
+    info.extend_from_slice(digest);
+    let mut out = [0u8; 32];
+    Hkdf::<Sha256>::new(Some(&salt), shared)
+        .expand(&info, &mut out)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    out
 }
 
 /// A signed record that a secret was deleted at `revision`. The server keeps
@@ -141,6 +235,14 @@ impl Tombstone {
 
 // ---------- accounts and devices ----------
 
+/// What a client needs to know about the server before registering.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerInfo {
+    /// The server's static X25519 key for [`prove_registration`].
+    pub public_key: PublicKey,
+    pub version: String,
+}
+
 /// How to hash the password for `username`. Unknown usernames get made-up
 /// parameters that stay the same between requests, so this does not reveal
 /// which accounts exist. Check them with [`KdfParams::check_minimum`] first.
@@ -155,8 +257,8 @@ pub struct RegisterRequest {
     pub username: String,
     pub account: AccountRecord,
     pub identity: Identity,
-    /// [`sign_registration`] over `username` and `identity`.
-    pub proof: Signature,
+    /// [`prove_registration`] for `username` and `identity`.
+    pub proof: RegistrationProof,
     pub auth_key: AuthKey,
     pub device_name: String,
 }
@@ -240,10 +342,16 @@ pub struct ConnectionsReply {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum PushItem {
     /// A new revision, newer than `base_revision`, with all of its grants.
-    /// Also brings a deleted secret back when `base_revision` is the deleted one.
+    ///
+    /// A deleted secret keeps its last revision as the current one, so
+    /// `base_revision` alone cannot tell an edit made before the deletion
+    /// from a deliberate restore. `restore` says which: without it, a put on
+    /// a deleted secret is a conflict; with it, a put on a live one is.
     Put {
         base_revision: u32,
         entry: StoredSecret,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        restore: bool,
     },
     /// Deletes the revision named in the tombstone.
     Delete { tombstone: Tombstone },
@@ -374,29 +482,46 @@ mod tests {
     }
 
     #[test]
-    fn registration_proof_binds_username_and_keys() {
+    fn registration_proof_needs_both_secret_keys() {
         let mut rng = testing::rng(40);
         let alice = account(&mut rng);
-        let bob = account(&mut rng);
-        let proof = sign_registration(&alice, "alice");
+        let mallory = account(&mut rng);
+        let server = ServerKey::from_bytes([5; 32]);
+        let server_pk = server.public_key();
+        let proof = prove_registration(&alice, "alice", &server_pk).unwrap();
 
         assert_eq!(
-            verify_registration(&alice.identity(), "alice", &proof),
+            server.verify_registration(&alice.identity(), "alice", &proof),
             Ok(())
         );
         assert_eq!(
-            verify_registration(&alice.identity(), "alice2", &proof),
+            server.verify_registration(&alice.identity(), "alice2", &proof),
             Err(Error::BadSignature)
         );
-        // Bob cannot register Alice's keys: he cannot sign as her.
+        // Mallory cannot sign as Alice.
+        let theirs = prove_registration(&mallory, "mallory", &server_pk).unwrap();
         assert_eq!(
-            verify_registration(&alice.identity(), "bob", &sign_registration(&bob, "bob")),
+            server.verify_registration(&alice.identity(), "mallory", &theirs),
             Err(Error::BadSignature)
         );
-        let mut mixed = alice.identity();
-        mixed.public_key = *bob.public_key();
+        // Nor claim Alice's public encryption key next to her own signing key:
+        // the signature checks out, the key proof does not.
+        let claimed = Identity {
+            public_key: *alice.public_key(),
+            signing_key: mallory.identity().signing_key,
+        };
+        let mut forged = prove_registration(&mallory, "mallory", &server_pk).unwrap();
+        forged.signature = mallory
+            .signing_key()
+            .sign(&registration_digest("mallory", &claimed));
         assert_eq!(
-            verify_registration(&mixed, "alice", &proof),
+            server.verify_registration(&claimed, "mallory", &forged),
+            Err(Error::BadSignature)
+        );
+        // A proof made for another server does not carry over.
+        let elsewhere = ServerKey::from_bytes([6; 32]);
+        assert_eq!(
+            elsewhere.verify_registration(&alice.identity(), "alice", &proof),
             Err(Error::BadSignature)
         );
     }
@@ -447,10 +572,12 @@ mod tests {
         let item = PushItem::Put {
             base_revision: 0,
             entry: entry.clone(),
+            restore: false,
         };
         let json = serde_json::to_value(&item).unwrap();
         assert_eq!(json["op"], "put");
         assert_eq!(json["base_revision"], 0);
+        assert!(json.get("restore").is_none());
         assert_eq!(serde_json::from_value::<PushItem>(json).unwrap(), item);
 
         let result = PushResult::Conflict {
