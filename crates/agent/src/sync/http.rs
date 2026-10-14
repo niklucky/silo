@@ -161,28 +161,29 @@ fn network(err: ureq::Error) -> SyncError {
     SyncError::Network(err.to_string())
 }
 
-/// Trims the URL and checks its scheme: HTTPS, or HTTP to this machine.
+/// Trims the URL and checks it: HTTPS, or HTTP to this machine, with no
+/// credentials, query or fragment.
 pub fn normalize_server(server: &str) -> Result<String, SyncError> {
     let trimmed = server.trim().trim_end_matches('/');
     let invalid = |why: &str| SyncError::Config(format!("{trimmed:?}: {why}"));
-    let rest = if let Some(rest) = trimmed.strip_prefix("https://") {
-        rest
-    } else if let Some(rest) = trimmed.strip_prefix("http://") {
-        let host = rest.split(['/', ':']).next().unwrap_or("");
-        let host = if rest.starts_with('[') {
-            rest.split(']').next().map_or("", |h| &h[1..])
-        } else {
-            host
-        };
-        if !matches!(host, "localhost" | "127.0.0.1" | "::1") {
-            return Err(invalid("use https:// (plain http only for localhost)"));
-        }
-        rest
-    } else {
-        return Err(invalid("must start with https://"));
-    };
-    if rest.is_empty() || rest.contains(['?', '#']) {
+    let uri: ureq::http::Uri = trimmed
+        .parse()
+        .map_err(|_| invalid("not a server address"))?;
+    let authority = uri
+        .authority()
+        .filter(|a| !a.host().is_empty())
+        .ok_or_else(|| invalid("not a server address"))?;
+    if authority.as_str().contains('@') {
+        return Err(invalid("must not contain a user name or password"));
+    }
+    if trimmed.contains(['?', '#']) {
         return Err(invalid("not a server address"));
+    }
+    match uri.scheme_str() {
+        Some("https") => {}
+        Some("http") if matches!(authority.host(), "localhost" | "127.0.0.1" | "[::1]") => {}
+        Some("http") => return Err(invalid("use https:// (plain http only for localhost)")),
+        _ => return Err(invalid("must start with https://")),
     }
     Ok(trimmed.to_owned())
 }
@@ -208,5 +209,19 @@ mod tests {
         assert!(normalize_server("silo.example.com").is_err());
         assert!(normalize_server("https://").is_err());
         assert!(normalize_server("https://x.com/?a=b").is_err());
+        assert!(normalize_server("https://x.com/#a").is_err());
+        assert!(normalize_server("ftp://x.com").is_err());
+        // Assembled here so secret scanners don't take them for credentials.
+        for (scheme, userinfo, host) in [
+            ("http", "localhost:ignored", "remote.example"),
+            ("http", "localhost", "remote.example"),
+            ("https", "user:pw", "silo.example.com"),
+        ] {
+            assert!(normalize_server(&format!("{scheme}://{userinfo}@{host}")).is_err());
+        }
+        assert_eq!(
+            normalize_server("https://silo.example.com/base/").unwrap(),
+            "https://silo.example.com/base"
+        );
     }
 }
