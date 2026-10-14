@@ -74,7 +74,7 @@ built by `pnpm build:wasm`; the desktop crate by the Tauri CLI.
 ## Using the CLI
 
 ```sh
-silo init                                     # create ~/.silo, unlock
+silo init                                     # set up ~/.silo, optionally with sync, unlock
 silo add env projects/api/dev-env DB_URL=postgres://localhost/api API_KEY=sk-test
 silo add env projects/api/prod-env --from-file .env.prod
 silo add login work/github --username me --url https://github.com --tag dev
@@ -102,6 +102,22 @@ silo import ~/Desktop/Passwords.csv -n        # preview an import; drop -n to ru
 silo lock | silo unlock --ttl 8h | silo status | silo agent stop
 silo browser install | silo browser status    # connect browsers, see below
 ```
+
+Interactive `silo init` first asks for a sync server URL; Enter skips sync and
+creates a local vault. With a server, it asks for a username and an invite code:
+an invite creates and registers a new account; Enter at the invite prompt logs
+in to an existing account with its master password and downloads its vault.
+The same setup can be supplied with flags:
+
+```sh
+silo init --server https://silo.example.com -u nikita --invite CODE # new account
+silo init --server https://silo.example.com -u nikita               # existing account
+```
+
+Registration asks for a new master password only once (with confirmation).
+If registration is refused, the local vault stays; retry with `silo sync register`.
+Without a terminal on stdin, `silo init` skips the optional sync questions unless
+`--server` is supplied, so existing scripts can still create a local vault.
 
 The first `silo unlock` (or `silo init`) starts `silo agent run` detached in its
 own session. The agent holds the unlocked keys in memory, auto-locks after the TTL

@@ -49,6 +49,18 @@ fn register(
     let server = resolve_server(&paths, server)?;
     let mut agent = ensure_agent(&paths)?;
     let password = prompt::password("Master password")?;
+    register_with(&mut agent, server, username, invite, &password, device)
+}
+
+/// Init already has an unlocked agent and the new master password.
+pub(crate) fn register_with(
+    agent: &mut Client,
+    server: String,
+    username: String,
+    invite: String,
+    password: &str,
+    device: Option<String>,
+) -> Result<()> {
     let mut request = Request::SyncRegister {
         server,
         username,
@@ -67,15 +79,24 @@ fn register(
         "Registered {} on {} (this device: {}).",
         info.username, info.server, info.device_id
     );
-    sync_now(&mut agent)
+    sync_now(agent)
 }
 
 fn login(server: ServerArgs, username: String, device: Option<String>) -> Result<()> {
     let paths = Paths::from_env()?;
     let server = resolve_server(&paths, server)?;
+    login_at(&paths, server, username, device)
+}
+
+pub(crate) fn login_at(
+    paths: &Paths,
+    server: String,
+    username: String,
+    device: Option<String>,
+) -> Result<()> {
     // A new machine has no data directory yet; the agent and its log need one.
     Store::open(paths.clone())?;
-    let mut agent = ensure_agent(&paths)?;
+    let mut agent = ensure_agent(paths)?;
     let password = prompt::password("Master password")?;
     let mut request = Request::SyncLogin {
         server,

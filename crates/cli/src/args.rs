@@ -19,8 +19,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Create an account in SILO_HOME (default ~/.silo) and unlock it
-    Init,
+    /// Set up a vault in SILO_HOME (default ~/.silo), optionally with sync
+    Init(InitArgs),
     /// Unlock the vault, starting the agent if needed
     Unlock {
         /// How long to stay unlocked, e.g. 8h or 30m (default 12h)
@@ -147,6 +147,19 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<SyncCommand>,
     },
+}
+
+#[derive(Args)]
+pub struct InitArgs {
+    /// Set up sync with this server; without --invite, log in to an existing account
+    #[arg(long, value_name = "URL")]
+    pub server: Option<String>,
+    /// Account name on the server (prompted when omitted)
+    #[arg(short, long, requires = "server")]
+    pub username: Option<String>,
+    /// Register a new account using this one-time invite from the server's admin
+    #[arg(long, requires = "server")]
+    pub invite: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -370,6 +383,32 @@ pub enum ExportFormat {
 #[cfg(test)]
 mod sync_server_tests {
     use super::*;
+
+    #[test]
+    fn init_accepts_local_registration_and_login_setup() {
+        assert!(Cli::try_parse_from(["silo", "init"]).is_ok());
+        for invite in [None, Some("test-invite")] {
+            let mut args = vec![
+                "silo",
+                "init",
+                "--server",
+                "https://silo.example.com",
+                "-u",
+                "alice",
+            ];
+            if let Some(invite) = invite {
+                args.extend(["--invite", invite]);
+            }
+            let Command::Init(setup) = Cli::try_parse_from(args).unwrap().command else {
+                panic!("expected init");
+            };
+            assert_eq!(setup.server.as_deref(), Some("https://silo.example.com"));
+            assert_eq!(setup.username.as_deref(), Some("alice"));
+            assert_eq!(setup.invite.as_deref(), invite);
+        }
+        assert!(Cli::try_parse_from(["silo", "init", "-u", "alice"]).is_err());
+        assert!(Cli::try_parse_from(["silo", "init", "--invite", "test-invite"]).is_err());
+    }
 
     #[test]
     fn register_and_login_accept_optional_flag_or_positional_server() {
