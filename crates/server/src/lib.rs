@@ -16,8 +16,9 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use silo_core::sync::{
-    AccountReply, ChangesReply, ConnectionInfo, ConnectionsReply, DevicesReply, LoginRequest,
-    PreloginReply, PushReply, PushRequest, RegisterRequest, ServerInfo, ServerKey, SessionReply,
+    AccountReply, ChangesReply, ConnectionInfo, ConnectionsReply, DevicesReply, HistoryReply,
+    HistoryRequest, LoginRequest, PreloginReply, PushReply, PushRequest, RegisterRequest,
+    ServerInfo, ServerKey, SessionReply,
 };
 
 pub mod accounts;
@@ -66,7 +67,8 @@ pub fn app(state: AppState) -> Router {
         .route("/connections/{username}", put(request_connection))
         .route("/connections/{username}", delete(remove_connection))
         .route("/changes", get(changes))
-        .route("/push", post(push));
+        .route("/push", post(push))
+        .route("/history", post(history));
     Router::new()
         .route("/health", get(health))
         .nest("/v1", v1)
@@ -261,6 +263,19 @@ async fn push(
     state
         .db
         .run(move |conn| sync::push(conn, &auth, now, request))
+        .await
+        .map(Json)
+}
+
+async fn history(
+    State(state): State<AppState>,
+    auth: Auth,
+    payload: Result<Json<HistoryRequest>, JsonRejection>,
+) -> ApiResult<Json<HistoryReply>> {
+    let request = body(payload)?;
+    state
+        .db
+        .run(move |conn| sync::history(conn, &auth, request))
         .await
         .map(Json)
 }

@@ -20,6 +20,7 @@
 //! DELETE /v1/connections/{username}     → 204                      cancel, decline or remove
 //! GET    /v1/changes?since=N&limit=M    → ChangesReply
 //! POST   /v1/push       PushRequest     → PushReply
+//! POST   /v1/history    HistoryRequest  → HistoryReply             revisions between two
 //! ```
 //!
 //! Everything but the first four needs `Authorization: Bearer <device token>`.
@@ -422,6 +423,29 @@ impl Change {
             Self::Delete { tombstone, .. } => tombstone.revision,
         }
     }
+}
+
+/// Earlier revisions of one secret: those after `after` and before `before`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryQuery {
+    pub secret_id: SecretId,
+    pub after: u32,
+    pub before: u32,
+}
+
+/// Pull hands out only the current revision of each secret. A device that
+/// had revision 3 and receives 6 asks for 4 and 5 here, so its history has
+/// every version, including the ones a conflict on another device left behind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryRequest {
+    pub items: Vec<HistoryQuery>,
+}
+
+/// The revisions asked for that the account holds a grant for, oldest first
+/// per secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryReply {
+    pub revisions: Vec<StoredSecret>,
 }
 
 /// Changes after the requested cursor, oldest first. Ask again with

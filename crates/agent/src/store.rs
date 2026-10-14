@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! <home>/account.json
+//! <home>/sync.json                          sync settings, device token, progress
 //! <home>/vault/<id>.json                    latest revision of each secret
 //! <home>/vault/history/<id>/<revision>.json revisions replaced by an update
 //! ```
@@ -69,6 +70,32 @@ impl Store {
         write_json(&self.paths.account_file(), record)
     }
 
+    /// Sync settings, if this vault syncs with a server.
+    pub fn read_sync<T: DeserializeOwned>(&self) -> Result<Option<T>, StoreError> {
+        read_optional(&self.paths.sync_file())
+    }
+
+    pub fn write_sync<T: Serialize>(&self, state: &T) -> Result<(), StoreError> {
+        write_json(&self.paths.sync_file(), state)
+    }
+
+    pub fn delete_sync(&self) -> Result<(), StoreError> {
+        remove_optional(self.paths.sync_file())
+    }
+
+    /// What an earlier login left behind, if any.
+    pub fn read_sync_baseline<T: DeserializeOwned>(&self) -> Result<Option<T>, StoreError> {
+        read_optional(&self.paths.sync_baseline_file())
+    }
+
+    pub fn write_sync_baseline<T: Serialize>(&self, baseline: &T) -> Result<(), StoreError> {
+        write_json(&self.paths.sync_baseline_file(), baseline)
+    }
+
+    pub fn delete_sync_baseline(&self) -> Result<(), StoreError> {
+        remove_optional(self.paths.sync_baseline_file())
+    }
+
     /// Loads the latest revision of every secret. Order is unspecified; callers sort.
     pub fn load_all(&self) -> Result<Vec<StoredSecret>, StoreError> {
         json_files(&self.paths.vault_dir())?
@@ -106,6 +133,18 @@ impl Store {
         )
     }
 
+    /// Drops one revision from history, if it is there.
+    pub fn unarchive(&self, id: SecretId, revision: u32) -> Result<(), StoreError> {
+        remove_optional(self.history_dir(id).join(format!("{revision}.json")))
+    }
+
+    /// True if this revision of the secret is in history.
+    pub fn has_archived(&self, id: SecretId, revision: u32) -> bool {
+        self.history_dir(id)
+            .join(format!("{revision}.json"))
+            .is_file()
+    }
+
     /// Earlier revisions of one secret, newest first.
     pub fn history(&self, id: SecretId) -> Result<Vec<StoredSecret>, StoreError> {
         let dir = self.history_dir(id);
@@ -133,6 +172,22 @@ impl Store {
 }
 
 const HISTORY_DIR: &str = "history";
+
+fn read_optional<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StoreError> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    read_json(path).map(Some)
+}
+
+fn remove_optional(path: PathBuf) -> Result<(), StoreError> {
+    match fs::remove_file(&path) {
+        Err(source) if source.kind() != io::ErrorKind::NotFound => {
+            Err(StoreError::Io { path, source })
+        }
+        _ => Ok(()),
+    }
+}
 
 /// The `*.json` files directly in `dir`.
 fn json_files(dir: &Path) -> Result<Vec<PathBuf>, StoreError> {

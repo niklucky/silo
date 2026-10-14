@@ -21,6 +21,7 @@ publish = false
 [workspace.dependencies]
 silo-core = { path = "crates/core" }
 silo-agent = { path = "crates/agent" }
+silo-server = { path = "crates/server" }
 
 # shared
 serde = { version = "1", features = ["derive"] }
@@ -28,6 +29,7 @@ serde_json = "1"
 
 # agent + cli
 anyhow = "1"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 dotenvy = "0.15"

@@ -943,3 +943,50 @@ async fn malformed_bodies_get_json_errors() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(reply["error"]["code"], "invalid");
 }
+
+#[tokio::test]
+async fn history_returns_revisions_in_between_to_grantees_only() {
+    let server = Server::new();
+    let alice = server.register("alice").await;
+    let mallory = server.register("mallory").await;
+    let a = *alice.keys.public_key();
+    let id = new_id(40);
+    for revision in 1..=4 {
+        let results = server
+            .push(
+                &alice,
+                vec![put(
+                    revision - 1,
+                    entry(&alice.keys, id, revision, &format!("v{revision}"), &[a]),
+                )],
+            )
+            .await;
+        assert!(matches!(results[0], PushResult::Ok { .. }), "{results:?}");
+    }
+    let query = json!({ "items": [{ "secret_id": id, "after": 1, "before": 4 }] });
+
+    let (status, reply) = server
+        .call(
+            "POST",
+            "/v1/history",
+            Some(&alice.token),
+            Some(query.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    let reply: sync::HistoryReply = serde_json::from_value(reply).unwrap();
+    let revisions: Vec<u32> = reply.revisions.iter().map(|r| r.secret.revision).collect();
+    assert_eq!(revisions, [2, 3]);
+    assert!(
+        reply
+            .revisions
+            .iter()
+            .all(|r| r.verify(&alice.keys.identity().signing_key).is_ok())
+    );
+
+    let (status, reply) = server
+        .call("POST", "/v1/history", Some(&mallory.token), Some(query))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reply["revisions"], json!([]));
+}

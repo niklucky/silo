@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use silo_core::AccountKeys;
 use silo_core::account::Identity;
 use silo_core::crypto::{CryptoRng, DataKey, Fingerprint, PublicKey};
-use silo_core::vault::{Grant, SealedSecret, SecretId, SecretKind, SecretMeta, Url};
+use silo_core::sync::Tombstone;
+use silo_core::vault::{Grant, SealedSecret, SecretBody, SecretId, SecretKind, SecretMeta, Url};
 
 use crate::protocol::{
     AgentError, ListFilter, NewSecret, SecretSummary, SecretUpdate, SecretView, display_path,
@@ -70,7 +71,11 @@ impl Session {
     /// Returns the session and how many stored secrets could not be opened.
     pub fn unlock(store: &Store, password: &[u8]) -> Result<(Self, usize), AgentError> {
         let record = store.read_account()?;
-        let keys = record.unlock(password)?;
+        Self::open(store, record.unlock(password)?)
+    }
+
+    /// Like [`unlock`](Self::unlock) with keys the caller already has.
+    pub fn open(store: &Store, keys: AccountKeys) -> Result<(Self, usize), AgentError> {
         let mut entries = BTreeMap::new();
         let mut skipped = 0;
         for stored in store.load_all()? {
@@ -265,7 +270,27 @@ impl Session {
         let revision = current.checked_add(1).ok_or_else(|| AgentError::Internal {
             message: format!("{id} has run out of revisions"),
         })?;
-        let (sealed, key) = SealedSecret::seal(rng, &self.keys, id, revision, &meta, &body)?;
+        self.reseal(store, rng, id, revision, &meta, &body, true)?;
+        Ok(self.entries[&id].summary())
+    }
+
+    /// Seals `meta` and `body` as `revision` of an existing secret under a
+    /// fresh data key, granted again to everyone who could read the current
+    /// revision, and makes it the current one. With `archive_current`, the
+    /// replaced revision goes to history first; otherwise it is dropped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reseal(
+        &mut self,
+        store: &Store,
+        rng: &mut impl CryptoRng,
+        id: SecretId,
+        revision: u32,
+        meta: &SecretMeta,
+        body: &SecretBody,
+        archive_current: bool,
+    ) -> Result<StoredSecret, AgentError> {
+        let entry = self.entry(id)?;
+        let (sealed, key) = SealedSecret::seal(rng, &self.keys, id, revision, meta, body)?;
         let mut grants: Vec<Grant> = Vec::new();
         for grant in entry
             .stored
@@ -288,13 +313,19 @@ impl Session {
             secret: sealed,
             grants,
         };
-        store.archive(&entry.stored)?;
+        if archive_current {
+            store.archive(&entry.stored)?;
+        }
         store.save(&stored)?;
-
-        let entry = Entry { stored, key, meta };
-        let summary = entry.summary();
-        self.entries.insert(id, entry);
-        Ok(summary)
+        self.entries.insert(
+            id,
+            Entry {
+                stored: stored.clone(),
+                key,
+                meta: meta.clone(),
+            },
+        );
+        Ok(stored)
     }
 
     /// Earlier revisions of a secret that this account can still open, newest first.
@@ -363,6 +394,100 @@ impl Session {
         store.delete(id)?;
         let entry = self.entries.remove(&id).expect("resolved ids exist");
         Ok(entry.summary())
+    }
+
+    // ---------- for sync ----------
+
+    /// Every secret's id and current revision.
+    pub fn revisions(&self) -> Vec<(SecretId, u32)> {
+        self.entries
+            .iter()
+            .map(|(id, entry)| (*id, entry.stored.secret.revision))
+            .collect()
+    }
+
+    pub fn stored(&self, id: SecretId) -> Option<&StoredSecret> {
+        self.entries.get(&id).map(|entry| &entry.stored)
+    }
+
+    pub fn path_of(&self, id: SecretId) -> Option<String> {
+        self.entries.get(&id).map(|entry| display_path(&entry.meta))
+    }
+
+    /// True if this account signed the revision and every grant on it.
+    pub fn signed_by_me(&self, stored: &StoredSecret) -> bool {
+        stored.verify(&self.keys.identity().signing_key).is_ok()
+    }
+
+    /// Decrypts a revision this account holds a grant for.
+    pub fn open_parts(
+        &self,
+        stored: &StoredSecret,
+    ) -> Result<(SecretMeta, SecretBody), AgentError> {
+        let entry = Entry::open(stored.clone(), &self.keys)?;
+        let body = entry.stored.secret.open_body(&entry.key)?;
+        Ok((entry.meta, body))
+    }
+
+    /// Takes a revision from elsewhere as the current one. With
+    /// `archive_current`, the replaced local revision goes to history.
+    pub fn accept(
+        &mut self,
+        store: &Store,
+        stored: StoredSecret,
+        archive_current: bool,
+    ) -> Result<(), AgentError> {
+        let entry = Entry::open(stored, &self.keys)?;
+        let id = entry.stored.secret.id;
+        if archive_current && let Some(current) = self.entries.get(&id) {
+            store.archive(&current.stored)?;
+        }
+        store.save(&entry.stored)?;
+        self.entries.insert(id, entry);
+        Ok(())
+    }
+
+    /// Removes a secret by id, with its local history.
+    pub fn remove_id(&mut self, store: &Store, id: SecretId) -> Result<(), AgentError> {
+        if self.entries.remove(&id).is_some() {
+            store.delete(id)?;
+        }
+        Ok(())
+    }
+
+    /// Signs a revision written before signing existed, and its grants, and
+    /// stores it again: as the current revision, or in history.
+    pub fn sign_if_needed(
+        &mut self,
+        store: &Store,
+        mut stored: StoredSecret,
+    ) -> Result<StoredSecret, AgentError> {
+        if self.signed_by_me(&stored) {
+            return Ok(stored);
+        }
+        stored.secret.sign(&self.keys);
+        for grant in &mut stored.grants {
+            grant.sign(&self.keys, &stored.secret);
+        }
+        let id = stored.secret.id;
+        match self.entries.get_mut(&id) {
+            Some(entry) if entry.stored.secret.revision == stored.secret.revision => {
+                store.save(&stored)?;
+                entry.stored = stored.clone();
+            }
+            _ => store.archive(&stored)?,
+        }
+        Ok(stored)
+    }
+
+    pub fn tombstone(&self, id: SecretId, revision: u32, now: u64) -> Tombstone {
+        Tombstone::seal(&self.keys, id, revision, now)
+    }
+
+    fn entry(&self, id: SecretId) -> Result<&Entry, AgentError> {
+        self.entries.get(&id).ok_or_else(|| AgentError::NotFound {
+            selector: id.to_string(),
+        })
     }
 }
 

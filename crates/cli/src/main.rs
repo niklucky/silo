@@ -9,6 +9,7 @@ mod format;
 mod generate;
 mod import;
 mod prompt;
+mod sync;
 
 use std::process::ExitCode;
 

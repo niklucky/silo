@@ -8,7 +8,10 @@
 
 use serde::{Deserialize, Serialize};
 use silo_core::crypto::PublicKey;
+use silo_core::sync::DeviceInfo;
 use silo_core::vault::{FolderPath, SecretBody, SecretId, SecretKind, SecretMeta, Tag};
+
+use crate::sync::SyncReport;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -43,6 +46,33 @@ pub enum Request {
         /// for `dev.example.com`), after the ones that match.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         site: bool,
+    },
+    /// Registers this vault's account on a sync server with an invite.
+    SyncRegister {
+        server: String,
+        username: String,
+        invite: String,
+        password: String,
+        #[serde(default)]
+        device_name: Option<String>,
+    },
+    /// Logs this device in to a sync account. On a machine without an
+    /// account, the account comes from the server.
+    SyncLogin {
+        server: String,
+        username: String,
+        password: String,
+        #[serde(default)]
+        device_name: Option<String>,
+    },
+    /// Revokes this device on the server and stops syncing. The vault stays.
+    SyncLogout,
+    /// Pulls and pushes now.
+    Sync,
+    SyncStatus,
+    SyncDevices,
+    SyncRevokeDevice {
+        device_id: String,
     },
 }
 
@@ -142,6 +172,20 @@ pub struct StatusInfo {
     pub expires_in_secs: Option<u64>,
 }
 
+/// Where this vault syncs and how it went.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncStatusInfo {
+    pub server: String,
+    pub username: String,
+    pub device_id: String,
+    pub last_sync: Option<u64>,
+    pub last_error: Option<String>,
+    /// Local changes not on the server yet; unknown while locked.
+    pub pending: Option<usize>,
+    /// Changes the server refused, by `folder/title` or id.
+    pub rejected: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
@@ -156,6 +200,14 @@ pub enum Reply {
     Removed(SecretSummary),
     History(Vec<SecretView>),
     Matches(Vec<SecretSummary>),
+    SyncStatus(Option<SyncStatusInfo>),
+    Synced(SyncReport),
+    /// `revoked` is false if the server could not be reached.
+    LoggedOut {
+        revoked: bool,
+    },
+    Devices(Vec<DeviceInfo>),
+    DeviceRevoked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
@@ -186,6 +238,8 @@ pub enum AgentError {
     Core { message: String },
     #[error("storage error: {message}")]
     Storage { message: String },
+    #[error("sync: {message}")]
+    Sync { message: String },
     #[error("internal error: {message}")]
     Internal { message: String },
 }

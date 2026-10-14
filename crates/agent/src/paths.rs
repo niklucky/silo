@@ -59,6 +59,16 @@ impl Paths {
         self.home.join("vault")
     }
 
+    /// Sync settings and progress, including the device token.
+    pub fn sync_file(&self) -> PathBuf {
+        self.home.join("sync.json")
+    }
+
+    /// What is kept of the sync state after logging out.
+    pub fn sync_baseline_file(&self) -> PathBuf {
+        self.home.join("sync-baseline.json")
+    }
+
     pub fn socket_file(&self) -> &Path {
         &self.socket
     }
