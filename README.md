@@ -114,6 +114,7 @@ permissions restrict to your user.
 | `SILO_HOME`         | Data directory (default `~/.silo`)                 |
 | `SILO_AGENT_SOCKET` | Socket path (default `$SILO_HOME/agent.sock`)      |
 | `SILO_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
+| `SILO_SERVER`       | Default server URL for sync register and login      |
 
 With sync set up, `$SILO_HOME/sync.json` (mode 0600) holds the server address,
 the device token and sync progress. `silo sync logout` keeps the progress in
@@ -146,9 +147,9 @@ silo-server invite                  # one-time code for one account, valid 7 day
 silo-server                         # serves on 127.0.0.1:8787 (--db, SILO_SERVER_ADDR)
 
 # the device that has the vault
-silo sync register https://silo.example.com -u nikita --invite k3f9q-2xw7m-p4hzc-8vd1n
+silo sync register --server https://silo.example.com -u nikita --invite k3f9q-2xw7m-p4hzc-8vd1n
 # every other device; on a new machine this creates the vault from the server
-silo sync login https://silo.example.com -u nikita
+silo sync login --server https://silo.example.com -u nikita
 silo status                         # same fingerprint on every device
 
 silo sync                           # sync now
@@ -156,6 +157,12 @@ silo sync status                    # last sync, changes waiting, errors
 silo sync devices                   # this account's devices; --revoke ID locks one out
 silo sync logout                    # revoke this device and stop syncing; the vault stays
 ```
+
+For register and login, the server URL comes from `--server URL`, then
+`SILO_SERVER`, then the last server saved in `sync-baseline.json` by logout.
+If none is available, the CLI prompts for it. A positional URL is also accepted
+for compatibility with existing commands. After logout, `silo sync login -u nikita`
+therefore reconnects to the previous server without asking for its address.
 
 While unlocked, the agent syncs on unlock, two seconds after each change, and
 every five minutes. Plain `http://` is accepted for `localhost` only; anything

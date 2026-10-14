@@ -153,8 +153,8 @@ pub enum Command {
 pub enum SyncCommand {
     /// Put this vault's account on a server, with an invite from its admin
     Register {
-        /// Server address, e.g. https://silo.example.com
-        server: String,
+        #[command(flatten)]
+        server: ServerArgs,
         #[arg(short, long)]
         username: String,
         /// One-time code from `silo-server invite`
@@ -166,8 +166,8 @@ pub enum SyncCommand {
     },
     /// Log this machine in to an account; on a new machine this creates the vault
     Login {
-        /// Server address, e.g. https://silo.example.com
-        server: String,
+        #[command(flatten)]
+        server: ServerArgs,
         #[arg(short, long)]
         username: String,
         /// Name in the device list (default: this machine's name)
@@ -187,6 +187,16 @@ pub enum SyncCommand {
     },
     /// Stop syncing and revoke this device; the local vault stays
     Logout,
+}
+
+#[derive(Args)]
+pub struct ServerArgs {
+    /// Server address (default: SILO_SERVER, previous server, or a prompt)
+    #[arg(long, value_name = "URL", conflicts_with = "server_url")]
+    pub server: Option<String>,
+    /// Server address; also accepted as --server URL
+    #[arg(value_name = "URL")]
+    pub server_url: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -355,4 +365,30 @@ pub enum ExportFormat {
     Dotenv,
     Shell,
     Json,
+}
+
+#[cfg(test)]
+mod sync_server_tests {
+    use super::*;
+
+    #[test]
+    fn register_and_login_accept_optional_flag_or_positional_server() {
+        for command in ["register", "login"] {
+            let mut base = vec!["silo", "sync", command, "-u", "alice"];
+            if command == "register" {
+                base.extend(["--invite", "test-invite"]);
+            }
+            for suffix in [
+                vec![],
+                vec!["--server", "https://silo.example.com"],
+                vec!["https://silo.example.com"],
+            ] {
+                let mut args = base.clone();
+                args.extend(suffix);
+                assert!(Cli::try_parse_from(args).is_ok());
+            }
+            base.extend(["https://old.example", "--server", "https://new.example"]);
+            assert!(Cli::try_parse_from(base).is_err());
+        }
+    }
 }
