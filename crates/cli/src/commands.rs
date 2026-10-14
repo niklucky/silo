@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
@@ -12,12 +12,12 @@ use silo_core::crypto::KdfParams;
 use silo_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBody, Tag};
 use zeroize::Zeroize;
 
-use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand};
+use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand, InitArgs};
 use crate::{browser, edit, format, import, prompt, sync};
 
 pub fn run(command: Command) -> Result<()> {
     match command {
-        Command::Init => init(),
+        Command::Init(args) => init(args),
         Command::Unlock { ttl } => unlock(ttl),
         Command::Lock => lock(),
         Command::Status { json } => status(json),
@@ -73,11 +73,20 @@ pub fn run(command: Command) -> Result<()> {
 
 // ---------- account & agent ----------
 
-fn init() -> Result<()> {
+fn init(args: InitArgs) -> Result<()> {
     let paths = Paths::from_env()?;
     let store = Store::open(paths.clone())?;
     if store.has_account() {
         bail!("an account already exists in {}", paths.home().display());
+    }
+    let setup = init_sync_setup(args)?;
+    if let Some(InitSync {
+        server,
+        username,
+        invite: None,
+    }) = setup
+    {
+        return sync::login_at(&paths, server, username, None);
     }
     let password = prompt::new_password()?;
     let mut rng = rand::rng();
@@ -97,7 +106,49 @@ fn init() -> Result<()> {
                 Duration::from_secs(s)
             ))
     );
+    if let Some(InitSync {
+        server,
+        username,
+        invite: Some(invite),
+    }) = setup
+    {
+        sync::register_with(&mut agent, server, username, invite, &password, None)?;
+    }
     Ok(())
+}
+
+struct InitSync {
+    server: String,
+    username: String,
+    invite: Option<String>,
+}
+
+fn init_sync_setup(args: InitArgs) -> Result<Option<InitSync>> {
+    let interactive = args.server.is_none() && std::io::stdin().is_terminal();
+    let server = if interactive {
+        prompt::line("Sync server URL (Enter to skip)", "")?
+    } else {
+        args.server
+    };
+    let Some(server) = server else {
+        return Ok(None);
+    };
+    let server = silo_agent::sync::normalize_server(&server)?;
+    let username = match args.username {
+        Some(username) => username,
+        None => prompt::line("Server username", "")?.context("server username required")?,
+    };
+    let username = silo_core::sync::normalize_username(&username)?;
+    let invite = if interactive {
+        prompt::line("Invite code (Enter to log in to an existing account)", "")?
+    } else {
+        args.invite
+    };
+    Ok(Some(InitSync {
+        server,
+        username,
+        invite,
+    }))
 }
 
 fn unlock(ttl: Option<Duration>) -> Result<()> {

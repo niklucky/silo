@@ -74,7 +74,7 @@ built by `pnpm build:wasm`; the desktop crate by the Tauri CLI.
 ## Using the CLI
 
 ```sh
-silo init                                     # create ~/.silo, unlock
+silo init                                     # set up ~/.silo, optionally with sync, unlock
 silo add env projects/api/dev-env DB_URL=postgres://localhost/api API_KEY=sk-test
 silo add env projects/api/prod-env --from-file .env.prod
 silo add login work/github --username me --url https://github.com --tag dev
@@ -103,6 +103,22 @@ silo lock | silo unlock --ttl 8h | silo status | silo agent stop
 silo browser install | silo browser status    # connect browsers, see below
 ```
 
+Interactive `silo init` first asks for a sync server URL; Enter skips sync and
+creates a local vault. With a server, it asks for a username and an invite code:
+an invite creates and registers a new account; Enter at the invite prompt logs
+in to an existing account with its master password and downloads its vault.
+The same setup can be supplied with flags:
+
+```sh
+silo init --server https://silo.example.com -u nikita --invite CODE # new account
+silo init --server https://silo.example.com -u nikita               # existing account
+```
+
+Registration asks for a new master password only once (with confirmation).
+If registration is refused, the local vault stays; retry with `silo sync register`.
+Without a terminal on stdin, `silo init` skips the optional sync questions unless
+`--server` is supplied, so existing scripts can still create a local vault.
+
 The first `silo unlock` (or `silo init`) starts `silo agent run` detached in its
 own session. The agent holds the unlocked keys in memory, auto-locks after the TTL
 (default 12h), and serves every other command over `~/.silo/agent.sock`. Clients
@@ -114,6 +130,7 @@ permissions restrict to your user.
 | `SILO_HOME`         | Data directory (default `~/.silo`)                 |
 | `SILO_AGENT_SOCKET` | Socket path (default `$SILO_HOME/agent.sock`)      |
 | `SILO_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
+| `SILO_SERVER`       | Default server URL for sync register and login      |
 
 With sync set up, `$SILO_HOME/sync.json` (mode 0600) holds the server address,
 the device token and sync progress. `silo sync logout` keeps the progress in
@@ -146,9 +163,9 @@ silo-server invite                  # one-time code for one account, valid 7 day
 silo-server                         # serves on 127.0.0.1:8787 (--db, SILO_SERVER_ADDR)
 
 # the device that has the vault
-silo sync register https://silo.example.com -u nikita --invite k3f9q-2xw7m-p4hzc-8vd1n
+silo sync register --server https://silo.example.com -u nikita --invite k3f9q-2xw7m-p4hzc-8vd1n
 # every other device; on a new machine this creates the vault from the server
-silo sync login https://silo.example.com -u nikita
+silo sync login --server https://silo.example.com -u nikita
 silo status                         # same fingerprint on every device
 
 silo sync                           # sync now
@@ -156,6 +173,12 @@ silo sync status                    # last sync, changes waiting, errors
 silo sync devices                   # this account's devices; --revoke ID locks one out
 silo sync logout                    # revoke this device and stop syncing; the vault stays
 ```
+
+For register and login, the server URL comes from `--server URL`, then
+`SILO_SERVER`, then the last server saved in `sync-baseline.json` by logout.
+If none is available, the CLI prompts for it. A positional URL is also accepted
+for compatibility with existing commands. After logout, `silo sync login -u nikita`
+therefore reconnects to the previous server without asking for its address.
 
 While unlocked, the agent syncs on unlock, two seconds after each change, and
 every five minutes. Plain `http://` is accepted for `localhost` only; anything
