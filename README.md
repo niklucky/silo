@@ -29,6 +29,10 @@ scripts/
   build-safari.sh          Safari build + xcodebuild → apps/safari/build/Silo for Safari.app
   basic-auth-server.py     local HTTP Basic Auth playground for testing the extension
   login-form-server.py     local login form playground (sign-in, sign-up, change password, iframe)
+deployment/
+  Dockerfile               multi-stage silo-server image; non-root runtime
+  compose.yaml             production server, loopback port and persistent bind mounts
+.github/workflows/         reusable native/container checks, called for PRs and main
 ```
 
 The core crate is the only place that touches keys or plaintext. Hosts supply
@@ -182,6 +186,49 @@ secret. `silo sync` lists every such conflict and which side won.
 
 A device's history covers what it has seen since it joined; revisions made on
 other devices in between are fetched to fill the gaps.
+
+### Server deployment
+
+The deployment target is the shared Spectron VPS, with host nginx terminating
+TLS for `silo.warpunit.com`. The server runs in Docker Compose and publishes
+only `127.0.0.1:8787` on the host. Inside the container it listens on
+`0.0.0.0:8787`, so Docker can forward that loopback port to it.
+
+`deployment/compose.yaml` requires `SERVER_IMAGE` (the release image reference).
+The non-root process defaults to UID/GID 10001; `SILO_UID` and `SILO_GID` can
+match the provisioned host user. Provisioning must create private writable bind
+mount directories before starting Compose:
+
+- `/data/silo/db` → `/data/db`: `silo-server.db`, including SQLite WAL files.
+- `/data/silo/files` → `/data/files`: reserved for future file storage; the
+  current sync server stores encrypted file contents in SQLite too.
+
+`DB_DATA`, `FILES_DATA` and `SERVER_PORT` override those defaults for local
+testing. Production logs use Docker's `journald` driver; read them with
+`journalctl CONTAINER_NAME=silo-server-1` (the default Compose container name).
+Set `LOG_DRIVER=local` on Docker Desktop. The image includes `sqlite3` for online
+backups and `curl` for its health check. Create invites in the running container
+with `docker compose -f deployment/compose.yaml exec server silo-server invite`.
+
+Build and smoke-test locally without changing the installed Mac CLI:
+
+```sh
+docker build -f deployment/Dockerfile -t silo-server:local .
+docker run -d --name silo-server-test -p 127.0.0.1:18787:8787 \
+  -v silo-server-test-db:/data/db silo-server:local
+curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18787/health
+docker exec silo-server-test silo-server invite
+docker restart silo-server-test
+curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18787/health
+docker exec silo-server-test sqlite3 /data/db/silo-server.db 'SELECT count(*) FROM invites;'
+docker rm -f silo-server-test
+docker volume rm silo-server-test-db
+```
+
+Every PR and push to `main` runs formatting, clippy, native build/tests, and a
+container health/persistence check. The reusable checks will also gate version
+tag releases. SSH provisioning, nginx/TLS, backups and tag deployment are the
+next deployment pieces; the VPS is not provisioned by these files yet.
 
 ## Browser extension: HTTP Basic Auth
 

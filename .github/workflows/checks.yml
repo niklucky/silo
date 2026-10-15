@@ -1,0 +1,54 @@
+name: Checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Lint native crates
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build native crates
+        run: cargo build --locked
+      - name: Test native crates
+        run: cargo test --locked
+
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build server image
+        run: docker build -f deployment/Dockerfile -t silo-server:check .
+      - name: Check Compose configuration
+        run: SERVER_IMAGE=silo-server:check docker compose -f deployment/compose.yaml config --quiet
+      - name: Check server health and persistent SQLite
+        run: |
+          docker run -d --name silo-check --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            -p 127.0.0.1:8787:8787 -v silo-check-db:/data/db silo-server:check
+          trap 'docker logs silo-check; docker rm -f silo-check; docker volume rm silo-check-db' EXIT
+          for attempt in $(seq 1 30); do
+            echo "Health check attempt $attempt"
+            if curl -fsS http://127.0.0.1:8787/health; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/health | grep -q '"status":"ok"'
+          docker exec silo-check silo-server invite
+          docker restart silo-check
+          for attempt in $(seq 1 30); do
+            echo "Health check after restart, attempt $attempt"
+            if curl -fsS http://127.0.0.1:8787/health; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/health | grep -q '"status":"ok"'
+          docker exec silo-check sqlite3 /data/db/silo-server.db \
+            'SELECT count(*) FROM invites;' | grep -qx 1

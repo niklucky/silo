@@ -1,0 +1,37 @@
+name: silo
+
+services:
+  server:
+    image: ${SERVER_IMAGE:?Set SERVER_IMAGE to the verified release image}
+    restart: unless-stopped
+    user: '${SILO_UID:-10001}:${SILO_GID:-10001}'
+    environment:
+      SILO_SERVER_DB: /data/db/silo-server.db
+      SILO_SERVER_ADDR: 0.0.0.0:8787
+    ports:
+      - '127.0.0.1:${SERVER_PORT:-8787}:8787'
+    volumes:
+      - type: bind
+        source: ${DB_DATA:-/data/silo/db}
+        target: /data/db
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${FILES_DATA:-/data/silo/files}
+        target: /data/files
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+    healthcheck:
+      test: ['CMD', 'curl', '--fail', '--silent', '--max-time', '3', 'http://127.0.0.1:8787/health']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: ${LOG_DRIVER:-journald}

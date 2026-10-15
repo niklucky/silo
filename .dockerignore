@@ -1,0 +1,14 @@
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!apps/
+!apps/desktop/
+!apps/desktop/src-tauri/
+!apps/desktop/src-tauri/Cargo.toml
+!apps/desktop/src-tauri/build.rs
+!apps/desktop/src-tauri/src/
+!apps/desktop/src-tauri/src/**
+!deployment/
+!deployment/Dockerfile
