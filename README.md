@@ -212,6 +212,13 @@ The extension answers `401` challenges with a saved login so the browser never
 shows its password dialog. It holds no keys: it asks the agent, through a
 native-messaging bridge, for the best login for the URL being loaded.
 
+When nothing is saved for a host, the extension's sign-in page also lists logins
+saved for other hosts of the same site. Picking one adds this host to that
+login, so one entry serves `admin.dev.example.com`, `test.dev.example.com` and
+so on, and a new password only has to be saved once. If the login already
+covers two sibling hosts, you can widen it to `https://*.dev.example.com`
+instead. If the site refuses the login you picked, the link is undone.
+
 ```
 browser ──native messaging──▶ silo-native-host ──unix socket──▶ silo agent
           (stdio, 4-byte length + JSON)                 (same protocol as the CLI)

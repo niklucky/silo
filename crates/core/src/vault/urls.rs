@@ -232,6 +232,24 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_with_scheme_pins_scheme_and_port() {
+        // What the browser extension writes when one login covers several subdomains.
+        let pattern = "https://*.dev.example.com";
+        assert_eq!(score(pattern, "https://id.dev.example.com/x"), Some(2));
+        assert_eq!(score(pattern, "https://dev.example.com"), Some(2));
+        assert_eq!(score(pattern, "http://id.dev.example.com"), None);
+        assert_eq!(score(pattern, "https://id.dev.example.com:8443"), None);
+        assert_eq!(score(pattern, "https://example.com"), None);
+        assert_eq!(
+            score(
+                "https://*.dev.example.com:8443",
+                "https://id.dev.example.com:8443"
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn garbage_never_matches() {
         assert_eq!(score("", "https://example.com"), None);
         assert_eq!(score("   ", "https://example.com"), None);
