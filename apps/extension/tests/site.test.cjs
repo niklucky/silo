@@ -11,8 +11,17 @@ const js = ts.transpileModule(source, {
 }).outputText;
 const site = {};
 vm.runInNewContext(js, { exports: site, URL });
-const widen = (patterns, target) => {
-  const result = site.widening(patterns, target);
+// The registrable domain as the agent finds it, for the hosts used here.
+const siteOf = (target) => {
+  const host = new URL(target).hostname;
+  if (/^[\d.]+$/.test(host)) return null;
+  if (host === "localhost" || host.endsWith(".localhost")) return "localhost";
+  const labels = host.split(".");
+  const suffix = /\.(co\.uk|github\.io)$/.test(host) ? 3 : 2;
+  return labels.length >= suffix ? labels.slice(-suffix).join(".") : null;
+};
+const widen = (patterns, target, registrable = siteOf(target)) => {
+  const result = site.widening(patterns, target, registrable);
   return result && { wildcard: result.wildcard, replaces: Array.from(result.replaces) };
 };
 
@@ -61,11 +70,31 @@ test("keeps scheme and port, and never replaces broader patterns", () => {
 test("never widens to a public suffix, a bare label or an address", () => {
   assert.equal(widen(["https://a.co.uk", "https://b.co.uk"], "https://c.co.uk"), null);
   assert.equal(widen(["https://a.com", "https://b.com"], "https://c.com"), null);
+  assert.equal(widen(["https://a.dev.example.com", "https://b.dev.example.com"], "https://c.dev.example.com", null), null);
   assert.equal(widen(["http://10.0.0.1", "http://10.0.0.2"], "http://10.0.0.3"), null);
   assert.equal(widen(["http://a.localhost", "http://b.localhost"], "http://localhost"), null);
   assert.deepEqual(widen(["https://a.example.co.uk", "https://b.example.co.uk"], "https://c.example.co.uk"), {
     wildcard: "https://*.example.co.uk",
     replaces: ["https://a.example.co.uk", "https://b.example.co.uk"],
+  });
+});
+
+test("stays within the target's site", () => {
+  // alice.github.io and bob.github.io are separate sites under one suffix.
+  assert.equal(widen(["https://admin.alice.github.io", "https://bob.github.io"], "https://id.alice.github.io"), null);
+  assert.deepEqual(
+    widen(
+      ["https://admin.alice.github.io", "https://test.alice.github.io", "https://bob.github.io"],
+      "https://id.alice.github.io",
+    ),
+    {
+      wildcard: "https://*.alice.github.io",
+      replaces: ["https://admin.alice.github.io", "https://test.alice.github.io"],
+    },
+  );
+  assert.deepEqual(widen(["http://a.dev.localhost:8099", "http://b.dev.localhost:8099"], "http://c.dev.localhost:8099"), {
+    wildcard: "http://*.dev.localhost:8099",
+    replaces: ["http://a.dev.localhost:8099", "http://b.dev.localhost:8099"],
   });
 });
 

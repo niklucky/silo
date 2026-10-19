@@ -19,7 +19,7 @@ import {
 } from "@/lib/messages";
 import { isBasicAuth, type SecretSummary, secretPath } from "@/lib/protocol";
 import { loadSettings, saveSettings } from "@/lib/settings";
-import { patternHosts, widening } from "@/lib/site";
+import { patternHosts, type Widening, widening } from "@/lib/site";
 import { errorText, originOf } from "@/lib/util";
 
 const ALL_URLS = { urls: ["<all_urls>"] };
@@ -113,14 +113,28 @@ interface PendingOffer {
 interface SiteLogin extends SameSiteLogin {
   password: string;
   urls: string[];
+  revision: number;
 }
 
-/** A login the auth page just made fill on an origin, with its URL patterns from before. */
+/** A login the auth page offers for a challenge, with what linking it would change. */
+interface LinkCandidate {
+  option: LinkOption;
+  login: SiteLogin;
+  wide: Widening | null;
+}
+
+/**
+ * A login the auth page just made fill on an origin, with its URL patterns
+ * from before, for the challenge it was linked for.
+ */
 interface Link {
   id: string;
   /** The revision the link made; a later edit keeps the link. */
   revision: number;
   urls: string[];
+  realm: string | null;
+  /** `authPath` of the challenged URL. */
+  path: string;
 }
 
 export default defineBackground({
@@ -274,7 +288,7 @@ export default defineBackground({
      * The server answered `sent` with another 401: skip it from now on, so the
      * next lookup gets the next saved login, and end the session it came from.
      */
-    async function refuse(origin: string, realm: string | null, sent: Credentials): Promise<void> {
+    async function refuse(origin: string, url: string, realm: string | null, sent: Credentials): Promise<void> {
       const list = refusals(origin, realm);
       if (!list.some((c) => sameCredentials(c, sent))) {
         const byRealm = refused.get(origin) ?? new Map<string | null, Credentials[]>();
@@ -286,8 +300,10 @@ export default defineBackground({
       if (once && sameCredentials(once, sent)) transient.delete(origin);
       const current = sessions.get(origin)?.creds;
       if (current && sameCredentials(current, sent)) await endSession(origin);
+      // Only a refusal of the challenge the login was linked for: another realm
+      // or path of the site may simply want another login.
       const link = linked.get(origin);
-      if (link && link.id === sent.id) {
+      if (link && link.id === sent.id && link.realm === realm && link.path === authPath(url)) {
         linked.delete(origin);
         await unlink(origin, link);
       }
@@ -418,7 +434,7 @@ export default defineBackground({
       realms.set(authPath(details.url), challenge.realm);
       // The server refused what we sent: retry with the next saved login, or ask.
       const sent = sentWith.get(details.requestId);
-      if (state === "injected" && sent) await refuse(origin, challenge.realm, sent);
+      if (state === "injected" && sent) await refuse(origin, details.url, challenge.realm, sent);
       const result = await refresh(origin, details.url);
       if (result.kind === "found") {
         badge("");
@@ -521,7 +537,7 @@ export default defineBackground({
         }
         if (!sent) return {};
         // The server refused what we sent: try the next saved login, or ask.
-        if (isBasic) await refuse(origin, realm, sent);
+        if (isBasic) await refuse(origin, details.url, realm, sent);
         else return {};
       }
       if (state === "lookup_failed") return {};
@@ -626,7 +642,15 @@ export default defineBackground({
         if (!("login" in view.body)) continue;
         const { username, password } = view.body.login;
         const urls = view.meta.urls ?? [];
-        found.push({ id: view.id, path: secretPath(view.meta), username, password, urls, here: here.has(view.id) });
+        found.push({
+          id: view.id,
+          revision: view.revision,
+          path: secretPath(view.meta),
+          username,
+          password,
+          urls,
+          here: here.has(view.id),
+        });
       }
       return found;
     }
@@ -643,18 +667,27 @@ export default defineBackground({
      * Logins of other hosts of the site that the challenged host could use
      * instead of a new one, minus any it refused.
      */
-    async function linkOptions(challenge: Challenge): Promise<LinkOption[]> {
+    async function linkCandidates(challenge: Challenge): Promise<LinkCandidate[]> {
       const skip = refusals(challenge.origin, challenge.realm);
-      return (await siteLogins(challenge.url))
+      const logins = (await siteLogins(challenge.url))
         .filter((login) => !login.here && !skip.some((c) => sameCredentials(c, login)))
-        .slice(0, MAX_OPTIONS)
-        .map(({ id, path, username, urls }) => ({
-          id,
-          path,
-          username,
-          hosts: patternHosts(urls),
-          wildcard: widening(urls, challenge.url)?.wildcard ?? null,
-        }));
+        .slice(0, MAX_OPTIONS);
+      const site = logins.length > 0 ? await siteOf(challenge.url) : null;
+      return logins.map((login) => {
+        const wide = widening(login.urls, challenge.url, site);
+        const { id, revision, path, username, urls } = login;
+        const option = { id, revision, path, username, hosts: patternHosts(urls), wildcard: wide?.wildcard ?? null };
+        return { option, login, wide };
+      });
+    }
+
+    /** The registrable domain of `url`; null without one, or from an agent too old to say. */
+    async function siteOf(url: string): Promise<string | null> {
+      try {
+        return await agent.site(url);
+      } catch {
+        return null;
+      }
     }
 
     /**
@@ -1019,7 +1052,7 @@ export default defineBackground({
           const challenge = liveChallenge(message.id);
           if (!challenge) return { kind: "unknown_challenge" };
           try {
-            return { kind: "link_options", logins: await linkOptions(challenge) };
+            return { kind: "link_options", logins: (await linkCandidates(challenge)).map((c) => c.option) };
           } catch (err) {
             return failure(err);
           }
@@ -1030,20 +1063,31 @@ export default defineBackground({
           let creds: Credentials;
           try {
             // Only a login that was offered for this challenge, whatever id the page sends.
-            const option = (await linkOptions(challenge)).find((o) => o.id === message.login);
-            if (!option) return { kind: "error", message: "That login is not saved for this site." };
-            const view = await agent.get(option.id);
-            if (!("login" in view.body)) return { kind: "error", message: `${option.path} is not a login.` };
-            const before = view.meta.urls ?? [];
-            const wide = message.wildcard ? widening(before, challenge.url) : null;
-            const urls = wide
-              ? [...before.filter((u) => !wide.replaces.includes(u)), wide.wildcard]
-              : [...before, challenge.origin];
-            const updated = await agent.update({ selector: view.id, revision: view.revision, urls });
-            linked.set(challenge.origin, { id: view.id, revision: updated.revision, urls: before });
-            const { username, password } = view.body.login;
-            creds = { username, password, path: secretPath(updated.meta), id: view.id, basicAuth: isBasicAuth(updated.meta) };
-            const where = wide ? wide.wildcard : challenge.host;
+            const candidates = await linkCandidates(challenge);
+            const found = candidates.find((c) => c.option.id === message.login);
+            if (!found) return { kind: "error", message: "That login is not saved for this site." };
+            const { option, login, wide } = found;
+            // Only as the page showed it: a login edited since is shown again before it is linked.
+            const changed = message.wildcard !== null && option.wildcard !== message.wildcard;
+            if (option.revision !== message.revision || changed) {
+              return { kind: "link_changed", logins: candidates.map((c) => c.option) };
+            }
+            const widen = message.wildcard !== null ? wide : null;
+            const urls = widen
+              ? [...login.urls.filter((u) => !widen.replaces.includes(u)), widen.wildcard]
+              : [...login.urls, challenge.origin];
+            // The shown revision: an edit since then fails instead of being widened.
+            const updated = await agent.update({ selector: login.id, revision: message.revision, urls });
+            linked.set(challenge.origin, {
+              id: login.id,
+              revision: updated.revision,
+              urls: login.urls,
+              realm: challenge.realm,
+              path: authPath(challenge.url),
+            });
+            const { username, password } = login;
+            creds = { username, password, path: secretPath(updated.meta), id: login.id, basicAuth: isBasicAuth(updated.meta) };
+            const where = widen ? widen.wildcard : challenge.host;
             record({ origin: challenge.origin, outcome: "saved", detail: `${creds.path} (now on ${where})` });
           } catch (err) {
             return failure(err);

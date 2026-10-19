@@ -217,7 +217,9 @@ saved for other hosts of the same site. Picking one adds this host to that
 login, so one entry serves `admin.dev.example.com`, `test.dev.example.com` and
 so on, and a new password only has to be saved once. If the login already
 covers two sibling hosts, you can widen it to `https://*.dev.example.com`
-instead. If the site refuses the login you picked, the link is undone.
+instead; a wildcard never reaches past the site's registrable domain, as the
+agent's public suffix list has it. If the site refuses the login you picked on
+that page, the link is undone.
 
 ```
 browser ──native messaging──▶ silo-native-host ──unix socket──▶ silo agent
@@ -479,7 +481,8 @@ anywhere yet. The desktop app still only round-trips `silo_core::version()`.
   writes. `Session` opens every readable secret's metadata on unlock and bodies on
   demand. Line-delimited JSON protocol over a Unix socket with `status`, `unlock`,
   `lock`, `shutdown`, `list`, `get`, `add`, `update`, `remove`, `history`,
-  `match` (optionally with same-site logins). `update` re-seals under a fresh
+  `match` (optionally with same-site logins), `site` (a URL's registrable
+  domain). `update` re-seals under a fresh
   data key, re-grants every current recipient, refuses a stale base revision,
   and archives the replaced revision under `vault/history/<id>/`. Selector
   resolution by id, `folder/title` path, or unique title. Client with detached

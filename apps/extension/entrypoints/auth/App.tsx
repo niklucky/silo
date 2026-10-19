@@ -84,6 +84,11 @@ export default function App() {
       case "conflict":
         setConflicts(response.logins);
         break;
+      case "link_changed":
+        setOptions(response.logins);
+        setPicked(null);
+        setError("That login changed since this page showed it. Check it and pick again.");
+        break;
       case "unknown_challenge":
         setPhase({ step: "unknown" });
         break;
@@ -137,7 +142,14 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      follow(await send({ kind: "challenge_link", id, login: option.id, wildcard }), challenge);
+      const request: UiRequest = {
+        kind: "challenge_link",
+        id,
+        login: option.id,
+        revision: option.revision,
+        wildcard: wildcard ? option.wildcard : null,
+      };
+      follow(await send(request), challenge);
     } catch (err) {
       setError(errorText(err));
     } finally {

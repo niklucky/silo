@@ -104,7 +104,9 @@ export type Request =
   | { method: "add"; params: NewSecret }
   | { method: "update"; params: SecretUpdate }
   /** `site` adds logins for other hosts of the same site, after the matching ones. */
-  | { method: "match"; params: { url: string; site?: boolean } };
+  | { method: "match"; params: { url: string; site?: boolean } }
+  /** The registrable domain of the URL's host; null for an address or a public suffix. */
+  | { method: "site"; params: { url: string } };
 
 export type Reply =
   | { status: StatusInfo }
@@ -114,7 +116,8 @@ export type Reply =
   | { secret: SecretView }
   | { added: SecretSummary }
   | { updated: SecretSummary }
-  | { matches: SecretSummary[] };
+  | { matches: SecretSummary[] }
+  | { site: string | null };
 
 export type AgentError =
   | { code: "locked" }

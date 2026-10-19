@@ -47,6 +47,11 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         site: bool,
     },
+    /// The registrable domain of `url`'s host (`example.co.uk` for
+    /// `a.b.example.co.uk`), or none for an address or a public suffix.
+    Site {
+        url: String,
+    },
     /// Registers this vault's account on a sync server with an invite.
     SyncRegister {
         server: String,
@@ -200,6 +205,7 @@ pub enum Reply {
     Removed(SecretSummary),
     History(Vec<SecretView>),
     Matches(Vec<SecretSummary>),
+    Site(Option<String>),
     SyncStatus(Option<SyncStatusInfo>),
     Synced(SyncReport),
     /// `revoked` is false if the server could not be reached.
@@ -326,6 +332,18 @@ mod tests {
         let json = serde_json::to_string(&plain).unwrap();
         assert_eq!(json, r#"{"method":"match","params":{"url":"https://x"}}"#);
         assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), plain);
+        let site: Request =
+            serde_json::from_str(r#"{"method":"site","params":{"url":"https://x"}}"#).unwrap();
+        assert_eq!(
+            site,
+            Request::Site {
+                url: "https://x".into()
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&Response::Ok(Reply::Site(None))).unwrap(),
+            r#"{"ok":{"site":null}}"#
+        );
         let update: Request = serde_json::from_str(
             r#"{"method":"update","params":{"selector":"a","revision":2,"urls":["x.com"]}}"#,
         )

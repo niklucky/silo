@@ -44,6 +44,9 @@ function background(engine) {
         : [];
       return [...here, ...others].map((e) => ({ id: e.id, revision: e.revision, meta: meta(e) }));
     },
+    async site(url) {
+      return site(url);
+    },
     async get(id) {
       if (!unlocked) throw new AgentError("locked");
       const e = entries.find((e) => e.id === id);
@@ -381,7 +384,7 @@ for (const engine of ["firefox", "chromium", "safari"]) {
       Array.from(options.logins, (o) => [o.id, Array.from(o.hosts), o.wildcard]),
       [["shared", ["admin.dev.example.test"], null]],
     );
-    const linked = await s.send({ kind: "challenge_link", id, login: "shared", wildcard: false });
+    const linked = await s.send({ kind: "challenge_link", id, login: "shared", revision: 1, wildcard: null });
     assert.deepEqual({ ...linked }, { kind: "continue", url: devUrl });
     assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", dev]);
     const load = s.request(devUrl);
@@ -402,7 +405,7 @@ for (const engine of ["firefox", "chromium", "safari"]) {
     const s = background(engine);
     s.add("shared", "https://admin.dev.example.test");
     const id = s.authId(await s.challenge(s.request(devUrl)));
-    await s.send({ kind: "challenge_link", id, login: "shared", wildcard: false });
+    await s.send({ kind: "challenge_link", id, login: "shared", revision: 1, wildcard: null });
     const retry = s.request(devUrl);
     await s.outgoing(retry);
     const result = await s.challenge(retry);
@@ -420,7 +423,7 @@ for (const engine of ["firefox", "chromium", "safari"]) {
     const id = s.authId(await s.challenge(s.request(devUrl)));
     const options = await s.send({ kind: "challenge_logins", id });
     assert.equal(options.logins[0].wildcard, "https://*.dev.example.test");
-    await s.send({ kind: "challenge_link", id, login: "shared", wildcard: true });
+    await s.send({ kind: "challenge_link", id, login: "shared", revision: 1, wildcard: "https://*.dev.example.test" });
     assert.deepEqual(Array.from(s.entries[0].urls), [
       "admin.dev.example.test",
       "https://example.test/x",
@@ -434,8 +437,46 @@ for (const engine of ["firefox", "chromium", "safari"]) {
     const s = background(engine);
     s.add("elsewhere", "https://other.test");
     const id = s.authId(await s.challenge(s.request(devUrl)));
-    const reply = await s.send({ kind: "challenge_link", id, login: "elsewhere", wildcard: false });
+    const reply = await s.send({ kind: "challenge_link", id, login: "elsewhere", revision: 1, wildcard: null });
     assert.equal(reply.kind, "error");
     assert.deepEqual(Array.from(s.entries[0].urls), ["https://other.test"]);
+  });
+
+  test(`${engine}: does not link a login edited since the page showed it`, async () => {
+    const s = background(engine);
+    s.add("shared", "https://admin.dev.example.test");
+    s.entries[0].urls.push("https://test.dev.example.test");
+    const id = s.authId(await s.challenge(s.request(devUrl)));
+    const shown = (await s.send({ kind: "challenge_logins", id })).logins[0];
+    assert.equal(shown.wildcard, "https://*.dev.example.test");
+    // Edited elsewhere: the same request would now widen to the whole site.
+    s.entries[0].urls = ["https://admin.dev.example.test", "https://www.example.test"];
+    s.entries[0].revision++;
+    const reply = await s.send({ kind: "challenge_link", id, login: "shared", revision: shown.revision, wildcard: shown.wildcard });
+    assert.equal(reply.kind, "link_changed");
+    assert.equal(reply.logins[0].wildcard, "https://*.example.test");
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", "https://www.example.test"]);
+    // Only the wildcard shown is accepted, even at the current revision.
+    const again = await s.send({ kind: "challenge_link", id, login: "shared", revision: 2, wildcard: shown.wildcard });
+    assert.equal(again.kind, "link_changed");
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", "https://www.example.test"]);
+  });
+
+  test(`${engine}: a refusal in another realm keeps the link`, async () => {
+    const s = background(engine);
+    s.add("shared", "https://admin.dev.example.test");
+    const id = s.authId(await s.challenge(s.request(devUrl)));
+    await s.send({ kind: "challenge_link", id, login: "shared", revision: 1, wildcard: null });
+    const load = s.request(devUrl);
+    await s.outgoing(load);
+    // A subresource in another realm refuses it before the page completes.
+    const api = s.request(`${dev}/admin/api`, { type: "xmlhttprequest" });
+    await s.outgoing(api);
+    await s.challenge(api, "admin-only");
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", dev]);
+    s.complete(load);
+    await flush();
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", dev]);
+    assert.deepEqual(s.marked, ["shared"]);
   });
 }

@@ -13,20 +13,17 @@ export interface Widening {
 }
 
 /**
- * Last labels like `co.uk` or `com.au`: a public suffix rather than a site,
- * never worth a wildcard. A rough check; the agent only offers same-site
- * logins, so their hosts rarely share nothing but a suffix.
- */
-const SUFFIX_LIKE = /^(ac|co|com|edu|go|gov|ne|net|or|org)\.[a-z]{2}$/;
-
-/**
  * The wildcard to offer when `patterns` already cover at least two hosts that
- * share a parent domain with `target`, or null. The wildcard keeps the
- * target's scheme and port, and replaces only patterns it covers entirely:
- * same scheme and port, host at or under the parent. Bare hosts (any scheme)
- * stay as they are.
+ * share a parent domain with `target`, or null. `site` is the target's
+ * registrable domain (`Agent.site`): the parent stays at or under it, and
+ * patterns of other sites do not count, so `bob.github.io` never widens
+ * `alice.github.io` to `*.github.io`. No site, no wildcard. The wildcard keeps
+ * the target's scheme and port, and replaces only patterns it covers
+ * entirely: same scheme and port, host at or under the parent. Bare hosts
+ * (any scheme) stay as they are.
  */
-export function widening(patterns: readonly string[], target: string): Widening | null {
+export function widening(patterns: readonly string[], target: string, site: string | null): Widening | null {
+  if (!site) return null;
   let url: URL;
   try {
     url = new URL(target);
@@ -34,7 +31,7 @@ export function widening(patterns: readonly string[], target: string): Widening 
     return null;
   }
   const host = url.hostname.toLowerCase();
-  if (!host.includes(".") || host.startsWith("[") || /^[\d.]+$/.test(host)) return null;
+  if (!host.includes(".") || !under(host, site)) return null;
 
   const eligible: { pattern: string; host: string }[] = [];
   for (const pattern of patterns) {
@@ -47,14 +44,15 @@ export function widening(patterns: readonly string[], target: string): Widening 
     }
     if (parsed.protocol !== url.protocol || parsed.port !== url.port) continue;
     const patternHost = parsed.hostname.toLowerCase().replace(/^\*\./, "");
-    if (patternHost && patternHost !== host) eligible.push({ pattern, host: patternHost });
+    if (patternHost && patternHost !== host && under(patternHost, site)) eligible.push({ pattern, host: patternHost });
   }
 
   // The most specific parent shared with the target that covers two hosts or more.
+  // Both hosts are under `site`, so their common parent is too.
   const parents = new Set(eligible.map((e) => commonSuffix(e.host, host)));
   let best: string | null = null;
   for (const parent of parents) {
-    if (!parent.includes(".") || SUFFIX_LIKE.test(parent)) continue;
+    if (!parent.includes(".")) continue;
     const covered = new Set(eligible.filter((e) => under(e.host, parent)).map((e) => e.host));
     if (covered.size < 2) continue;
     if (!best || parent.split(".").length > best.split(".").length) best = parent;
