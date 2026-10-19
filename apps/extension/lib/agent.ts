@@ -147,6 +147,13 @@ export class Agent {
     throw unexpected(reply);
   }
 
+  /** The registrable domain of `url`'s host, as the agent's public suffix list has it; null when it has none. */
+  async site(url: string): Promise<string | null> {
+    const reply = await this.call({ method: "site", params: { url } });
+    if (typeof reply === "object" && "site" in reply) return reply.site;
+    throw unexpected(reply);
+  }
+
   async add(secret: NewSecret): Promise<SecretSummary> {
     const reply = await this.call({ method: "add", params: secret });
     if (typeof reply === "object" && "added" in reply) return reply.added;

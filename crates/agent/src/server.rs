@@ -304,6 +304,17 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
             .session()
             .and_then(|session| session.matches(&url, site))
             .map(Reply::Matches),
+        Request::Site { url } => silo_core::vault::Url::parse(&url)
+            .map_err(|err| AgentError::Invalid {
+                message: format!("invalid url {url:?}: {err}"),
+            })
+            .map(|target| {
+                Reply::Site(
+                    target
+                        .host_str()
+                        .and_then(silo_core::vault::registrable_domain),
+                )
+            }),
         Request::SyncStatus => Ok(Reply::SyncStatus(state.sync_status())),
         Request::Sync
         | Request::SyncRegister { .. }

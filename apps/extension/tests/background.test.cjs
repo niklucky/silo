@@ -25,13 +25,40 @@ function background(engine) {
       this.code = code;
     }
   }
+  // Prefixes, `scheme://*.parent` wildcards, and sites as the last two labels.
+  const covers = (pattern, url) => {
+    if (!pattern.includes("*.")) return url.startsWith(pattern);
+    const p = new URL(pattern);
+    const t = new URL(url);
+    const parent = p.hostname.slice(2);
+    return p.protocol === t.protocol && (t.hostname === parent || t.hostname.endsWith(`.${parent}`));
+  };
+  const site = (url) => new URL(url.replace("*.", "")).hostname.split(".").slice(-2).join(".");
+  const meta = (e) => ({ title: e.id, folder: "", urls: e.urls, basic_auth: e.marked });
   const agent = {
-    async matches(url) {
+    async matches(url, { site: sameSite = false } = {}) {
       if (!unlocked) throw new AgentError("locked");
-      return entries.filter((e) => url.startsWith(e.url)).map((e) => ({
-        id: e.id,
-        meta: { title: e.id, basic_auth: e.marked },
-      }));
+      const here = entries.filter((e) => e.urls.some((u) => covers(u, url)));
+      const others = sameSite
+        ? entries.filter((e) => !here.includes(e) && e.urls.some((u) => site(u) === site(url)))
+        : [];
+      return [...here, ...others].map((e) => ({ id: e.id, revision: e.revision, meta: meta(e) }));
+    },
+    async site(url) {
+      return site(url);
+    },
+    async get(id) {
+      if (!unlocked) throw new AgentError("locked");
+      const e = entries.find((e) => e.id === id);
+      return { id, revision: e.revision, meta: meta(e), body: { login: { username: id, password: e.password, notes: "" } } };
+    },
+    async update({ selector, revision, urls }) {
+      if (!unlocked) throw new AgentError("locked");
+      const e = entries.find((e) => e.id === selector);
+      if (revision !== e.revision) throw new AgentError("stale");
+      if (urls) e.urls = urls;
+      e.revision++;
+      return { id: e.id, revision: e.revision, meta: meta(e) };
     },
     async credentials(id) {
       if (!unlocked) throw new AgentError("locked");
@@ -138,13 +165,18 @@ function background(engine) {
   return {
     entries, marked, agent, request, send, challenge, outgoing, complete, rules,
     fail(details) { listeners.onErrorOccurred(details); },
-    add(id, url, options = {}) { entries.push({ id, url, password: `password-${id}`, ...options }); },
+    add(id, url, options = {}) { entries.push({ id, urls: [url], revision: 1, password: `password-${id}`, ...options }); },
     lock() { unlocked = false; },
     unlock() { unlocked = true; },
     advance() { now += 3_000; },
     async poll() { for (const fn of timers) fn(); await flush(); },
     async refused(origin) { return Array.from((await send({ kind: "basic_auth", origin })).refused); },
     asked(result) { return engine === "chromium" ? navigations.at(-1)?.includes("/auth.html") : result.redirectUrl?.includes("/auth.html"); },
+    /** The id of the auth page a challenge was sent to. */
+    authId(result) {
+      const page = engine === "chromium" ? navigations.at(-1) : result.redirectUrl;
+      return new URL(page).searchParams.get("id");
+    },
   };
 }
 
@@ -334,5 +366,117 @@ for (const engine of ["firefox", "chromium", "safari"]) {
     s.complete(retry);
     await flush();
     assert.deepEqual(s.marked, []);
+  });
+}
+
+const dev = "https://id.dev.example.test";
+const devUrl = `${dev}/home`;
+
+for (const engine of ["firefox", "chromium", "safari"]) {
+  test(`${engine}: links a login of another host and keeps the link once the site accepts it`, async () => {
+    const s = background(engine);
+    s.add("shared", "https://admin.dev.example.test");
+    s.add("elsewhere", "https://other.test");
+    const id = s.authId(await s.challenge(s.request(devUrl)));
+    const options = await s.send({ kind: "challenge_logins", id });
+    assert.equal(options.kind, "link_options");
+    assert.deepEqual(
+      Array.from(options.logins, (o) => [o.id, Array.from(o.hosts), o.wildcard]),
+      [["shared", ["admin.dev.example.test"], null]],
+    );
+    const linked = await s.send({ kind: "challenge_link", id, login: "shared", revision: 1, wildcard: null });
+    assert.deepEqual({ ...linked }, { kind: "continue", url: devUrl });
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", dev]);
+    const load = s.request(devUrl);
+    const sent = await s.outgoing(load);
+    assert.equal(sent.requestHeaders[0].value, `Basic ${btoa("shared:password-shared")}`);
+    s.complete(load);
+    await flush();
+    assert.deepEqual(s.marked, ["shared"]);
+    // Accepted: a later refusal no longer takes the link back.
+    s.advance();
+    const later = s.request(devUrl);
+    await s.outgoing(later);
+    await s.challenge(later);
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", dev]);
+  });
+
+  test(`${engine}: undoes a link the site refuses and stops offering that login`, async () => {
+    const s = background(engine);
+    s.add("shared", "https://admin.dev.example.test");
+    const id = s.authId(await s.challenge(s.request(devUrl)));
+    await s.send({ kind: "challenge_link", id, login: "shared", revision: 1, wildcard: null });
+    const retry = s.request(devUrl);
+    await s.outgoing(retry);
+    const result = await s.challenge(retry);
+    assert.ok(s.asked(result));
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test"]);
+    assert.deepEqual(s.marked, []);
+    const options = await s.send({ kind: "challenge_logins", id: s.authId(result) });
+    assert.deepEqual(Array.from(options.logins), []);
+  });
+
+  test(`${engine}: widens a login on sibling hosts to a wildcard`, async () => {
+    const s = background(engine);
+    s.add("shared", "https://admin.dev.example.test");
+    s.entries[0].urls.push("https://test.dev.example.test", "admin.dev.example.test", "https://example.test/x");
+    const id = s.authId(await s.challenge(s.request(devUrl)));
+    const options = await s.send({ kind: "challenge_logins", id });
+    assert.equal(options.logins[0].wildcard, "https://*.dev.example.test");
+    await s.send({ kind: "challenge_link", id, login: "shared", revision: 1, wildcard: "https://*.dev.example.test" });
+    assert.deepEqual(Array.from(s.entries[0].urls), [
+      "admin.dev.example.test",
+      "https://example.test/x",
+      "https://*.dev.example.test",
+    ]);
+    const sent = await s.outgoing(s.request(devUrl));
+    assert.equal(sent.requestHeaders[0].value, `Basic ${btoa("shared:password-shared")}`);
+  });
+
+  test(`${engine}: only links a login offered for the challenge`, async () => {
+    const s = background(engine);
+    s.add("elsewhere", "https://other.test");
+    const id = s.authId(await s.challenge(s.request(devUrl)));
+    const reply = await s.send({ kind: "challenge_link", id, login: "elsewhere", revision: 1, wildcard: null });
+    assert.equal(reply.kind, "error");
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://other.test"]);
+  });
+
+  test(`${engine}: does not link a login edited since the page showed it`, async () => {
+    const s = background(engine);
+    s.add("shared", "https://admin.dev.example.test");
+    s.entries[0].urls.push("https://test.dev.example.test");
+    const id = s.authId(await s.challenge(s.request(devUrl)));
+    const shown = (await s.send({ kind: "challenge_logins", id })).logins[0];
+    assert.equal(shown.wildcard, "https://*.dev.example.test");
+    // Edited elsewhere: the same request would now widen to the whole site.
+    s.entries[0].urls = ["https://admin.dev.example.test", "https://www.example.test"];
+    s.entries[0].revision++;
+    const reply = await s.send({ kind: "challenge_link", id, login: "shared", revision: shown.revision, wildcard: shown.wildcard });
+    assert.equal(reply.kind, "link_changed");
+    assert.equal(reply.logins[0].wildcard, "https://*.example.test");
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", "https://www.example.test"]);
+    // Only the wildcard shown is accepted, even at the current revision.
+    const again = await s.send({ kind: "challenge_link", id, login: "shared", revision: 2, wildcard: shown.wildcard });
+    assert.equal(again.kind, "link_changed");
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", "https://www.example.test"]);
+  });
+
+  test(`${engine}: a refusal in another realm keeps the link`, async () => {
+    const s = background(engine);
+    s.add("shared", "https://admin.dev.example.test");
+    const id = s.authId(await s.challenge(s.request(devUrl)));
+    await s.send({ kind: "challenge_link", id, login: "shared", revision: 1, wildcard: null });
+    const load = s.request(devUrl);
+    await s.outgoing(load);
+    // A subresource in another realm refuses it before the page completes.
+    const api = s.request(`${dev}/admin/api`, { type: "xmlhttprequest" });
+    await s.outgoing(api);
+    await s.challenge(api, "admin-only");
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", dev]);
+    s.complete(load);
+    await flush();
+    assert.deepEqual(Array.from(s.entries[0].urls), ["https://admin.dev.example.test", dev]);
+    assert.deepEqual(s.marked, ["shared"]);
   });
 }

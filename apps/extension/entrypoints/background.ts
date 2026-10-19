@@ -4,6 +4,7 @@ import { HeaderRules } from "@/lib/header-rules";
 import {
   type AuthEvent,
   type ChallengeView,
+  type LinkOption,
   type LoginOption,
   PAGE_KINDS,
   type PageRequest,
@@ -18,6 +19,7 @@ import {
 } from "@/lib/messages";
 import { isBasicAuth, type SecretSummary, secretPath } from "@/lib/protocol";
 import { loadSettings, saveSettings } from "@/lib/settings";
+import { patternHosts, type Widening, widening } from "@/lib/site";
 import { errorText, originOf } from "@/lib/util";
 
 const ALL_URLS = { urls: ["<all_urls>"] };
@@ -107,9 +109,32 @@ interface PendingOffer {
   at: number;
 }
 
-/** A same-site login with its password, which stays in the background. */
+/** A same-site login with its password and URL patterns, which stay in the background. */
 interface SiteLogin extends SameSiteLogin {
   password: string;
+  urls: string[];
+  revision: number;
+}
+
+/** A login the auth page offers for a challenge, with what linking it would change. */
+interface LinkCandidate {
+  option: LinkOption;
+  login: SiteLogin;
+  wide: Widening | null;
+}
+
+/**
+ * A login the auth page just made fill on an origin, with its URL patterns
+ * from before, for the challenge it was linked for.
+ */
+interface Link {
+  id: string;
+  /** The revision the link made; a later edit keeps the link. */
+  revision: number;
+  urls: string[];
+  realm: string | null;
+  /** `authPath` of the challenged URL. */
+  path: string;
 }
 
 export default defineBackground({
@@ -153,6 +178,8 @@ export default defineBackground({
     const offers = new Map<number, PendingOffer>();
     /** Username sent by the first step of a two-step sign-in, by tab. */
     const firstSteps = new Map<number, { origin: string; username: string; at: number }>();
+    /** Links from the auth page by origin, until the site accepts the login or refuses it. */
+    const linked = new Map<string, Link>();
 
     const record = (event: Omit<AuthEvent, "at">) => {
       events.unshift({ at: Date.now(), ...event });
@@ -188,6 +215,7 @@ export default defineBackground({
       basicRequests.clear();
       marking.clear();
       refreshing.clear();
+      linked.clear();
       await rules?.clear().catch(() => undefined);
     }
 
@@ -260,7 +288,7 @@ export default defineBackground({
      * The server answered `sent` with another 401: skip it from now on, so the
      * next lookup gets the next saved login, and end the session it came from.
      */
-    async function refuse(origin: string, realm: string | null, sent: Credentials): Promise<void> {
+    async function refuse(origin: string, url: string, realm: string | null, sent: Credentials): Promise<void> {
       const list = refusals(origin, realm);
       if (!list.some((c) => sameCredentials(c, sent))) {
         const byRealm = refused.get(origin) ?? new Map<string | null, Credentials[]>();
@@ -272,11 +300,31 @@ export default defineBackground({
       if (once && sameCredentials(once, sent)) transient.delete(origin);
       const current = sessions.get(origin)?.creds;
       if (current && sameCredentials(current, sent)) await endSession(origin);
+      // Only a refusal of the challenge the login was linked for: another realm
+      // or path of the site may simply want another login.
+      const link = linked.get(origin);
+      if (link && link.id === sent.id && link.realm === realm && link.path === authPath(url)) {
+        linked.delete(origin);
+        await unlink(origin, link);
+      }
+    }
+
+    /** Takes back a link the site refused, unless the login was edited since. */
+    async function unlink(origin: string, link: Link): Promise<void> {
+      try {
+        const view = await agent.get(link.id);
+        if (view.revision !== link.revision) return;
+        await agent.update({ selector: view.id, revision: view.revision, urls: link.urls });
+        record({ origin, outcome: "rejected", detail: `${secretPath(view.meta)} (link undone)` });
+      } catch {
+        // Locked, removed or edited meanwhile: the link stays.
+      }
     }
 
     /** A page load that went out with `sent` got through: mark the login so it goes first from now on. */
     function accept(origin: string, sent: Credentials): void {
       const { id } = sent;
+      if (id && linked.get(origin)?.id === id) linked.delete(origin);
       if (!id || sent.basicAuth || marking.has(id)) return;
       marking.add(id);
       agent.markBasicAuth(id).then(
@@ -386,7 +434,7 @@ export default defineBackground({
       realms.set(authPath(details.url), challenge.realm);
       // The server refused what we sent: retry with the next saved login, or ask.
       const sent = sentWith.get(details.requestId);
-      if (state === "injected" && sent) await refuse(origin, challenge.realm, sent);
+      if (state === "injected" && sent) await refuse(origin, details.url, challenge.realm, sent);
       const result = await refresh(origin, details.url);
       if (result.kind === "found") {
         badge("");
@@ -489,7 +537,7 @@ export default defineBackground({
         }
         if (!sent) return {};
         // The server refused what we sent: try the next saved login, or ask.
-        if (isBasic) await refuse(origin, realm, sent);
+        if (isBasic) await refuse(origin, details.url, realm, sent);
         else return {};
       }
       if (state === "lookup_failed") return {};
@@ -593,18 +641,53 @@ export default defineBackground({
         const view = await agent.get(summary.id);
         if (!("login" in view.body)) continue;
         const { username, password } = view.body.login;
-        found.push({ id: view.id, path: secretPath(view.meta), username, password, here: here.has(view.id) });
+        const urls = view.meta.urls ?? [];
+        found.push({
+          id: view.id,
+          revision: view.revision,
+          path: secretPath(view.meta),
+          username,
+          password,
+          urls,
+          here: here.has(view.id),
+        });
       }
       return found;
     }
 
     /** Same-site logins saved under `username`; any username when it is empty. */
-    async function sameSiteLogins(url: string, username: string): Promise<SameSiteLogin[]> {
+    async function sameSiteLogins(url: string, username: string): Promise<SiteLogin[]> {
       const wanted = username.trim();
       return (await siteLogins(url))
         .filter((login) => !wanted || sameUsername(login.username, wanted))
-        .slice(0, MAX_CONFLICTS)
-        .map(({ password: _password, ...login }) => login);
+        .slice(0, MAX_CONFLICTS);
+    }
+
+    /**
+     * Logins of other hosts of the site that the challenged host could use
+     * instead of a new one, minus any it refused.
+     */
+    async function linkCandidates(challenge: Challenge): Promise<LinkCandidate[]> {
+      const skip = refusals(challenge.origin, challenge.realm);
+      const logins = (await siteLogins(challenge.url))
+        .filter((login) => !login.here && !skip.some((c) => sameCredentials(c, login)))
+        .slice(0, MAX_OPTIONS);
+      const site = logins.length > 0 ? await siteOf(challenge.url) : null;
+      return logins.map((login) => {
+        const wide = widening(login.urls, challenge.url, site);
+        const { id, revision, path, username, urls } = login;
+        const option = { id, revision, path, username, hosts: patternHosts(urls), wildcard: wide?.wildcard ?? null };
+        return { option, login, wide };
+      });
+    }
+
+    /** The registrable domain of `url`; null without one, or from an agent too old to say. */
+    async function siteOf(url: string): Promise<string | null> {
+      try {
+        return await agent.site(url);
+      } catch {
+        return null;
+      }
     }
 
     /**
@@ -651,7 +734,7 @@ export default defineBackground({
       url: string,
       username: string,
       choice: SaveChoice | undefined,
-    ): Promise<{ conflicts: SameSiteLogin[] } | { target: SameSiteLogin | null }> {
+    ): Promise<{ conflicts: SiteLogin[] } | { target: SiteLogin | null }> {
       const conflicts = await sameSiteLogins(url, username);
       if (!choice) return conflicts.length > 0 ? { conflicts } : { target: null };
       if (choice.kind === "new") return { target: null };
@@ -686,7 +769,7 @@ export default defineBackground({
           return !wanted && offer.previous === undefined;
         })
         .slice(0, MAX_CONFLICTS)
-        .map(({ password, ...login }) => ({ ...login, samePassword: password === offer.password }));
+        .map((login) => ({ ...pageLogin(login), samePassword: login.password === offer.password }));
     }
 
     /** What to show for a pending offer, or null when there is nothing to offer (any more). */
@@ -823,7 +906,7 @@ export default defineBackground({
           case "page_save_generated": {
             const origin = originOf(url);
             const resolved = await resolveSave(url, message.username, message.choice);
-            if ("conflicts" in resolved) return { kind: "conflict", logins: resolved.conflicts };
+            if ("conflicts" in resolved) return { kind: "conflict", logins: resolved.conflicts.map(pageLogin) };
             if (resolved.target) {
               const path = await overwrite(resolved.target, url, message.username, message.password);
               record({ origin, outcome: "saved", detail: `${path} (new password)` });
@@ -926,7 +1009,14 @@ export default defineBackground({
             creds.basicAuth = true;
             try {
               const resolved = await resolveSave(challenge.url, creds.username, message.choice);
-              if ("conflicts" in resolved) return { kind: "conflict", logins: resolved.conflicts };
+              if ("conflicts" in resolved) {
+                const host = new URL(challenge.url).hostname;
+                const logins = resolved.conflicts.map((login) => ({
+                  ...pageLogin(login),
+                  elsewhere: patternHosts(login.urls).filter((h) => h !== host),
+                }));
+                return { kind: "conflict", logins };
+              }
               if (resolved.target) {
                 creds.path = await overwrite(resolved.target, challenge.url, creds.username, creds.password);
                 await agent.markBasicAuth(resolved.target.id);
@@ -943,9 +1033,7 @@ export default defineBackground({
                 creds.id = added.id;
               }
             } catch (err) {
-              if (err instanceof AgentError) return { kind: "error", message: err.message };
-              if (!(err instanceof BridgeError)) return { kind: "error", message: errorText(err) };
-              return { kind: "bridge_error", message: errorText(err) };
+              return failure(err);
             }
           } else {
             transient.set(challenge.origin, creds);
@@ -954,6 +1042,56 @@ export default defineBackground({
           const byRealm = refused.get(challenge.origin);
           const skip = byRealm?.get(challenge.realm)?.filter((c) => !sameCredentials(c, creds));
           if (skip) byRealm?.set(challenge.realm, skip);
+          realms.set(authPath(challenge.url), challenge.realm);
+          await startSession(challenge.origin, creds, challenge.url);
+          challenges.delete(challenge.id);
+          record({ origin: challenge.origin, outcome: "filled", detail: creds.path });
+          return { kind: "continue", url: challenge.url };
+        }
+        case "challenge_logins": {
+          const challenge = liveChallenge(message.id);
+          if (!challenge) return { kind: "unknown_challenge" };
+          try {
+            return { kind: "link_options", logins: (await linkCandidates(challenge)).map((c) => c.option) };
+          } catch (err) {
+            return failure(err);
+          }
+        }
+        case "challenge_link": {
+          const challenge = liveChallenge(message.id);
+          if (!challenge) return { kind: "unknown_challenge" };
+          let creds: Credentials;
+          try {
+            // Only a login that was offered for this challenge, whatever id the page sends.
+            const candidates = await linkCandidates(challenge);
+            const found = candidates.find((c) => c.option.id === message.login);
+            if (!found) return { kind: "error", message: "That login is not saved for this site." };
+            const { option, login, wide } = found;
+            // Only as the page showed it: a login edited since is shown again before it is linked.
+            const changed = message.wildcard !== null && option.wildcard !== message.wildcard;
+            if (option.revision !== message.revision || changed) {
+              return { kind: "link_changed", logins: candidates.map((c) => c.option) };
+            }
+            const widen = message.wildcard !== null ? wide : null;
+            const urls = widen
+              ? [...login.urls.filter((u) => !widen.replaces.includes(u)), widen.wildcard]
+              : [...login.urls, challenge.origin];
+            // The shown revision: an edit since then fails instead of being widened.
+            const updated = await agent.update({ selector: login.id, revision: message.revision, urls });
+            linked.set(challenge.origin, {
+              id: login.id,
+              revision: updated.revision,
+              urls: login.urls,
+              realm: challenge.realm,
+              path: authPath(challenge.url),
+            });
+            const { username, password } = login;
+            creds = { username, password, path: secretPath(updated.meta), id: login.id, basicAuth: isBasicAuth(updated.meta) };
+            const where = widen ? widen.wildcard : challenge.host;
+            record({ origin: challenge.origin, outcome: "saved", detail: `${creds.path} (now on ${where})` });
+          } catch (err) {
+            return failure(err);
+          }
           realms.set(authPath(challenge.url), challenge.realm);
           await startSession(challenge.origin, creds, challenge.url);
           challenges.delete(challenge.id);
@@ -1001,6 +1139,18 @@ export default defineBackground({
     );
   },
 });
+
+/** What a web page may see of a same-site login: no password, no other hosts. */
+function pageLogin({ id, path, username, here }: SameSiteLogin): SameSiteLogin {
+  return { id, path, username, here };
+}
+
+/** An agent or bridge failure as an answer to an extension page. */
+function failure(err: unknown): UiResponse {
+  if (err instanceof AgentError) return { kind: "error", message: err.message };
+  if (err instanceof BridgeError) return { kind: "bridge_error", message: errorText(err) };
+  return { kind: "error", message: errorText(err) };
+}
 
 /** `matches` in their order, with the Basic Auth logins moved to the front or the back. */
 function basicAuth(matches: SecretSummary[], where: "first" | "last"): SecretSummary[] {
