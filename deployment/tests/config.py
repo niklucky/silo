@@ -37,6 +37,20 @@ class ConfigTests(unittest.TestCase):
                 result = self.run_config('SSH_HOST=203.0.113.10\n' + setting + '\n')
                 self.assertNotEqual(result.returncode, 0)
 
+    def test_release_requires_version_commit_and_immutable_image(self):
+        valid = ('SSH_HOST=203.0.113.10\nRELEASE_VERSION=v1.2.3\nRELEASE_SHA=' + 'a' * 40 + '\n'
+                 'SERVER_IMAGE=ghcr.io/example/silo/server@sha256:' + 'b' * 64 + '\n')
+        command = ('load_config "$1"; for name in RELEASE_VERSION RELEASE_SHA SERVER_IMAGE; '
+                   'do setting "$name"; done; validate_release')
+        result = self.run_config(valid, command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for setting in ('RELEASE_VERSION=v1.2', 'RELEASE_VERSION=v01.2.3',
+                        'RELEASE_VERSION=v1.2.3;id', 'RELEASE_SHA=short',
+                        'SERVER_IMAGE=ghcr.io/example/silo/server:latest'):
+            with self.subTest(setting=setting):
+                result = self.run_config(valid + setting + '\n', command)
+                self.assertNotEqual(result.returncode, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -17,7 +17,7 @@ jobs:
           shellcheck -x deployment/*.sh deployment/tests/*.sh
           python3 deployment/tests/config.py
           python3 deployment/tests/github_env.py
-      - name: Test shared-host provisioning and online backups
+      - name: Test shared-host provisioning, backups and deployment recovery
         run: |
           docker build -f deployment/tests/Dockerfile -t silo-provision:check .
           docker run --rm silo-provision:check

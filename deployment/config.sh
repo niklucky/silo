@@ -15,6 +15,12 @@ env_value() {
   ' "$1"
 }
 
+validate_release() {
+  [[ "$RELEASE_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die 'Release tags must be vX.Y.Z'
+  [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]] || die 'RELEASE_SHA must be a full commit SHA'
+  [[ "$SERVER_IMAGE" =~ ^ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]] || die 'SERVER_IMAGE must be a GHCR image pinned by digest'
+}
+
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 setting() {
