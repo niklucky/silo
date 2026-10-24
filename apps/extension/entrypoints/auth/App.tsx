@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { browser } from "wxt/browser";
-import type { ChallengeView, SameSiteLogin, SaveChoice, UiRequest, UiResponse } from "@/lib/messages";
+import type { ChallengeView, LinkOption, SameSiteLogin, SaveChoice, UiRequest, UiResponse } from "@/lib/messages";
 import { describe } from "@/lib/protocol";
 import { errorText } from "@/lib/util";
 
@@ -34,6 +34,10 @@ export default function App() {
   const [title, setTitle] = useState("");
   /** Same-site logins with this username: the save waits for "add new" or "overwrite". */
   const [conflicts, setConflicts] = useState<SameSiteLogin[] | null>(null);
+  /** Logins of other hosts of the site, offered instead of typing one. */
+  const [options, setOptions] = useState<LinkOption[]>([]);
+  /** A login picked from `options` that could cover the whole subdomain: asks how widely. */
+  const [picked, setPicked] = useState<LinkOption | null>(null);
 
   useEffect(() => {
     if (framed || !id) {
@@ -53,6 +57,17 @@ export default function App() {
       .catch((err: unknown) => setError(errorText(err)));
   }, [id, framed]);
 
+  const saving = phase.step === "save";
+  useEffect(() => {
+    if (!saving) return;
+    // Nothing to offer is not worth an error: the form below still works.
+    send({ kind: "challenge_logins", id })
+      .then((response) => {
+        if (response.kind === "link_options") setOptions(response.logins);
+      })
+      .catch(() => undefined);
+  }, [id, saving]);
+
   function leave(url: string) {
     setPhase({ step: "leaving" });
     location.replace(url);
@@ -68,6 +83,11 @@ export default function App() {
         break;
       case "conflict":
         setConflicts(response.logins);
+        break;
+      case "link_changed":
+        setOptions(response.logins);
+        setPicked(null);
+        setError("That login changed since this page showed it. Check it and pick again.");
         break;
       case "unknown_challenge":
         setPhase({ step: "unknown" });
@@ -111,6 +131,25 @@ export default function App() {
         await send({ kind: "challenge_save", id, username, password, folder, title, remember, choice }),
         challenge,
       );
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function link(option: LinkOption, wildcard: boolean, challenge: ChallengeView) {
+    setBusy(true);
+    setError(null);
+    try {
+      const request: UiRequest = {
+        kind: "challenge_link",
+        id,
+        login: option.id,
+        revision: option.revision,
+        wildcard: wildcard ? option.wildcard : null,
+      };
+      follow(await send(request), challenge);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -212,11 +251,7 @@ export default function App() {
               disabled={busy}
             >
               Overwrite {login.path}
-              <span className="muted">
-                {login.here
-                  ? "Replace its password; the old one stays in its history"
-                  : `Replace its password and use it on ${challenge.host} too`}
-              </span>
+              <span className="muted">{overwriteText(login, challenge.host)}</span>
             </button>
           ))}
           <button type="button" onClick={() => setConflicts(null)} disabled={busy}>
@@ -228,16 +263,72 @@ export default function App() {
     );
   }
 
+  if (picked?.wildcard) {
+    const option = picked;
+    return (
+      <main className="card">
+        {site}
+        <p>
+          Use <strong>{option.path}</strong> on {challenge.host}?
+        </p>
+        <p className="muted">It already signs in on {option.hosts.join(", ")}.</p>
+        <div className="choices">
+          <button
+            type="button"
+            className="primary"
+            autoFocus
+            onClick={() => void link(option, true, challenge)}
+            disabled={busy}
+          >
+            Use on all of {option.wildcard}
+            <span className="muted">Any other host there signs in with it too, without asking</span>
+          </button>
+          <button type="button" onClick={() => void link(option, false, challenge)} disabled={busy}>
+            Only on {challenge.host}
+          </button>
+          <button type="button" onClick={() => setPicked(null)} disabled={busy}>
+            Back
+          </button>
+        </div>
+        {error && <p className="error">{error}</p>}
+      </main>
+    );
+  }
+
+  const refusedText =
+    challenge.refused.length === 0
+      ? null
+      : `The site refused ${challenge.refused.length === 1 ? "the saved login" : "the saved logins"} ${challenge.refused.join(", ")}.`;
+
   return (
     <main className="card">
       {site}
-      {challenge.refused.length === 0 ? (
-        <p>No saved login for this site. Enter it once:</p>
+      {options.length === 0 ? (
+        <p>{refusedText ? `${refusedText} Enter the right one:` : "No saved login for this site. Enter it once:"}</p>
       ) : (
-        <p>
-          The site refused {challenge.refused.length === 1 ? "the saved login" : "the saved logins"}{" "}
-          {challenge.refused.join(", ")}. Enter the right one:
-        </p>
+        <>
+          <p>
+            {refusedText ?? `No login saved for ${challenge.host} yet.`} Use one saved for another host of this
+            site:
+          </p>
+          <div className="choices">
+            {options.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => (option.wildcard ? setPicked(option) : void link(option, false, challenge))}
+                disabled={busy}
+              >
+                {option.path}
+                <span className="muted">
+                  {option.username || "no username"}
+                  {option.hosts.length > 0 && ` · on ${option.hosts.join(", ")}`}
+                </span>
+              </button>
+            ))}
+          </div>
+          <p className="muted">Or enter it:</p>
+        </>
       )}
       <form
         onSubmit={(e) => {
@@ -298,4 +389,17 @@ export default function App() {
       </form>
     </main>
   );
+}
+
+/** What overwriting `login` from the conflict screen changes. */
+function overwriteText(login: SameSiteLogin, host: string): string {
+  const elsewhere = login.elsewhere ?? [];
+  if (login.here) {
+    return elsewhere.length === 0
+      ? "Replace its password; the old one stays in its history"
+      : `Replace its password here and on ${elsewhere.join(", ")}; the old one stays in its history`;
+  }
+  return elsewhere.length === 0
+    ? `Replace its password and use it on ${host} too`
+    : `Replace its password on ${elsewhere.join(", ")} and use it on ${host} too`;
 }

@@ -100,17 +100,20 @@ pub fn same_site(pattern: &str, target: &Url) -> bool {
 /// site. Other hosts without a registrable domain (IP addresses, a bare
 /// suffix) are returned as is.
 pub fn site_of(host: &str) -> String {
+    registrable_domain(host).unwrap_or_else(|| host.trim_end_matches('.').to_ascii_lowercase())
+}
+
+/// The registrable domain of `host` as [`site_of`] finds it, or `None` for a
+/// host that has none: an IP address or a public suffix such as `github.io`.
+pub fn registrable_domain(host: &str) -> Option<String> {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
-        return "localhost".to_owned();
+        return Some("localhost".to_owned());
     }
     if host.starts_with('[') || host.parse::<std::net::Ipv4Addr>().is_ok() {
-        return host;
+        return None;
     }
-    match psl::domain_str(&host) {
-        Some(domain) => domain.to_owned(),
-        None => host,
-    }
+    psl::domain_str(&host).map(str::to_owned)
 }
 
 /// Parses a stored pattern; the bool says whether it named a scheme.
@@ -232,6 +235,24 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_with_scheme_pins_scheme_and_port() {
+        // What the browser extension writes when one login covers several subdomains.
+        let pattern = "https://*.dev.example.com";
+        assert_eq!(score(pattern, "https://id.dev.example.com/x"), Some(2));
+        assert_eq!(score(pattern, "https://dev.example.com"), Some(2));
+        assert_eq!(score(pattern, "http://id.dev.example.com"), None);
+        assert_eq!(score(pattern, "https://id.dev.example.com:8443"), None);
+        assert_eq!(score(pattern, "https://example.com"), None);
+        assert_eq!(
+            score(
+                "https://*.dev.example.com:8443",
+                "https://id.dev.example.com:8443"
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn garbage_never_matches() {
         assert_eq!(score("", "https://example.com"), None);
         assert_eq!(score("   ", "https://example.com"), None);
@@ -249,6 +270,23 @@ mod tests {
         assert_eq!(site_of("dev.LOCALHOST"), "localhost");
         assert_eq!(site_of("127.0.0.1"), "127.0.0.1");
         assert_eq!(site_of("[::1]"), "[::1]");
+        assert_eq!(site_of("github.io"), "github.io");
+    }
+
+    #[test]
+    fn registrable_domain_is_none_without_one() {
+        assert_eq!(
+            registrable_domain("id.Alice.github.io").as_deref(),
+            Some("alice.github.io")
+        );
+        assert_eq!(
+            registrable_domain("x.dev.localhost").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(registrable_domain("github.io"), None);
+        assert_eq!(registrable_domain("co.uk"), None);
+        assert_eq!(registrable_domain("127.0.0.1"), None);
+        assert_eq!(registrable_domain("[::1]"), None);
     }
 
     #[test]

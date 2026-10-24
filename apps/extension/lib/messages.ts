@@ -36,6 +36,24 @@ export interface SameSiteLogin {
   username: string;
   /** Already fills on the page being saved for; otherwise it is for another host of the site. */
   here: boolean;
+  /**
+   * Auth page only: the other hosts it fills on, which a new password changes
+   * too. Never sent to web pages.
+   */
+  elsewhere?: string[];
+}
+
+/** A same-site login the auth page offers to use on the challenged host instead of typing one. */
+export interface LinkOption {
+  id: string;
+  /** The revision shown; linking sends it back, so an edit since is shown again first. */
+  revision: number;
+  path: string;
+  username: string;
+  /** Hosts it fills on now. */
+  hosts: string[];
+  /** A pattern that would cover this host and the login's sibling hosts in place of theirs. */
+  wildcard: string | null;
 }
 
 /** The user's answer when a save finds a same-site login with the same username. */
@@ -83,6 +101,14 @@ export type UiRequest =
       choice?: SaveChoice;
     }
   | { kind: "challenge_cancel"; id: string }
+  /** Same-site logins the challenged host could use. */
+  | { kind: "challenge_logins"; id: string }
+  /**
+   * Use `login` at `revision` on the challenged host from now on, by its
+   * origin or, with `wildcard`, by that wildcard, exactly as its `LinkOption`
+   * offered it. Undone if the site refuses it.
+   */
+  | { kind: "challenge_link"; id: string; login: string; revision: number; wildcard: string | null }
   /** Popup: the logins `origin` refused as Basic Auth. */
   | { kind: "basic_auth"; origin: string }
   /** Popup "Fill": ask the content scripts in a tab to fill this login. */
@@ -100,6 +126,10 @@ export type UiResponse =
   | { kind: "save" }
   /** The same username is already saved for this site: ask, then save again with a choice. */
   | { kind: "conflict"; logins: SameSiteLogin[] }
+  /** Answer to `challenge_logins`. */
+  | { kind: "link_options"; logins: LinkOption[] }
+  /** Answer to `challenge_link` when the login changed since it was offered: the options as they are now. */
+  | { kind: "link_changed"; logins: LinkOption[] }
   /** Answer to `basic_auth`: login ids. */
   | { kind: "basic_auth"; refused: string[] }
   /** Answer to `fill_tab`. */

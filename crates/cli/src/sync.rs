@@ -3,13 +3,13 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use silo_agent::protocol::{Reply, Request, SyncStatusInfo};
-use silo_agent::sync::SyncReport;
+use silo_agent::sync::{Baseline, SyncReport, normalize_server};
 use silo_agent::{Client, Paths, Store};
 use zeroize::Zeroize;
 
-use crate::args::SyncCommand;
+use crate::args::{ServerArgs, SyncCommand};
 use crate::commands::{connected, ensure_agent, unexpected};
 use crate::{format, prompt};
 
@@ -34,7 +34,7 @@ pub fn run(command: Option<SyncCommand>) -> Result<()> {
 }
 
 fn register(
-    server: String,
+    server: ServerArgs,
     username: String,
     invite: String,
     device: Option<String>,
@@ -46,8 +46,21 @@ fn register(
             paths.home().display()
         );
     }
+    let server = resolve_server(&paths, server)?;
     let mut agent = ensure_agent(&paths)?;
     let password = prompt::password("Master password")?;
+    register_with(&mut agent, server, username, invite, &password, device)
+}
+
+/// Init already has an unlocked agent and the new master password.
+pub(crate) fn register_with(
+    agent: &mut Client,
+    server: String,
+    username: String,
+    invite: String,
+    password: &str,
+    device: Option<String>,
+) -> Result<()> {
     let mut request = Request::SyncRegister {
         server,
         username,
@@ -66,14 +79,24 @@ fn register(
         "Registered {} on {} (this device: {}).",
         info.username, info.server, info.device_id
     );
-    sync_now(&mut agent)
+    sync_now(agent)
 }
 
-fn login(server: String, username: String, device: Option<String>) -> Result<()> {
+fn login(server: ServerArgs, username: String, device: Option<String>) -> Result<()> {
     let paths = Paths::from_env()?;
+    let server = resolve_server(&paths, server)?;
+    login_at(&paths, server, username, device)
+}
+
+pub(crate) fn login_at(
+    paths: &Paths,
+    server: String,
+    username: String,
+    device: Option<String>,
+) -> Result<()> {
     // A new machine has no data directory yet; the agent and its log need one.
     Store::open(paths.clone())?;
-    let mut agent = ensure_agent(&paths)?;
+    let mut agent = ensure_agent(paths)?;
     let password = prompt::password("Master password")?;
     let mut request = Request::SyncLogin {
         server,
@@ -99,6 +122,39 @@ fn login(server: String, username: String, device: Option<String>) -> Result<()>
         );
     }
     sync_now(&mut agent)
+}
+
+fn resolve_server(paths: &Paths, args: ServerArgs) -> Result<String> {
+    let server = configured_server(
+        paths,
+        args.server.or(args.server_url),
+        std::env::var("SILO_SERVER").ok(),
+    )?;
+    match server {
+        Some(server) => Ok(server),
+        None => {
+            let server = prompt::line("Server URL", "")?
+                .context("server URL required; use --server URL or set SILO_SERVER")?;
+            Ok(normalize_server(&server)?)
+        }
+    }
+}
+
+/// Resolve defaults lazily, so an explicit URL also works if the baseline is unreadable.
+fn configured_server(
+    paths: &Paths,
+    server: Option<String>,
+    env: Option<String>,
+) -> Result<Option<String>> {
+    let server = match server.or(env.filter(|value| !value.trim().is_empty())) {
+        Some(server) => Some(server),
+        None => Store::open(paths.clone())?
+            .read_sync_baseline::<Baseline>()?
+            .map(|baseline| baseline.server),
+    };
+    server
+        .map(|server| normalize_server(&server).map_err(Into::into))
+        .transpose()
 }
 
 fn sync_now(agent: &mut Client) -> Result<()> {
@@ -262,5 +318,64 @@ fn ago(unix_secs: u64) -> String {
         "just now".to_owned()
     } else {
         format!("{} ago", format::duration(elapsed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_precedence_and_normalization() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let store = Store::open(paths.clone()).unwrap();
+        store
+            .write_sync_baseline(&Baseline {
+                server: "https://previous.example/".to_owned(),
+                username: "alice".to_owned(),
+                ..Baseline::default()
+            })
+            .unwrap();
+        for (flag, env, expected) in [
+            (
+                Some(" https://flag.example/ "),
+                Some("http://remote.example"),
+                "https://flag.example",
+            ),
+            (None, Some("https://env.example/"), "https://env.example"),
+            (None, None, "https://previous.example"),
+            (None, Some("  "), "https://previous.example"),
+        ] {
+            assert_eq!(
+                configured_server(&paths, flag.map(str::to_owned), env.map(str::to_owned))
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        assert!(configured_server(&paths, None, Some("http://remote.example".into())).is_err());
+        store.delete_sync_baseline().unwrap();
+        assert_eq!(configured_server(&paths, None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn explicit_server_bypasses_broken_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        std::fs::write(paths.sync_baseline_file(), "invalid JSON").unwrap();
+        assert!(configured_server(&paths, None, None).is_err());
+        assert_eq!(
+            configured_server(&paths, Some("http://localhost:8787/".into()), None)
+                .unwrap()
+                .as_deref(),
+            Some("http://localhost:8787")
+        );
+        assert_eq!(
+            configured_server(&paths, None, Some("https://env.example".into()))
+                .unwrap()
+                .as_deref(),
+            Some("https://env.example")
+        );
     }
 }
