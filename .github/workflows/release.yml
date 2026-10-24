@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# Serialize the entire release pipeline, including retries. Never cancel a deploy.
+concurrency:
+  group: silo-production
+  cancel-in-progress: false
+  # GitHub supports queue:max; actionlint 1.7.12 predates this property.
+  queue: max
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a version tag
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo '::error::Release tags must be vX.Y.Z'
+            exit 1
+          }
+
+  verify:
+    needs: version
+    uses: ./.github/workflows/checks.yml
+
+  build:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.name.outputs.image }}@${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set image name
+        id: name
+        run: |
+          repo=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/$repo/server" >> "$GITHUB_OUTPUT"
+      - name: Build and publish server
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployment/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.name.outputs.image }}:${{ github.ref_name }}
+            ${{ steps.name.outputs.image }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha,scope=silo-server
+          cache-to: type=gha,scope=silo-server,mode=max
+      - name: Check the published image before deployment
+        env:
+          SERVER_IMAGE: ${{ steps.name.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker run -d --name silo-release-check --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /data/db:rw,uid=10001,gid=10001,mode=0700,size=64m \
+            -p 127.0.0.1:8787:8787 "$SERVER_IMAGE"
+          trap 'docker logs silo-release-check; docker rm -f silo-release-check' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 3 http://127.0.0.1:8787/health | grep -q '"status":"ok"'; then
+              echo "Published image healthy after $attempt attempt(s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo '::error::Published image did not become healthy'
+          exit 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://${{ vars.DOMAIN || 'silo.warpunit.com' }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy over SSH and verify HTTPS
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_USER: ${{ vars.SSH_USER || 'silodev' }}
+          SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+          DOMAIN: ${{ vars.DOMAIN || 'silo.warpunit.com' }}
+          SILO_UID: ${{ vars.SILO_UID || '10001' }}
+          SILO_GID: ${{ vars.SILO_GID || '10001' }}
+          SERVER_PORT: ${{ vars.SERVER_PORT || '8787' }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVER_IMAGE: ${{ needs.build.outputs.image }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: deployment/deploy-ssh.sh
+
+  release:
+    needs: [build, deploy]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub release after healthy deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+          SERVER_IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          # shellcheck disable=SC2016
+          printf 'Deployed silo-server from commit `%s`.\n\nContainer image: `%s`\n' \
+            "$RELEASE_SHA" "$SERVER_IMAGE" > "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$RELEASE_VERSION" --verify-tag --title "$RELEASE_VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi

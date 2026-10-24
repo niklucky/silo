@@ -29,6 +29,19 @@ scripts/
   build-safari.sh          Safari build + xcodebuild → apps/safari/build/Silo for Safari.app
   basic-auth-server.py     local HTTP Basic Auth playground for testing the extension
   login-form-server.py     local login form playground (sign-in, sign-up, change password, iframe)
+deployment/
+  Dockerfile               multi-stage silo-server image; non-root runtime
+  compose.yaml             production server, loopback port and persistent bind mounts
+  .env.example             copy to ignored .env.production for VPS settings
+  provision.sh             workstation entry point for shared-host preparation
+  provision-host.sh        remote implementation; invoked by provision.sh
+  backup.sh                online SQLite snapshots, installed as silo-backup
+  github-env.sh            validate and upload production GitHub settings
+  deploy-ssh.sh            runner entry point; pinned SSH and temporary registry credentials
+  deploy.sh                remote pull, pre-deploy backup, health check and recovery
+  nginx/                   only the Silo HTTP/TLS site
+  tests/                   isolated Debian provisioning and backup checks
+.github/workflows/         PR/main checks and vX.Y.Z server releases
 ```
 
 The core crate is the only place that touches keys or plaintext. Hosts supply
@@ -205,6 +218,308 @@ secret. `silo sync` lists every such conflict and which side won.
 
 A device's history covers what it has seen since it joined; revisions made on
 other devices in between are fetched to fill the gaps.
+
+### Server deployment
+
+The deployment target is the shared Spectron VPS, with host nginx terminating
+TLS for `silo.warpunit.com`. The server runs in Docker Compose and publishes
+only `127.0.0.1:8787` on the host. Inside the container it listens on
+`0.0.0.0:8787`, so Docker can forward that loopback port to it.
+
+`deployment/compose.yaml` requires `SERVER_IMAGE` (the release image reference).
+The non-root process defaults to UID/GID 10001; `SILO_UID` and `SILO_GID` can
+match the provisioned host user. Provisioning must create private writable bind
+mount directories before starting Compose:
+
+- `/data/silo/db` → `/data/db`: `silo-server.db`, including SQLite WAL files.
+- `/data/silo/files` → `/data/files`: reserved for future file storage; the
+  current sync server stores encrypted file contents in SQLite too.
+
+`DB_DATA`, `FILES_DATA` and `SERVER_PORT` override those defaults for local
+testing. Production logs use Docker's `journald` driver; read them with
+`journalctl CONTAINER_NAME=silo-server-1` (the default Compose container name).
+Set `LOG_DRIVER=local` on Docker Desktop. The image includes `sqlite3` for online
+backups and `curl` for its health check. On the VPS, create invites with
+`cd /opt/silo/current && docker compose exec server silo-server invite`.
+
+Build and smoke-test locally without changing the installed Mac CLI:
+
+```sh
+docker build -f deployment/Dockerfile -t silo-server:local .
+docker run -d --name silo-server-test -p 127.0.0.1:18787:8787 \
+  -v silo-server-test-db:/data/db silo-server:local
+curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18787/health
+docker exec silo-server-test silo-server invite
+docker restart silo-server-test
+curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://localhost:18787/health
+docker exec silo-server-test sqlite3 /data/db/silo-server.db 'SELECT count(*) FROM invites;'
+docker rm -f silo-server-test
+docker volume rm silo-server-test-db
+```
+
+Every PR and push to `main` runs formatting, clippy, native build/tests,
+container health/persistence, and isolated Debian provisioning/backup checks.
+The same reusable checks gate version tag releases before the release image
+is built or deployed. The scripts below prepare the host and GitHub production
+environment, then deploy over SSH when a version tag is pushed.
+
+### Provisioning the shared VPS
+
+The current host is Debian 13 on amd64, reached as `root@$SSH_HOST` for
+provisioning. Docker, Compose and nginx must already be installed and running.
+`provision.sh` adds Silo's account, directories, backup units and one nginx
+site. Existing project sites, Docker daemon settings, SSH policy and firewall
+are retained. The only package installs are missing SQLite, certbot and CA
+certificates. nginx is validated before every reload; a failed render or
+certificate issuance restores the previous Silo site configuration.
+
+Prepare workstation settings and a dedicated deployment key once:
+
+```sh
+cp deployment/.env.example deployment/.env.production
+# Fill in SSH_HOST in deployment/.env.production.
+chmod 600 deployment/.env.production
+ssh-keygen -t ed25519 -N '' -C github-deploy@silo -f deployment/github_deploy_key
+deployment/provision.sh --check
+```
+
+`.env.production` and both key files are gitignored and excluded from Docker
+build contexts. Settings use literal `KEY=value` lines with optional surrounding
+quotes, full-line comments and no shell expansion. Exported shell variables
+override the file. Connect to the VPS once with SSH and verify its host key
+before provisioning; the script requires a known host and key authentication.
+The private deployment key stays on the workstation until the GitHub secrets
+setup step. Provisioning uploads only its public half.
+
+Once the domain's A record points to the VPS (and any AAAA record also reaches
+this host), run:
+
+```sh
+deployment/provision.sh
+# Repeat the same command to verify a rerun preserves data and authorized keys.
+deployment/provision.sh
+ssh root@YOUR_VPS_IP 'nginx -t; systemctl list-timers silo-backup.timer; stat -c "%a %U:%G %n" /data/silo /data/silo/db /data/silo/files /data/silo/backups'
+curl -I https://silo.warpunit.com/health
+```
+
+The script creates `silodev` with UID/GID 10001 (configurable before the first
+provision) and adds it to the existing Docker group for deployment. Docker
+access grants control of the host; use only the dedicated deployment key for
+this account. `/opt/silo` and the three `/data/silo` subdirectories are private
+to `silodev` (0700). Reruns append no duplicate key, preserve database/files
+contents, and refuse existing data directories owned by another UID/GID.
+Docker's restart policy manages the server process; systemd manages the backup
+timer. A failed provision retains its remote staging/rollback files for inspection.
+
+The nginx files are `/etc/nginx/sites-available/silo.warpunit.com.conf` and its
+matching symlink in `sites-enabled`. TLS uses certbot's webroot mode at
+`/var/www/silo-acme`, with the host's renewal timer and a Silo reload hook. HTTPS
+returns **502 until the first application deployment**; this is expected at
+the provisioning stage. The browser or curl should still validate the TLS
+certificate. `--skip-certs` prepares the host before DNS is ready, serving 503
+on HTTP when no certificate exists. `--nginx-only` updates the proxy using an
+existing certificate; `--backups-only` updates the backup script and timer.
+
+### SQLite backups
+
+`silo-backup.timer` runs an online `sqlite3 .backup` at 03:30 UTC plus a random
+delay of up to 15 minutes, keeping 14 days of snapshots by default
+(`BACKUP_KEEP_DAYS`). The oneshot service runs as `silodev`; snapshots are mode
+0600 in `/data/silo/backups`. Each snapshot is checked with
+`PRAGMA integrity_check` and renamed into place only after success. A missing
+database is skipped without creating an empty database. Committed WAL contents
+are included without stopping the server.
+
+After the first deployment, test it manually:
+
+```sh
+ssh root@YOUR_VPS_IP 'systemctl start silo-backup.service; journalctl -u silo-backup.service -n 20 --no-pager; ls -l /data/silo/backups'
+```
+
+Snapshots cover the entire current sync store, including encrypted file
+contents; `/data/silo/files` is reserved and currently unused. These snapshots
+stay on the same VPS; copy them off the host for disaster recovery. To restore,
+stop Silo, retain the old database and its WAL/SHM sidecars together in a
+separate directory, and install the checked snapshot as
+`/data/silo/db/silo-server.db` owned by `silodev`, mode 0600, before restarting.
+
+Run the provisioning tests without contacting the VPS:
+
+```sh
+python3 deployment/tests/config.py
+docker build -f deployment/tests/Dockerfile -t silo-provision:check .
+docker run --rm silo-provision:check
+```
+
+The disposable Debian test uses real accounts, nginx validation, private data
+directories, SQLite backups and release symlinks. Docker/systemd, SSH and HTTPS
+boundaries are stubbed. It checks provisioning reruns, nginx rollback without
+changing another site, WAL snapshots, failed image pulls and backups, recovery
+after container/HTTPS health failures, and temporary registry credential cleanup.
+
+### GitHub deployment settings
+
+After provisioning, validate access and then upload production settings:
+
+```sh
+gh auth login --hostname github.com  # skip if already authenticated
+deployment/github-env.sh --check
+deployment/github-env.sh
+```
+
+The helper reads the same ignored `.env.production`, defaulting to repository
+`niklucky/silo` (`GITHUB_REPO` overrides it). It checks that the unencrypted
+deployment private key works as `silodev` and that this user can access Docker
+and Compose before changing GitHub. `--check` performs read-only checks.
+It works from any directory; paths in the env file are relative to the repo
+root, or absolute.
+
+The `production` environment receives secrets `SSH_HOST`, `SSH_PRIVATE_KEY`
+and `SSH_KNOWN_HOSTS`, plus variables `SSH_USER`, `SSH_PORT`, `DOMAIN`,
+`SERVER_PORT`, `SILO_UID` and `SILO_GID`. The key is read directly from
+`SSH_PRIVATE_KEY_PATH` on stdin; secret values are not printed or put in
+command arguments. Host keys are taken from the already trusted entry for the
+configured host and port in `~/.ssh/known_hosts` (or `SSH_KNOWN_HOSTS_PATH`).
+Hashed entries and non-default SSH ports are supported. A missing, changed or
+revoked host key fails the check; verify a changed key before updating your
+trust store and rerunning the helper.
+
+Reruns overwrite only the listed secrets and variables. Existing environment
+protection rules and unrelated settings are retained. Review the result at
+<https://github.com/niklucky/silo/settings/environments>, or list names without
+reading secret values:
+
+```sh
+gh secret list --repo niklucky/silo --env production
+gh variable list --repo niklucky/silo --env production
+```
+
+Uploading settings does not start a deployment.
+
+### Version releases and updates
+
+After the deployment changes are committed, merged and checked on `main`,
+push a version tag to release and deploy:
+
+```sh
+git switch main
+git pull --ff-only
+git tag v0.1.0
+git push origin v0.1.0
+gh run list --repo niklucky/silo --workflow release.yml --limit 5
+```
+
+Use a new `vX.Y.Z` tag for each update; do not move published tags. Other tag
+names beginning with `v` fail validation before building or deploying.
+`.github/workflows/release.yml` runs the existing checks, publishes an
+`linux/amd64` image at `ghcr.io/niklucky/silo/server` tagged with both the
+version and commit SHA, and health-checks the published image on the runner.
+The deploy job runs in the `production` GitHub environment and passes the
+image's immutable `@sha256:…` digest to the VPS. The workflow's scoped
+`GITHUB_TOKEN` supplies registry access; no registry password or PAT is needed.
+
+Each SSH deployment creates a private
+`/opt/silo/releases/<version>-<commit>.<unique-suffix>` directory containing
+`compose.yaml`, `.env`, and the deploy scripts. SSH requires the pinned
+`SSH_KNOWN_HOSTS`; there is no keyscan fallback. The registry login uses a
+temporary `.registry` directory inside this release, deleted on success and
+failure. A lost SSH connection can prevent cleanup; the workflow reports the
+exact path to inspect and delete. Runner SSH key files are temporary too.
+
+The remote script takes a host lock, validates the Compose configuration and
+data directory owners, pulls the new image, then runs `silo-backup` with the
+configured retention before changing the container. A pull or backup failure
+leaves the existing process running. Compose waits up to 120 seconds for
+container health; the script also checks `https://silo.warpunit.com/health`
+through nginx. Success atomically updates `/opt/silo/current`, retaining
+`/opt/silo/previous`. A GitHub Release containing the commit and image digest
+is published only after deployment succeeds. The workflow queues release runs
+instead of canceling a deployment in progress, using GitHub's
+[`queue: max` concurrency setting](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+
+If container or HTTPS health fails, the script prints recent logs and attempts
+to restart the previous release using its cached image. An unsuccessful first
+deployment stops the failed container. The current symlink stays at the last
+successful release. Recovery keeps the live database: it never automatically
+restores a snapshot, which could discard writes received after the backup.
+If a future release migrates the SQLite schema, the older server may refuse
+the newer schema; inspect the logs and follow the explicit restore procedure
+above if a database restore is necessary.
+
+For a failed workflow, rerun the failed jobs from the Actions run. A new remote
+release directory is created each time. A full rerun rebuilds the image from
+the same source commit and may pick up newer base image packages; it can have
+a different digest, recorded in that release's notes. Successful releases and
+cached images are retained on the host; the deploy script does not prune
+shared-host images or delete database files.
+
+Inspect the running release, logs and backups after the first deployment:
+
+```sh
+curl --fail https://silo.warpunit.com/health
+ssh -i deployment/github_deploy_key -o IdentitiesOnly=yes silodev@YOUR_VPS_IP \
+  'cd /opt/silo/current && cat .env && docker compose ps && docker compose exec -T server silo-server invite'
+ssh root@YOUR_VPS_IP \
+  'journalctl CONTAINER_NAME=silo-server-1 -n 30 --no-pager; systemctl start silo-backup.service; ls -l /data/silo/backups'
+```
+
+The `.env` inside a remote release contains only image/deployment metadata,
+never the SSH private key or registry token. The invite is a one-time account
+code, valid for seven days.
+
+Local checks before committing the release setup:
+
+```sh
+shellcheck -x deployment/*.sh deployment/tests/*.sh
+python3 deployment/tests/config.py
+python3 deployment/tests/github_env.py
+docker build -f deployment/tests/Dockerfile -t silo-provision:check .
+docker run --rm silo-provision:check
+# actionlint 1.7.12 does not yet recognize GitHub's queue property:
+actionlint -ignore 'unexpected key "queue" for "concurrency" section'
+```
+
+### First production sync test
+
+On the Mac with your existing unlocked vault, register using the invite above:
+
+```sh
+silo sync register https://silo.warpunit.com -u YOUR_USERNAME --invite YOUR_INVITE
+silo sync
+silo status
+```
+
+In a second terminal, use an empty, separate data directory and socket. Log in
+with the same username and vault password; do not run `silo init` first:
+
+```sh
+export SILO_HOME="$(mktemp -d /tmp/silo-second.XXXXXXXX)"
+export SILO_AGENT_SOCKET="$SILO_HOME/agent.sock"
+silo sync login https://silo.warpunit.com -u YOUR_USERNAME
+silo status
+```
+
+The fingerprints must match. Keep that terminal's variables set while testing.
+On the first terminal, create a harmless test note and sync it:
+
+```sh
+silo add note deployment/test --text 'from first vault'
+silo sync
+```
+
+In the second terminal, run `silo sync`, then
+`silo get deployment/test`; expect the first text. Edit it using
+`silo edit deployment/test --text 'from second vault'`, then `silo sync`.
+Sync and read it in the first terminal; expect the new text. Reverse the edit
+once more to verify both directions. Delete the note in the second terminal
+with `silo rm deployment/test --yes`, sync both terminals and verify it is
+absent on the first. Create a second note at `deployment/test-delete`, sync
+both, delete it on the first, then sync both and verify it is absent on the
+second. `silo status` should still show matching fingerprints.
+
+When done, in the second terminal run `silo sync logout` and
+`silo agent stop`. Its temporary directory remains for inspection. These
+steps do not replace the installed Mac CLI or restart the primary agent.
 
 ## Browser extension: HTTP Basic Auth
 

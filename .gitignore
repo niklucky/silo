@@ -24,5 +24,10 @@ dist/
 *.db-shm
 *.db-wal
 
+# Deployment machine settings and SSH keys
+/deployment/.env.*
+!/deployment/.env.example
+/deployment/github_deploy_key*
+
 # Safari app
 /apps/safari/build/

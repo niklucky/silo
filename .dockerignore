@@ -1,0 +1,26 @@
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!apps/
+!apps/desktop/
+!apps/desktop/src-tauri/
+!apps/desktop/src-tauri/Cargo.toml
+!apps/desktop/src-tauri/build.rs
+!apps/desktop/src-tauri/src/
+!apps/desktop/src-tauri/src/**
+!deployment/
+# Exclude descendants explicitly before allowing individual build/test inputs.
+# Re-including the parent alone also re-includes otherwise unlisted files.
+deployment/**
+!deployment/Dockerfile
+!deployment/.env.example
+!deployment/compose.yaml
+!deployment/*.sh
+!deployment/nginx/
+!deployment/nginx/*.conf
+!deployment/tests/
+!deployment/tests/Dockerfile
+!deployment/tests/*.sh
+!deployment/tests/*.py
