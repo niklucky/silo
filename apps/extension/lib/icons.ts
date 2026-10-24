@@ -31,6 +31,7 @@ export const ICONS = {
   refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
   check: "M5 12l5 5 9-10",
   edit: "M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4",
+  trash: "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7",
   close: "M6 6l12 12M18 6 6 18",
   user: `${circle(12, 8, 4)}M4 21a8 8 0 0 1 16 0`,
   globe: `${circle(12, 12, 9)}M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18`,

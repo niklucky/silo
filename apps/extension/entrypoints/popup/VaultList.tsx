@@ -1,5 +1,6 @@
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Avatar } from "@/components/Avatar";
+import { WebsiteLink } from "@/components/WebsiteLink";
 import { Icon } from "@/components/Icon";
 import { call } from "@/lib/client";
 import type { IconName } from "@/lib/icons";
@@ -7,6 +8,8 @@ import type { AuthEvent } from "@/lib/messages";
 import type { SecretKind, SecretSummary } from "@/lib/protocol";
 import { isBasicAuth } from "@/lib/protocol";
 import { hostsOf, search } from "@/lib/search";
+import { createUsernameLoader } from "@/lib/usernames";
+import { firstWebsite, websiteUrl } from "@/lib/website";
 import type { Tab } from "./App";
 
 interface Props {
@@ -56,25 +59,14 @@ function siteQuery(query: string): string | null {
 export function VaultList(props: Props) {
   const { secrets, matches, refused, tab, query, setQuery, events, open, add, fill, copyField } = props;
   const [active, setActive] = useState(0);
-  const [usernames, setUsernames] = useState<Record<string, string>>({});
+  const loadUsername = useMemo(() => createUsernameLoader(async (id) => {
+    const reply = await call({ method: "get", params: { selector: id } });
+    const body = typeof reply === "object" && "secret" in reply ? reply.secret.body : null;
+    return body && "login" in body ? body.login.username : null;
+  }), []);
   const [siteHits, setSiteHits] = useState<SecretSummary[]>([]);
   const list = useRef<HTMLDivElement>(null);
   const searching = query.trim() !== "";
-
-  // Usernames tell the tab's logins apart; there are few of them.
-  useEffect(() => {
-    let live = true;
-    void Promise.all(
-      matches.slice(0, 8).map(async (m) => {
-        const reply = await call({ method: "get", params: { selector: m.id } }).catch(() => null);
-        const body = reply && typeof reply === "object" && "secret" in reply ? reply.secret.body : null;
-        return [m.id, body && "login" in body ? body.login.username : ""] as const;
-      }),
-    ).then((pairs) => live && setUsernames(Object.fromEntries(pairs)));
-    return () => {
-      live = false;
-    };
-  }, [matches]);
 
   // A pasted URL also finds logins for the rest of its site, with the agent's public suffix list.
   // A reply for an older query is dropped: its hits need not match the words typed since.
@@ -133,7 +125,8 @@ export function VaultList(props: Props) {
       index={index}
       secret={secret}
       active={index === active}
-      subtitle={site ? usernames[secret.id] || "(no username)" : subtitleOf(secret)}
+      subtitle={subtitleOf(secret)}
+      loadUsername={loadUsername}
       refused={refused.includes(secret.id)}
       canFill={matchIds.has(secret.id)}
       open={() => open(secret.id)}
@@ -178,7 +171,7 @@ export function VaultList(props: Props) {
               <>
                 <h3 className="section">
                   <Icon name="globe" size={12} />
-                  {tab.host}
+                  <WebsiteLink pattern={tab.url}>{tab.host}</WebsiteLink>
                 </h3>
                 {matches.map((s, i) => row(s, i, true))}
                 {matches.length === 0 && (
@@ -216,6 +209,7 @@ interface RowProps {
   secret: SecretSummary;
   active: boolean;
   subtitle: string;
+  loadUsername: ReturnType<typeof createUsernameLoader>;
   refused: boolean;
   canFill: boolean;
   open: () => void;
@@ -224,11 +218,41 @@ interface RowProps {
   hover: () => void;
 }
 
-function Row({ index, secret, active, subtitle, refused, canFill, open, fill, copyField, hover }: RowProps) {
+function Row({ index, secret, active, subtitle, loadUsername, refused, canFill, open, fill, copyField, hover }: RowProps) {
   const { meta } = secret;
   const login = meta.kind === "login";
+  const website = firstWebsite(meta.urls ?? []);
+  const titleUrl = websiteUrl(meta.title.replace(/\s+\(\d+\)$/, ""));
+  const repeatedWebsite = !!website && !!titleUrl && new URL(website).host === new URL(titleUrl).host;
+  const element = useRef<HTMLDivElement>(null);
+  const [username, setUsername] = useState<{ key: string; value: string | null } | null>(null);
+  const key = `${secret.id}:${secret.revision}`;
+
+  // Fetch only rows near the viewport, including search results and those reached by scrolling.
+  useEffect(() => {
+    if (!login || !element.current) return;
+    let live = true;
+    const load = () => {
+      void loadUsername(secret).then((value) => live && setUsername({ key, value }));
+    };
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      load();
+    }, { root: element.current.closest(".list"), rootMargin: "80px" });
+    observer.observe(element.current);
+    return () => {
+      live = false;
+      observer.disconnect();
+    };
+  }, [secret.id, secret.revision, login, loadUsername, key]);
+
+  const label = login
+    ? username?.key !== key ? "Loading login…" : username.value === null ? "Username unavailable" : username.value || "(no username)"
+    : subtitle;
   return (
     <div
+      ref={element}
       className={active ? "row active" : "row"}
       data-index={index}
       role="button"
@@ -236,14 +260,19 @@ function Row({ index, secret, active, subtitle, refused, canFill, open, fill, co
       onClick={open}
       onMouseMove={hover}
     >
-      {login ? <Avatar label={hostsOf(meta)[0] ?? meta.title} /> : <KindIcon kind={meta.kind} />}
+      {login ? <Avatar label={hostsOf(meta)[0] ?? meta.title} website={website} /> : <KindIcon kind={meta.kind} />}
       <span className="row-text">
         <span className="row-title">
           {meta.title}
           {isBasicAuth(meta) && <span className="badge accent">Basic Auth</span>}
           {refused && <span className="badge error">refused</span>}
         </span>
-        <span className="row-sub">{subtitle}</span>
+        <span className="row-sub">
+          {label && <span className="row-sub-text" title={label}>{label}</span>}
+          {label && website && !repeatedWebsite && <span> · </span>}
+          {website && <WebsiteLink pattern={website} iconOnly={repeatedWebsite}>{new URL(website).host}</WebsiteLink>}
+          {!label && !website && "—"}
+        </span>
       </span>
       <span className="row-actions" onClick={(e) => e.stopPropagation()}>
         {login && (
@@ -275,9 +304,9 @@ export function KindIcon({ kind, large = false }: { kind: SecretKind; large?: bo
 }
 
 function subtitleOf({ meta }: SecretSummary): string {
-  const parts = [meta.folder, hostsOf(meta)[0]].filter(Boolean);
+  const parts = [meta.folder].filter(Boolean);
   if (meta.kind !== "login") parts.unshift(KIND_LABEL[meta.kind]);
-  return parts.join(" · ") || "—";
+  return parts.join(" · ");
 }
 
 function Activity({ events }: { events: AuthEvent[] }) {

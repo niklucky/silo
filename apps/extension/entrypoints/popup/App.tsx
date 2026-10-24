@@ -239,6 +239,14 @@ export default function App() {
           back={() => setScreen({ name: "list" })}
           edit={() => setScreen({ name: "edit", id: screen.id })}
           fill={() => void fill(screen.id)}
+          deleted={() => {
+            setSecrets((items) => items.filter((item) => item.id !== screen.id));
+            setMatches((items) => items.filter((item) => item.id !== screen.id));
+            setScreen({ name: "list" });
+            void loadVault();
+            void refresh();
+            notify("Deleted");
+          }}
         />
       )}
       {unlocked && screen.name === "edit" && (

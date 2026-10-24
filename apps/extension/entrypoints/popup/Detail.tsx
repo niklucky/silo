@@ -1,12 +1,13 @@
 import { type ReactNode, useEffect, useState } from "react";
-import { browser } from "wxt/browser";
 import { Avatar } from "@/components/Avatar";
+import { WebsiteLink } from "@/components/WebsiteLink";
 import { Icon } from "@/components/Icon";
 import { call } from "@/lib/client";
 import type { SecretSummary, SecretView } from "@/lib/protocol";
 import { isBasicAuth, secretPath } from "@/lib/protocol";
 import { hostsOf } from "@/lib/search";
 import { errorText } from "@/lib/util";
+import { firstWebsite } from "@/lib/website";
 import type { Copy } from "./App";
 import { KIND_LABEL, KindIcon } from "./VaultList";
 
@@ -20,11 +21,28 @@ interface Props {
   back: () => void;
   edit: () => void;
   fill: () => void;
+  deleted: () => void;
 }
 
-export function Detail({ id, summary, canFill, copy, back, edit, fill }: Props) {
+export function Detail({ id, summary, canFill, copy, back, edit, fill, deleted }: Props) {
   const [view, setView] = useState<SecretView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function remove() {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const reply = await call({ method: "remove", params: { selector: id } });
+      if (typeof reply !== "object" || !("removed" in reply)) throw new Error("Unexpected reply from the agent.");
+      deleted();
+    } catch (err) {
+      setDeleteError(errorText(err));
+      setDeleting(false);
+    }
+  }
 
   useEffect(() => {
     setView(null);
@@ -49,12 +67,14 @@ export function Detail({ id, summary, canFill, copy, back, edit, fill }: Props) 
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" || (event.key === "Backspace" && !(event.target instanceof HTMLInputElement))) {
         event.preventDefault();
-        back();
+        if (deleting) return;
+        if (confirmDelete) setConfirmDelete(false);
+        else back();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [back]);
+  }, [back, confirmDelete, deleting]);
 
   const editable = view?.meta.kind === "login";
   const item = view ?? summary;
@@ -62,14 +82,20 @@ export function Detail({ id, summary, canFill, copy, back, edit, fill }: Props) 
   return (
     <div className="screen">
       <div className="subbar">
-        <button className="icon-button" title="Back (Esc)" onClick={back}>
+        <button className="icon-button" title="Back (Esc)" onClick={back} disabled={deleting}>
           <Icon name="back" />
         </button>
         <span className="spacer" />
         {editable && (
-          <button className="ghost small" onClick={edit}>
+          <button className="ghost small" onClick={edit} disabled={deleting}>
             <Icon name="edit" size={14} />
             Edit
+          </button>
+        )}
+        {item && (
+          <button className="ghost small danger" onClick={() => setConfirmDelete(true)} disabled={deleting || confirmDelete}>
+            <Icon name="trash" size={14} />
+            Delete
           </button>
         )}
       </div>
@@ -78,7 +104,7 @@ export function Detail({ id, summary, canFill, copy, back, edit, fill }: Props) 
         <div className="detail">
           <div className="detail-head">
             {item.meta.kind === "login" ? (
-              <Avatar large label={hostsOf(item.meta)[0] ?? item.meta.title} />
+              <Avatar large label={hostsOf(item.meta)[0] ?? item.meta.title} website={firstWebsite(item.meta.urls ?? [])} />
             ) : (
               <KindIcon large kind={item.meta.kind} />
             )}
@@ -103,11 +129,25 @@ export function Detail({ id, summary, canFill, copy, back, edit, fill }: Props) 
             <p className="muted">Loading…</p>
           )}
           <Meta item={item} />
+          {confirmDelete && (
+            <div className="delete-confirm" role="alertdialog" aria-labelledby="delete-title" aria-describedby="delete-description"
+              ref={(node) => { node?.scrollIntoView({ block: "nearest" }); }}>
+              <h3 id="delete-title">Delete “{item.meta.title}”?</h3>
+              <p id="delete-description">This deletes the item and its history from your vault. This cannot be undone.</p>
+              {deleteError && <p className="error" role="alert">{deleteError}</p>}
+              <div className="delete-actions">
+                <button autoFocus onClick={() => setConfirmDelete(false)} disabled={deleting}>Cancel</button>
+                <button className="danger" onClick={() => void remove()} disabled={deleting}>
+                  {deleting ? "Deleting…" : "Delete permanently"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
       {view && canFill && (
         <div className="footer">
-          <button className="primary wide" onClick={fill}>
+          <button className="primary wide" onClick={fill} disabled={deleting}>
             <Icon name="fill" size={15} />
             Fill on this page
           </button>
@@ -226,31 +266,10 @@ function Websites({ urls }: { urls: string[] }) {
       <span className="field-label">{urls.length === 1 ? "Website" : "Websites"}</span>
       <span className="field-value">
         {urls.map((url) => (
-          <Website key={url} pattern={url} />
+          <WebsiteLink key={url} pattern={url} />
         ))}
       </span>
     </div>
-  );
-}
-
-/** A URL pattern, as a link when it names one page (no wildcard). */
-function Website({ pattern }: { pattern: string }) {
-  const href = pattern.includes("*") ? null : pattern.includes("://") ? pattern : `https://${pattern}`;
-  const label = pattern.replace(/^https:\/\//, "").replace(/\/$/, "");
-  if (!href || !/^https?:/.test(href)) return <span className="url">{label}</span>;
-  return (
-    <a
-      className="url"
-      href={href}
-      onClick={(e) => {
-        e.preventDefault();
-        void browser.tabs.create({ url: href });
-        window.close();
-      }}
-    >
-      {label}
-      <Icon name="external" size={12} />
-    </a>
   );
 }
 

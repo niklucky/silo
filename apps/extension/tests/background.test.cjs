@@ -84,6 +84,12 @@ function background(engine) {
     async call(request) {
       if (request.method === "lock") unlocked = false;
       if (request.method === "unlock") unlocked = true;
+      if (request.method === "remove") {
+        if (!unlocked) throw new AgentError("locked");
+        const index = entries.findIndex((e) => e.id === request.params.selector);
+        const [removed] = entries.splice(index, 1);
+        return { removed: { id: removed.id, meta: meta(removed) } };
+      }
       return { status: { unlocked } };
     },
   };
@@ -341,6 +347,21 @@ for (const engine of ["firefox", "chromium", "safari"]) {
       assert.equal(Boolean(s.asked(result)), i === 3);
     }
     assert.deepEqual(await s.refused(origin), ["login1", "login2", "login3"]);
+  });
+
+  test(`${engine}: deleting from the popup clears cached Basic Auth credentials`, async () => {
+    const s = background(engine);
+    const url = "https://delete.test/";
+    s.add("login", url);
+    await s.challenge(s.request(url));
+    assert.equal((await s.outgoing(s.request(url))).requestHeaders[0].value, `Basic ${btoa("login:password-login")}`);
+    const result = await s.send({ kind: "agent", request: { method: "remove", params: { selector: "login" } } });
+    assert.equal(result.response.ok.removed.id, "login");
+    assert.equal(s.rules.size, 0);
+    assert.equal((await s.outgoing(s.request(url))).requestHeaders?.[0]?.value, undefined);
+    const options = await s.page(url, { kind: "page_logins" });
+    assert.equal(options.kind, "logins");
+    assert.equal(options.logins.length, 0);
   });
 
   for (const lockDetection of ["popup", "poll"]) {

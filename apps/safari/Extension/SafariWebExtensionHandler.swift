@@ -28,10 +28,10 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         context.completeRequest(returningItems: [response], completionHandler: nil)
     }
 
-    /// Nothing a browser does needs to delete secrets, read old revisions, or
-    /// change where the vault syncs. Keep in step with silo-native-host.
+    /// Browsers cannot read old revisions or change where the vault syncs.
+    /// Keep in step with silo-native-host.
     private static let refused: Set<String> = [
-        "shutdown", "remove", "history",
+        "shutdown", "history",
         "sync_register", "sync_login", "sync_logout", "sync_revoke_device",
     ]
 

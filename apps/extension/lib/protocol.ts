@@ -94,7 +94,7 @@ export interface ListFilter {
   kind?: SecretKind;
 }
 
-/** Methods the bridge lets a browser use. `shutdown`, `remove` and `history` are refused. */
+/** Methods the bridge lets a browser use. `shutdown` and `history` are refused. */
 export type Request =
   | { method: "status" }
   | { method: "unlock"; params: { password: string; ttl_secs?: number } }
@@ -103,6 +103,7 @@ export type Request =
   | { method: "get"; params: { selector: string } }
   | { method: "add"; params: NewSecret }
   | { method: "update"; params: SecretUpdate }
+  | { method: "remove"; params: { selector: string } }
   /** `site` adds logins for other hosts of the same site, after the matching ones. */
   | { method: "match"; params: { url: string; site?: boolean } }
   /** The registrable domain of the URL's host; null for an address or a public suffix. */
@@ -116,6 +117,7 @@ export type Reply =
   | { secret: SecretView }
   | { added: SecretSummary }
   | { updated: SecretSummary }
+  | { removed: SecretSummary }
   | { matches: SecretSummary[] }
   | { site: string | null };
 

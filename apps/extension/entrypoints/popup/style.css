@@ -137,11 +137,28 @@ body {
   text-overflow: ellipsis;
 }
 .row-sub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: var(--muted);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.row-sub-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row-sub .url {
+  display: inline-flex;
+  flex-shrink: 0;
+  max-width: 50%;
+  color: inherit;
+}
+.row-sub .url .icon {
+  margin-left: 0;
 }
 .row-actions {
   display: flex;
@@ -347,6 +364,26 @@ a.url:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+.delete-confirm {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--error);
+  border-radius: 10px;
+  background: var(--error-soft);
+  overflow-wrap: anywhere;
+}
+.delete-confirm h3 {
+  font-size: 13px;
+}
+.delete-confirm p {
+  font-size: 12px;
+}
+.delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
 }
 .footer {
   display: flex;
