@@ -142,10 +142,18 @@ export default function App() {
     });
     if (import.meta.env.SAFARI && typeof ClipboardItem !== "undefined") {
       // WebKit only lets the click itself write: hand it the value still on its way from the agent.
-      const blob = value.then((text) => new Blob([text], { type: "text/plain" }));
+      // A failed lookup surfaces as WebKit's own clipboard error: keep the agent's, which says why.
+      let failure: unknown = null;
+      const blob = value.then(
+        (text) => new Blob([text], { type: "text/plain" }),
+        (err: unknown) => {
+          failure = err;
+          throw err;
+        },
+      );
       navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]).then(
         () => notify(`${what} copied`),
-        (err: unknown) => notify(`Could not copy: ${errorText(err)}`, true),
+        (err: unknown) => notify(failure ? errorText(failure) : `Could not copy: ${errorText(err)}`, true),
       );
       return;
     }
