@@ -87,8 +87,11 @@ async function fetchIcon(origin: string): Promise<string | null> {
         await page.body?.cancel();
       }
     } catch { /* Try /favicon.ico even when the home page is unavailable. */ }
-    candidates.push(`${origin}/favicon.ico`);
-    for (const candidate of [...new Set(candidates)].slice(0, 4)) {
+    const fallback = `${origin}/favicon.ico`;
+    const attempts = [...new Set(candidates)].slice(0, 3);
+    // Keep the conventional icon reachable even when the page declares many alternatives.
+    if (!attempts.includes(fallback)) attempts.push(fallback);
+    for (const candidate of attempts) {
       try {
         const response = await fetch(candidate, { credentials: "omit", referrerPolicy: "no-referrer", signal: controller.signal });
         if (!response.ok) {
