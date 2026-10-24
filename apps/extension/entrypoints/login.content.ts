@@ -299,6 +299,27 @@ export default defineContentScript({
       promptTimer = setTimeout(() => prompt.hide(), NOTE_MS);
     }
 
+    // Registered before the sign-in listeners below, so an Enter the menu takes never reports the form.
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (!event.isTrusted || !(menu.anchoredTo || button.anchoredTo)) return;
+        if (event.key === "Escape") {
+          dismissed = current?.field ?? null;
+          hideAll();
+          return;
+        }
+        // Arrows move through the menu; Enter takes the highlighted row instead of sending the form.
+        if (!menu.anchoredTo || event.isComposing || event.altKey || event.metaKey || event.ctrlKey) return;
+        const handled =
+          event.key === "ArrowDown" ? menu.move(1) : event.key === "ArrowUp" ? menu.move(-1) : event.key === "Enter" && menu.activate();
+        if (handled) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      },
+      true,
+    );
     document.addEventListener(
       "submit",
       (event) => {
@@ -349,15 +370,6 @@ export default defineContentScript({
         if (filling || !current || event.composedPath()[0] !== current.field) return;
         current = null;
         clearTimeout(noteTimer);
-        hideAll();
-      },
-      true,
-    );
-    document.addEventListener(
-      "keydown",
-      (event) => {
-        if (event.key !== "Escape" || !(menu.anchoredTo || button.anchoredTo)) return;
-        dismissed = current?.field ?? null;
         hideAll();
       },
       true,
