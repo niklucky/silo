@@ -12,3 +12,8 @@
 !apps/desktop/src-tauri/src/**
 !deployment/
 !deployment/Dockerfile
+!deployment/*.sh
+!deployment/nginx/
+!deployment/nginx/**
+!deployment/tests/
+!deployment/tests/**

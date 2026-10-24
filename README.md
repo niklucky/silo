@@ -32,6 +32,12 @@ scripts/
 deployment/
   Dockerfile               multi-stage silo-server image; non-root runtime
   compose.yaml             production server, loopback port and persistent bind mounts
+  .env.example             copy to ignored .env.production for VPS settings
+  provision.sh             workstation entry point for shared-host preparation
+  provision-host.sh        remote implementation; invoked by provision.sh
+  backup.sh                online SQLite snapshots, installed as silo-backup
+  nginx/                   only the Silo HTTP/TLS site
+  tests/                   isolated Debian provisioning and backup checks
 .github/workflows/         reusable native/container checks, called for PRs and main
 ```
 
@@ -225,10 +231,104 @@ docker rm -f silo-server-test
 docker volume rm silo-server-test-db
 ```
 
-Every PR and push to `main` runs formatting, clippy, native build/tests, and a
-container health/persistence check. The reusable checks will also gate version
-tag releases. SSH provisioning, nginx/TLS, backups and tag deployment are the
-next deployment pieces; the VPS is not provisioned by these files yet.
+Every PR and push to `main` runs formatting, clippy, native build/tests,
+container health/persistence, and isolated Debian provisioning/backup checks.
+The reusable checks will also gate version tag releases. GitHub secrets setup
+and tag deployment are the next piece; these scripts prepare the host without
+deploying the application.
+
+### Provisioning the shared VPS
+
+The current host is Debian 13 on amd64, reached as `root@$SSH_HOST` for
+provisioning. Docker, Compose and nginx must already be installed and running.
+`provision.sh` adds Silo's account, directories, backup units and one nginx
+site. Existing project sites, Docker daemon settings, SSH policy and firewall
+are retained. The only package installs are missing SQLite, certbot and CA
+certificates. nginx is validated before every reload; a failed render or
+certificate issuance restores the previous Silo site configuration.
+
+Prepare workstation settings and a dedicated deployment key once:
+
+```sh
+cp deployment/.env.example deployment/.env.production
+# Fill in SSH_HOST in deployment/.env.production.
+chmod 600 deployment/.env.production
+ssh-keygen -t ed25519 -N '' -C github-deploy@silo -f deployment/github_deploy_key
+deployment/provision.sh --check
+```
+
+`.env.production` and both key files are gitignored and excluded from Docker
+build contexts. Settings use literal `KEY=value` lines with optional surrounding
+quotes, full-line comments and no shell expansion. Exported shell variables
+override the file. Connect to the VPS once with SSH and verify its host key
+before provisioning; the script requires a known host and key authentication.
+The private deployment key stays on the workstation until the GitHub secrets
+setup step. Provisioning uploads only its public half.
+
+Once the domain's A record points to the VPS (and any AAAA record also reaches
+this host), run:
+
+```sh
+deployment/provision.sh
+# Repeat the same command to verify a rerun preserves data and authorized keys.
+deployment/provision.sh
+ssh root@YOUR_VPS_IP 'nginx -t; systemctl list-timers silo-backup.timer; stat -c "%a %U:%G %n" /data/silo /data/silo/db /data/silo/files /data/silo/backups'
+curl -I https://silo.warpunit.com/health
+```
+
+The script creates `silodev` with UID/GID 10001 (configurable before the first
+provision) and adds it to the existing Docker group for deployment. Docker
+access grants control of the host; use only the dedicated deployment key for
+this account. `/opt/silo` and the three `/data/silo` subdirectories are private
+to `silodev` (0700). Reruns append no duplicate key, preserve database/files
+contents, and refuse existing data directories owned by another UID/GID.
+Docker's restart policy manages the server process; systemd manages the backup
+timer. A failed provision retains its remote staging/rollback files for inspection.
+
+The nginx files are `/etc/nginx/sites-available/silo.warpunit.com.conf` and its
+matching symlink in `sites-enabled`. TLS uses certbot's webroot mode at
+`/var/www/silo-acme`, with the host's renewal timer and a Silo reload hook. HTTPS
+returns **502 until the first application deployment**; this is expected at
+the provisioning stage. The browser or curl should still validate the TLS
+certificate. `--skip-certs` prepares the host before DNS is ready, serving 503
+on HTTP when no certificate exists. `--nginx-only` updates the proxy using an
+existing certificate; `--backups-only` updates the backup script and timer.
+
+### SQLite backups
+
+`silo-backup.timer` runs an online `sqlite3 .backup` at 03:30 UTC plus a random
+delay of up to 15 minutes, keeping 14 days of snapshots by default
+(`BACKUP_KEEP_DAYS`). The oneshot service runs as `silodev`; snapshots are mode
+0600 in `/data/silo/backups`. Each snapshot is checked with
+`PRAGMA integrity_check` and renamed into place only after success. A missing
+database is skipped without creating an empty database. Committed WAL contents
+are included without stopping the server.
+
+After the first deployment, test it manually:
+
+```sh
+ssh root@YOUR_VPS_IP 'systemctl start silo-backup.service; journalctl -u silo-backup.service -n 20 --no-pager; ls -l /data/silo/backups'
+```
+
+Snapshots cover the entire current sync store, including encrypted file
+contents; `/data/silo/files` is reserved and currently unused. These snapshots
+stay on the same VPS; copy them off the host for disaster recovery. To restore,
+stop Silo, retain the old database and its WAL/SHM sidecars together in a
+separate directory, and install the checked snapshot as
+`/data/silo/db/silo-server.db` owned by `silodev`, mode 0600, before restarting.
+
+Run the provisioning tests without contacting the VPS:
+
+```sh
+python3 deployment/tests/config.py
+docker build -f deployment/tests/Dockerfile -t silo-provision:check .
+docker run --rm silo-provision:check
+```
+
+The disposable Debian test uses real accounts, nginx validation, private data
+directories and SQLite. Docker/systemd service calls are stubbed. It checks
+reruns, a broken nginx render rolling back without changing another site, and
+an online snapshot containing committed rows that are still in the WAL.
 
 ## Browser extension: HTTP Basic Auth
 

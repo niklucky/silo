@@ -7,6 +7,20 @@ permissions:
   contents: read
 
 jobs:
+  deployment:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint deployment scripts
+        run: |
+          for script in deployment/*.sh deployment/tests/*.sh; do bash -n "$script"; done
+          shellcheck -x deployment/*.sh deployment/tests/*.sh
+          python3 deployment/tests/config.py
+      - name: Test shared-host provisioning and online backups
+        run: |
+          docker build -f deployment/tests/Dockerfile -t silo-provision:check .
+          docker run --rm silo-provision:check
+
   native:
     runs-on: ubuntu-24.04
     steps:
