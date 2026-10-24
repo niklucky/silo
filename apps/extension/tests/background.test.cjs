@@ -34,7 +34,7 @@ function background(engine) {
     return p.protocol === t.protocol && (t.hostname === parent || t.hostname.endsWith(`.${parent}`));
   };
   const site = (url) => new URL(url.replace("*.", "")).hostname.split(".").slice(-2).join(".");
-  const meta = (e) => ({ title: e.id, folder: "", urls: e.urls, basic_auth: e.marked });
+  const meta = (e) => ({ title: e.title ?? e.id, folder: e.folder ?? "", urls: e.urls, basic_auth: e.marked });
   const agent = {
     async matches(url, { site: sameSite = false } = {}) {
       if (!unlocked) throw new AgentError("locked");
@@ -50,7 +50,18 @@ function background(engine) {
     async get(id) {
       if (!unlocked) throw new AgentError("locked");
       const e = entries.find((e) => e.id === id);
-      return { id, revision: e.revision, meta: meta(e), body: { login: { username: id, password: e.password, notes: "" } } };
+      const username = e.username ?? id;
+      return { id, revision: e.revision, meta: meta(e), body: { login: { username, password: e.password, notes: "" } } };
+    },
+    async list({ folder = "" } = {}) {
+      if (!unlocked) throw new AgentError("locked");
+      return entries.filter((e) => (e.folder ?? "") === folder).map((e) => ({ id: e.id, revision: e.revision, meta: meta(e) }));
+    },
+    async add({ title, folder = "", urls = [], body }) {
+      if (!unlocked) throw new AgentError("locked");
+      const e = { id: `added-${entries.length}`, title, folder, urls, revision: 1, ...body.login };
+      entries.push(e);
+      return { id: e.id, revision: 1, meta: meta(e) };
     },
     async update({ selector, revision, urls }) {
       if (!unlocked) throw new AgentError("locked");
@@ -85,6 +96,7 @@ function background(engine) {
     tabs: {
       onRemoved: event("removed"),
       update: async (_id, options) => navigations.push(options.url),
+      sendMessage: async () => undefined,
     },
     runtime: {
       id: "test-extension",
@@ -140,6 +152,10 @@ function background(engine) {
   const send = (message) => new Promise((resolve) => listeners.message(
     message, { id: browser.runtime.id, url: "moz-extension://test/popup.html" }, resolve,
   ));
+  /** A message from the login content script in the top frame of tab 1. */
+  const page = (pageUrl, message) => new Promise((resolve) => listeners.message(
+    message, { id: browser.runtime.id, url: pageUrl, tab: { id: 1 }, frameId: 0 }, resolve,
+  ));
   async function challenge(details, realm = "site", scheme = "basic") {
     const response = {
       ...details, statusCode: 401, isProxy: false, realm, scheme,
@@ -163,7 +179,7 @@ function background(engine) {
     listeners.onCompleted({ ...details, statusCode });
   }
   return {
-    entries, marked, agent, request, send, challenge, outgoing, complete, rules,
+    entries, marked, agent, request, send, page, challenge, outgoing, complete, rules,
     fail(details) { listeners.onErrorOccurred(details); },
     add(id, url, options = {}) { entries.push({ id, urls: [url], revision: 1, password: `password-${id}`, ...options }); },
     lock() { unlocked = false; },
@@ -480,3 +496,27 @@ for (const engine of ["firefox", "chromium", "safari"]) {
     assert.deepEqual(s.marked, ["shared"]);
   });
 }
+
+test("a login saved after sign-in takes the name, folder and username from the save panel", async () => {
+  const s = background("firefox");
+  const signIn = "https://app.example.test/login";
+  await s.page(signIn, { kind: "page_submitted", username: "me", password: "secret" });
+  const { offer } = await s.page(signIn, { kind: "page_offer" });
+  assert.equal(offer.title, "app.example.test");
+  assert.equal(offer.folder, "web");
+  // Spaces around and doubled slashes are tidied; the vault would refuse them.
+  const as = { title: "My app", folder: "/Work / apps//", username: " me@example.test " };
+  const saved = await s.page(signIn, { kind: "page_offer_answer", id: offer.id, answer: { kind: "new", as } });
+  assert.deepEqual({ ...saved }, { kind: "saved", path: "Work/apps/My app", updated: false });
+  const added = s.entries.find((e) => e.title === "My app");
+  assert.equal(added.folder, "Work/apps");
+  assert.equal(added.username, "me@example.test");
+  assert.equal(added.password, "secret");
+  assert.deepEqual(Array.from(added.urls), ["https://app.example.test"]);
+
+  // The same name again in that folder gets a number instead of a twin.
+  await s.page(signIn, { kind: "page_submitted", username: "other", password: "another" });
+  const again = (await s.page(signIn, { kind: "page_offer" })).offer;
+  const second = await s.page(signIn, { kind: "page_offer_answer", id: again.id, answer: { kind: "new", as } });
+  assert.equal(second.path, "Work/apps/My app (2)");
+});

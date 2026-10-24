@@ -271,6 +271,15 @@ export default defineContentScript({
       else if (prompt.offer) prompt.hide();
     }
 
+    async function stillOffered(offer: SaveOffer): Promise<boolean> {
+      try {
+        const response = await send({ kind: "page_offer" });
+        return response.kind === "offer" && response.offer?.id === offer.id && !response.offer.locked;
+      } catch {
+        return false;
+      }
+    }
+
     async function answerOffer(offer: SaveOffer, answer: OfferAnswer) {
       if (!prompt) return;
       let response: PageResponse;
@@ -293,12 +302,42 @@ export default defineContentScript({
         return;
       } else {
         const why = response.kind === "failed" ? response.message : "Silo is not reachable";
+        // Still on offer (a name or folder the vault refused, say): keep the form so the user can fix it.
+        if (response.kind === "failed" && (await stillOffered(offer))) {
+          prompt.fail(`Not saved: ${why}`);
+          return;
+        }
         prompt.note(`Not saved: ${why}`, true);
       }
       clearTimeout(promptTimer);
       promptTimer = setTimeout(() => prompt.hide(), NOTE_MS);
     }
 
+    // Registered before the sign-in listeners below, so an Enter the menu takes never reports the form.
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (!event.isTrusted || !(menu.anchoredTo || button.anchoredTo)) return;
+        if (event.key === "Escape") {
+          dismissed = current?.field ?? null;
+          hideAll();
+          return;
+        }
+        // Arrows move through the menu; Enter takes the highlighted row instead of sending the form.
+        if (!menu.anchoredTo || event.isComposing || event.altKey || event.metaKey || event.ctrlKey) return;
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Enter") {
+          menu.disarm();
+          return;
+        }
+        const handled =
+          event.key === "ArrowDown" ? menu.move(1) : event.key === "ArrowUp" ? menu.move(-1) : event.key === "Enter" && menu.activate();
+        if (handled) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      },
+      true,
+    );
     document.addEventListener(
       "submit",
       (event) => {
@@ -349,15 +388,6 @@ export default defineContentScript({
         if (filling || !current || event.composedPath()[0] !== current.field) return;
         current = null;
         clearTimeout(noteTimer);
-        hideAll();
-      },
-      true,
-    );
-    document.addEventListener(
-      "keydown",
-      (event) => {
-        if (event.key !== "Escape" || !(menu.anchoredTo || button.anchoredTo)) return;
-        dismissed = current?.field ?? null;
         hideAll();
       },
       true,

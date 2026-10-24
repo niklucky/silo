@@ -1,12 +1,15 @@
-import { text, trustedButton } from "./dom";
+import { avatar, icon, logo, text, trustedButton } from "./dom";
 import { type Generated, strength } from "./generate";
+import type { IconName } from "./icons";
 import type { LoginOption, SameSiteLogin, SaveChoice } from "./messages";
+import { TOKENS } from "./theme";
 
 /**
  * The dropdown under a login field: matching logins, generated passwords, an
  * unlock prompt, or a short confirmation. Plain
  * DOM in a closed shadow root, so page styles cannot reach in and page scripts
- * cannot read it. Clicks only count when the browser marks them as trusted.
+ * cannot read it. Clicks only count when the browser marks them as trusted;
+ * the content script passes on trusted arrow and Enter keys from the field.
  */
 
 /** Whether a generated password goes into the vault before the page gets it. */
@@ -41,45 +44,53 @@ export interface MenuActions {
 
 const STYLE_LABEL: Record<Generated["style"], string> = { easy: "Easy to type", random: "Random" };
 
-const STYLE = `
-:host { all: initial; }
-.menu {
-  position: fixed; z-index: 2147483647; box-sizing: border-box;
-  min-width: 220px; max-width: 360px; padding: 4px;
-  font: 13px/1.35 system-ui, sans-serif; color: #1d1d1f;
-  background: #fff; border: 1px solid rgba(0,0,0,.15); border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(0,0,0,.18); overflow-y: auto;
-}
-@media (prefers-color-scheme: dark) {
-  .menu { color: #f2f2f2; background: #2b2b2e; border-color: rgba(255,255,255,.15); }
-}
-.head { padding: 4px 8px 2px; font-size: 11px; opacity: .6; }
-.head.unsaved { opacity: 1; color: #b06000; }
-.warn { padding: 2px 8px 4px; font-size: 11px; color: #b3261e; }
-.note { padding: 6px 8px; }
-.note.error { color: #b3261e; }
-.secret { padding: 2px 8px 4px; user-select: all; }
-.pw { display: block; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-.meter { display: flex; align-items: center; gap: 6px; margin-top: 3px; font-size: 11px; opacity: .8; }
+const STYLE = `${TOKENS}
+.menu { min-width: 260px; max-width: 380px; padding: 4px; overflow-y: auto; border-radius: 10px; }
+.head { display: flex; align-items: center; gap: 7px; padding: 5px 6px 6px; font-size: 12px; font-weight: 600; }
+.head .host { margin-left: auto; font-weight: 400; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.notice { display: flex; gap: 6px; align-items: flex-start; margin: 0 2px 4px; padding: 6px 8px; border-radius: 7px; font-size: 12px; }
+.notice.warn { background: var(--warn-soft); color: var(--warn); }
+.notice.error { background: var(--error-soft); color: var(--error); }
+.notice svg.icon { width: 14px; height: 14px; margin-top: 1px; }
+.item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px; border-radius: 7px; }
+.item.active { background: var(--surface); }
+.lead { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border-radius: 7px; background: var(--surface-2); color: var(--muted); }
+.lead.accent { background: var(--accent-soft); color: var(--accent); }
+.text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.pw { display: block; font: 13px/1.4 var(--mono); overflow-wrap: anywhere; }
+.meter { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--muted); }
 .bars { display: inline-flex; gap: 2px; }
-.bars i { display: block; width: 14px; height: 4px; border-radius: 2px; background: rgba(127,127,127,.3); }
+.bars i { display: block; width: 14px; height: 4px; border-radius: 2px; background: var(--surface-2); }
 .l1 i.on { background: #d93025; } .l2 i.on { background: #f29900; }
 .l3 i.on { background: #34a853; } .l4 i.on { background: #188038; }
-.more { font-size: 12px; opacity: .75; }
-button {
-  all: unset; box-sizing: border-box; display: block; width: 100%;
-  padding: 6px 8px; border-radius: 6px; cursor: pointer;
-}
-button:hover, button:focus-visible { background: rgba(127,127,127,.18); }
-.title { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sub { display: block; font-size: 12px; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.option { display: block; width: 100%; padding: 8px; border-radius: 7px; }
+.option.active { background: var(--surface); }
+.note { display: flex; align-items: center; gap: 8px; padding: 8px; }
+.note .lead { width: 24px; height: 24px; border-radius: 50%; }
+.note.error .lead { background: var(--error-soft); color: var(--error); }
+.secret { margin: 2px 8px 6px; padding: 8px; border-radius: 7px; background: var(--surface); user-select: all; }
+.foot { display: flex; gap: 10px; padding: 6px 8px 3px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); margin-top: 4px; }
+kbd { font: 10px/1 var(--mono); padding: 2px 4px; border-radius: 4px; border: 1px solid var(--line); }
 `;
+
+interface Choice {
+  node: HTMLElement;
+  run: () => void;
+}
 
 export class Menu {
   private readonly host: HTMLElement;
   private readonly root: ShadowRoot;
   private readonly box: HTMLDivElement;
   private anchor: HTMLElement | null = null;
+  private choices: Choice[] = [];
+  /** Highlighted by the arrow keys or the mouse; -1 until then. */
+  private active = -1;
+  /** The highlight came from the arrow keys: only then does Enter take it rather than send the form. */
+  private armed = false;
   private readonly reposition = () => this.place();
 
   constructor(private readonly actions: MenuActions) {
@@ -90,7 +101,9 @@ export class Menu {
     const style = document.createElement("style");
     style.textContent = STYLE;
     this.box = document.createElement("div");
-    this.box.className = "menu";
+    this.box.className = "panel menu";
+    this.box.setAttribute("role", "listbox");
+    this.box.setAttribute("aria-label", "Silo");
     // Keep focus in the field while the user clicks the menu.
     this.box.addEventListener("mousedown", (event) => event.preventDefault());
     this.root.append(style, this.box);
@@ -101,6 +114,9 @@ export class Menu {
   }
 
   show(anchor: HTMLElement, content: MenuContent) {
+    this.choices = [];
+    this.active = -1;
+    this.armed = false;
     this.box.replaceChildren(...this.render(content));
     if (!this.host.isConnected) document.documentElement.append(this.host);
     if (this.anchor !== anchor) {
@@ -113,9 +129,41 @@ export class Menu {
 
   hide() {
     this.anchor = null;
+    this.choices = [];
     this.host.remove();
     window.removeEventListener("scroll", this.reposition, true);
     window.removeEventListener("resize", this.reposition);
+  }
+
+  /** Arrow keys: moves the highlight, wrapping around. */
+  move(step: 1 | -1): boolean {
+    if (this.choices.length === 0) return false;
+    const next = this.active < 0 ? (step > 0 ? 0 : this.choices.length - 1) : this.active + step;
+    this.highlight((next + this.choices.length) % this.choices.length);
+    this.armed = true;
+    return true;
+  }
+
+  /** Typing in the field: Enter sends the form again until the arrow keys pick a row. */
+  disarm() {
+    this.armed = false;
+  }
+
+  /** Enter: runs the row picked with the arrow keys, if any. A row under the mouse is not enough. */
+  activate(): boolean {
+    const choice = this.armed ? this.choices[this.active] : undefined;
+    if (!choice) return false;
+    choice.run();
+    return true;
+  }
+
+  private highlight(index: number) {
+    this.choices[this.active]?.node.classList.remove("active");
+    this.active = index;
+    const choice = this.choices[index];
+    if (!choice) return;
+    choice.node.classList.add("active");
+    choice.node.scrollIntoView({ block: "nearest" });
   }
 
   private place() {
@@ -131,63 +179,86 @@ export class Menu {
     const roomAbove = rect.top - 8;
     const above = height > roomBelow && roomAbove > roomBelow;
     if (height > (above ? roomAbove : roomBelow)) this.box.style.maxHeight = `${Math.max(48, above ? roomAbove : roomBelow)}px`;
-    const top = above ? rect.top - 4 - this.box.offsetHeight : rect.bottom + 4;
+    const top = above ? rect.top - 6 - this.box.offsetHeight : rect.bottom + 6;
     this.box.style.top = `${top}px`;
+    this.box.style.width = `${Math.max(260, Math.min(380, rect.width))}px`;
     this.box.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - this.box.offsetWidth - 4))}px`;
-    this.box.style.width = `${Math.max(220, Math.min(360, rect.width))}px`;
   }
 
   private render(content: MenuContent): HTMLElement[] {
     switch (content.kind) {
-      case "note":
-        return [text("div", content.error ? "note error" : "note", content.text)];
+      case "note": {
+        const node = document.createElement("div");
+        node.className = content.error ? "note error" : "note";
+        const lead = document.createElement("span");
+        lead.className = content.error ? "lead" : "lead accent";
+        lead.append(icon(content.error ? "alert" : "check"));
+        node.append(lead, text("span", "text", content.text));
+        return [node];
+      }
       case "unsaved": {
         const password = text("div", "pw secret", content.password);
-        const copy = this.button(() => void copyText(content.password, password));
-        copy.append(text("span", "more", "Copy password"));
-        return [text("div", "note error", content.text), password, copy];
+        return [
+          this.head("Password not saved"),
+          notice("warn", content.text),
+          password,
+          this.item(icon("copy"), "Copy password", "Keep it somewhere until Silo can save it", () => {
+            void copyText(content.password, password);
+          }),
+        ];
       }
       case "logins": {
-        const nodes: HTMLElement[] = [];
-        if (content.locked) {
-          nodes.push(this.option("Silo is locked", "Unlock to fill your saved logins", () => this.actions.unlock()));
-        }
-        if (content.logins.length > 0) nodes.push(text("div", "head", "Fill with Silo"));
+        const nodes: HTMLElement[] = [this.head(content.logins.length > 0 ? "Fill with Silo" : "Silo")];
         if (content.insecure && content.logins.length > 0) nodes.push(insecureWarning());
+        if (content.locked) {
+          nodes.push(this.item(lead("lock"), "Silo is locked", "Unlock to fill your saved logins", () => this.actions.unlock()));
+        }
         for (const login of content.logins) {
-          nodes.push(this.option(login.username || "(no username)", login.path, () => this.actions.pick(login)));
+          nodes.push(
+            this.item(avatar(login.title), login.username || "(no username)", login.path, () =>
+              this.actions.pick(login),
+            ),
+          );
         }
         if (content.generate) {
-          nodes.push(this.option("Generate password…", SAVING_NOTE[content.generate], () => this.actions.suggest()));
+          if (content.logins.length > 0 || content.locked) nodes.push(text("div", "sep", ""));
+          nodes.push(
+            this.item(lead("sparkle", true), "Suggest a strong password", SAVING_NOTE[content.generate], () =>
+              this.actions.suggest(),
+            ),
+          );
         }
+        nodes.push(keysHint("fill"));
         return nodes;
       }
       case "conflict": {
         const { option, username, host, logins } = content;
-        const head = username ? `${username} is already saved for this site` : "Logins already saved for this site";
-        const nodes: HTMLElement[] = [text("div", "head", head)];
+        const nodes: HTMLElement[] = [
+          this.head(username ? `${username} is already saved here` : "Logins already saved for this site"),
+        ];
         nodes.push(
-          this.option(`Add a new login for ${host}`, keepNote(logins), () =>
+          this.item(lead("plus", true), `Add a new login for ${host}`, keepNote(logins), () =>
             this.actions.useGenerated(option, "saved", { kind: "new" }),
           ),
         );
         for (const login of logins) {
           const who = username ? "" : ` (${login.username || "no username"})`;
           nodes.push(
-            this.option(`Overwrite ${login.path}${who}`, updateNote(login, host), () =>
+            this.item(lead("refresh"), `Update ${login.path}${who}`, updateNote(login, host), () =>
               this.actions.useGenerated(option, "saved", { kind: "overwrite", id: login.id }),
             ),
           );
         }
+        nodes.push(keysHint("choose"));
         return nodes;
       }
       case "generate": {
-        const nodes: HTMLElement[] = [
-          text("div", content.saving === "saved" ? "head" : "head unsaved", `Generated password · ${SAVING_NOTE[content.saving]}`),
-        ];
+        const nodes: HTMLElement[] = [this.head("Suggested passwords")];
+        if (content.saving !== "saved") nodes.push(notice("warn", SAVING_NOTE[content.saving]));
         if (content.insecure) nodes.push(insecureWarning());
         for (const option of content.options) {
-          const button = this.button(() => this.actions.useGenerated(option, content.saving));
+          const button = trustedButton(() => this.actions.useGenerated(option, content.saving));
+          button.className = "option";
           const { label, level } = strength(option.bits);
           const bars = document.createElement("span");
           bars.className = `bars l${level}`;
@@ -200,28 +271,77 @@ export class Menu {
           meter.className = "meter";
           meter.append(bars, `${STYLE_LABEL[option.style]} · ${label} · ${option.bits} bits`);
           button.append(text("span", "pw", option.password), meter);
-          nodes.push(button);
+          nodes.push(this.choice(button, () => this.actions.useGenerated(option, content.saving)));
         }
-        const again = this.button(() => this.actions.suggest());
-        again.append(text("span", "more", "↻ Other suggestions"));
-        nodes.push(again);
+        nodes.push(text("div", "sep", ""));
+        nodes.push(this.item(lead("refresh"), "Other suggestions", "", () => this.actions.suggest()));
         if (content.saving === "locked") {
-          nodes.push(this.option("Unlock Silo", "To save the password you pick", () => this.actions.unlock()));
+          nodes.push(this.item(lead("lock"), "Unlock Silo", "To save the password you pick", () => this.actions.unlock()));
+        }
+        if (content.saving === "saved") {
+          nodes.push(text("div", "sub foot", "The one you pick is saved to Silo before it is filled."));
         }
         return nodes;
       }
     }
   }
 
-  private option(title: string, sub: string, run: () => void): HTMLButtonElement {
-    const button = this.button(run);
-    button.append(text("span", "title", title), text("span", "sub", sub));
-    return button;
+  private head(title: string): HTMLElement {
+    const node = document.createElement("div");
+    node.className = "head";
+    node.append(logo(), text("span", "", title), text("span", "host", location.host));
+    return node;
   }
 
-  private button(run: () => void): HTMLButtonElement {
-    return trustedButton(run);
+  private item(leading: Element, title: string, sub: string, run: () => void): HTMLButtonElement {
+    const button = trustedButton(run);
+    button.className = "item";
+    const body = document.createElement("span");
+    body.className = "text";
+    body.append(text("span", "title", title));
+    if (sub) body.append(text("span", "sub", sub));
+    button.append(leading, body);
+    return this.choice(button, run);
   }
+
+  private choice<T extends HTMLElement>(node: T, run: () => void): T {
+    const index = this.choices.length;
+    node.setAttribute("role", "option");
+    node.addEventListener("mousemove", () => {
+      if (this.active === index) return;
+      this.highlight(index);
+      this.armed = false;
+    });
+    this.choices.push({ node, run });
+    return node;
+  }
+}
+
+function lead(name: IconName, accent = false): HTMLElement {
+  const node = document.createElement("span");
+  node.className = accent ? "lead accent" : "lead";
+  node.append(icon(name));
+  return node;
+}
+
+function notice(kind: "warn" | "error", message: string): HTMLElement {
+  const node = document.createElement("div");
+  node.className = `notice ${kind}`;
+  node.append(icon("alert"), text("span", "", message));
+  return node;
+}
+
+function keysHint(verb: string): HTMLElement {
+  const node = document.createElement("div");
+  node.className = "foot";
+  const key = (label: string) => text("kbd", "", label);
+  const part = (keys: HTMLElement[], label: string) => {
+    const span = document.createElement("span");
+    span.append(...keys, ` ${label}`);
+    return span;
+  };
+  node.append(part([key("↑"), key("↓")], "move"), part([key("↵")], verb), part([key("esc")], "close"));
+  return node;
 }
 
 /** Clipboard when the page allows it (secure contexts); otherwise select the text for ⌘C / Ctrl+C. */
@@ -253,5 +373,5 @@ function keepNote(logins: SameSiteLogin[]): string {
 }
 
 function insecureWarning(): HTMLElement {
-  return text("div", "warn", "This page is not HTTPS; anyone on the network can read what you send.");
+  return notice("error", "This page is not HTTPS; anyone on the network can read what you send.");
 }

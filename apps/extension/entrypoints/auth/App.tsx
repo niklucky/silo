@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { browser } from "wxt/browser";
+import { Logo } from "@/components/Icon";
 import type { ChallengeView, LinkOption, SameSiteLogin, SaveChoice, UiRequest, UiResponse } from "@/lib/messages";
 import { describe } from "@/lib/protocol";
 import { errorText } from "@/lib/util";
@@ -176,7 +177,7 @@ export default function App() {
   if (phase.step === "unknown") {
     return (
       <main className="card">
-        <h1>Silo</h1>
+        <Brand />
         <p>Nothing to do here.</p>
         <p className="muted">
           This page opens by itself when a site asks for a password. You can close it.
@@ -189,6 +190,7 @@ export default function App() {
   const { challenge } = phase;
   const site = (
     <>
+      <Brand />
       <h1>
         <strong>{challenge.host}</strong> asks for a password
       </h1>
@@ -388,6 +390,15 @@ export default function App() {
         {error && <p className="error">{error}</p>}
       </form>
     </main>
+  );
+}
+
+function Brand() {
+  return (
+    <div className="brand">
+      <Logo size={22} />
+      <span>Silo</span>
+    </div>
   );
 }
 
