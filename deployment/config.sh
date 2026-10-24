@@ -55,9 +55,9 @@ load_config() {
   for name in SSH_PORT SERVER_PORT SILO_UID SILO_GID BACKUP_KEEP_DAYS; do
     value=${!name}
     case "$value" in ''|*[!0-9]*|0*) die "$name must be a positive decimal integer" ;; esac
-    [ "${#value}" -le 5 ] && [ "$value" -le 65535 ] || die "$name is out of range"
+    if [ "${#value}" -gt 5 ] || [ "$value" -gt 65535 ]; then die "$name is out of range"; fi
   done
-  [ "$SILO_UID" -ge 1000 ] && [ "$SILO_GID" -ge 1000 ] || die 'Use a non-system UID/GID (at least 1000)'
+  if [ "$SILO_UID" -lt 1000 ] || [ "$SILO_GID" -lt 1000 ]; then die 'Use a non-system UID/GID (at least 1000)'; fi
   if [ -n "$CERT_EMAIL" ]; then
     case "$CERT_EMAIL" in *[!a-zA-Z0-9._%+@-]*) die 'Invalid CERT_EMAIL' ;; esac
     case "$CERT_EMAIL" in ?*@?*.?*) ;; *) die 'Invalid CERT_EMAIL' ;; esac

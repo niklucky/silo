@@ -12,7 +12,7 @@ STAGE=${1:?Staging directory required}
 . "$STAGE/settings.sh"
 # shellcheck source=/dev/null
 . /etc/os-release
-[ "$ID" = debian ] && [ "$VERSION_ID" = 13 ] || die 'Expected Debian 13'
+if [ "$ID" != debian ] || [ "$VERSION_ID" != 13 ]; then die 'Expected Debian 13'; fi
 exec 9>/run/lock/silo-provision.lock
 flock -n 9 || die 'Another Silo provision is active'
 
@@ -26,7 +26,9 @@ docker compose version >/dev/null
 nginx -t
 if [ "$MODE" = full ]; then
   if id silodev >/dev/null 2>&1; then
-    [ "$(id -u silodev)" = "$SILO_UID" ] && [ "$(id -g silodev)" = "$SILO_GID" ] || die 'silodev UID/GID does not match configuration'
+    if [ "$(id -u silodev)" != "$SILO_UID" ] || [ "$(id -g silodev)" != "$SILO_GID" ]; then
+      die 'silodev UID/GID does not match configuration'
+    fi
   else
     ! getent passwd "$SILO_UID" >/dev/null || die "UID $SILO_UID is already allocated"
     ! getent group silodev >/dev/null || die 'Group silodev already exists without the user'
@@ -55,7 +57,7 @@ if [ "$MODE" = full ]; then
   fi
   usermod -aG docker silodev
   home=$(getent passwd silodev | cut -d: -f6)
-  [ -d "$home" ] && [ ! -L "$home/.ssh" ] || die 'Invalid silodev home/.ssh'
+  if [ ! -d "$home" ] || [ -L "$home/.ssh" ]; then die 'Invalid silodev home/.ssh'; fi
   install -d -o silodev -g silodev -m 0700 "$home/.ssh"
   [ ! -L "$home/.ssh/authorized_keys" ] || die 'authorized_keys must not be a symlink'
   touch "$home/.ssh/authorized_keys"
@@ -128,7 +130,7 @@ for site in /etc/nginx/sites-enabled/*; do
 done
 [ ! -L "$available" ] || die "Refusing symlink: $available"
 if [ -e "$enabled" ] || [ -L "$enabled" ]; then
-  [ -L "$enabled" ] && [ "$(readlink "$enabled")" = "$available" ] || die "Refusing to replace $enabled"
+  if [ ! -L "$enabled" ] || [ "$(readlink "$enabled")" != "$available" ]; then die "Refusing to replace $enabled"; fi
 fi
 has_cert() {
   [ -s "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] && [ -s "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]

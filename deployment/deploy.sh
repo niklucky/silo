@@ -16,14 +16,14 @@ validate_release
 exec 9>/opt/silo/.deploy.lock
 flock -w 120 9 || die 'Another Silo deployment is active'
 for path in /data/silo/db /data/silo/files /data/silo/backups; do
-  [ -d "$path" ] && [ ! -L "$path" ] || die "Missing provisioned directory: $path"
+  if [ ! -d "$path" ] || [ -L "$path" ]; then die "Missing provisioned directory: $path"; fi
   [ "$(stat -c %u:%g "$path")" = "$SILO_UID:$SILO_GID" ] || die "Unexpected owner on $path"
 done
 previous=''
 if [ -L /opt/silo/current ]; then
   previous=$(readlink -f /opt/silo/current)
   case "$previous" in /opt/silo/releases/*) ;; *) die 'Invalid current release link' ;; esac
-  [ -f "$previous/.env" ] && [ -f "$previous/compose.yaml" ] || die 'Current release is incomplete'
+  if [ ! -f "$previous/.env" ] || [ ! -f "$previous/compose.yaml" ]; then die 'Current release is incomplete'; fi
 elif [ -e /opt/silo/current ]; then
   die '/opt/silo/current must be a release symlink'
 fi
