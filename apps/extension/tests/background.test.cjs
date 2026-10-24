@@ -504,11 +504,12 @@ test("a login saved after sign-in takes the name, folder and username from the s
   const { offer } = await s.page(signIn, { kind: "page_offer" });
   assert.equal(offer.title, "app.example.test");
   assert.equal(offer.folder, "web");
-  const as = { title: "My app", folder: "/apps/", username: " me@example.test " };
+  // Spaces around and doubled slashes are tidied; the vault would refuse them.
+  const as = { title: "My app", folder: "/Work / apps//", username: " me@example.test " };
   const saved = await s.page(signIn, { kind: "page_offer_answer", id: offer.id, answer: { kind: "new", as } });
-  assert.deepEqual({ ...saved }, { kind: "saved", path: "apps/My app", updated: false });
+  assert.deepEqual({ ...saved }, { kind: "saved", path: "Work/apps/My app", updated: false });
   const added = s.entries.find((e) => e.title === "My app");
-  assert.equal(added.folder, "apps");
+  assert.equal(added.folder, "Work/apps");
   assert.equal(added.username, "me@example.test");
   assert.equal(added.password, "secret");
   assert.deepEqual(Array.from(added.urls), ["https://app.example.test"]);
@@ -517,5 +518,5 @@ test("a login saved after sign-in takes the name, folder and username from the s
   await s.page(signIn, { kind: "page_submitted", username: "other", password: "another" });
   const again = (await s.page(signIn, { kind: "page_offer" })).offer;
   const second = await s.page(signIn, { kind: "page_offer_answer", id: again.id, answer: { kind: "new", as } });
-  assert.equal(second.path, "apps/My app (2)");
+  assert.equal(second.path, "Work/apps/My app (2)");
 });

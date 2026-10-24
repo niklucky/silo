@@ -77,15 +77,21 @@ export function VaultList(props: Props) {
   }, [matches]);
 
   // A pasted URL also finds logins for the rest of its site, with the agent's public suffix list.
+  // A reply for an older query is dropped: its hits need not match the words typed since.
   useEffect(() => {
+    setSiteHits([]);
     const url = siteQuery(query);
-    if (!url) return setSiteHits([]);
+    if (!url) return;
+    let live = true;
     const timer = setTimeout(() => {
       call({ method: "match", params: { url, site: true } })
-        .then((reply) => setSiteHits(typeof reply === "object" && "matches" in reply ? reply.matches : []))
-        .catch(() => setSiteHits([]));
+        .then((reply) => live && setSiteHits(typeof reply === "object" && "matches" in reply ? reply.matches : []))
+        .catch(() => live && setSiteHits([]));
     }, 150);
-    return () => clearTimeout(timer);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
   }, [query]);
 
   const results = useMemo(() => {

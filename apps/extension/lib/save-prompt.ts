@@ -45,6 +45,8 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in sr
 .dots small { font-size: 11px; }
 .notice { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0 8px; padding: 8px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 12px; }
 .notice svg.icon { width: 14px; height: 14px; margin-top: 1px; }
+.notice.error { background: var(--error-soft); color: var(--error); }
+.notice[hidden] { display: none; }
 .foot { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
 .foot .grow { flex: 1; }
 .done { display: flex; align-items: center; gap: 10px; }
@@ -63,6 +65,8 @@ export class SavePrompt {
   /** An answer is on its way: further clicks are ignored. */
   private busy = false;
   private submit: (() => void) | null = null;
+  /** Where a failed save says why, keeping the form so the user can fix it. */
+  private problem: HTMLElement | null = null;
 
   constructor(private readonly actions: SavePromptActions) {
     this.host = document.createElement("silo-save-prompt");
@@ -107,9 +111,18 @@ export class SavePrompt {
     if (!this.host.isConnected) document.documentElement.append(this.host);
   }
 
+  /** A save that failed but can be retried: says why under the form and takes clicks again. */
+  fail(message: string) {
+    if (!this.current || !this.problem) return this.note(message, true);
+    this.busy = false;
+    this.problem.replaceChildren(icon("alert"), text("span", "", message));
+    this.problem.hidden = false;
+  }
+
   /** Replaces the panel with a short message (the offer is answered). */
   note(message: string, error = false) {
     this.current = null;
+    this.problem = null;
     this.busy = false;
     this.submit = null;
     const node = document.createElement("div");
@@ -124,6 +137,7 @@ export class SavePrompt {
 
   hide() {
     this.current = null;
+    this.problem = null;
     this.busy = false;
     this.submit = null;
     this.host.remove();
@@ -153,6 +167,7 @@ export class SavePrompt {
     site.append(avatar(host), siteText);
 
     const nodes: HTMLElement[] = [head, site];
+    this.problem = null;
     const foot = document.createElement("div");
     foot.className = "foot";
     const never = this.button("Never for this site", "btn link", () => this.answer({ kind: "never" }));
@@ -201,6 +216,7 @@ export class SavePrompt {
       for (const choice of choices) choice.node.classList.toggle("on", choice.id === next);
       choices.forEach((c) => c.node.setAttribute("aria-checked", String(c.id === next)));
       fields.hidden = next !== "new";
+      if (this.problem) this.problem.hidden = true;
       primary.textContent = next === "new" ? "Save" : "Update";
     };
 
@@ -227,6 +243,12 @@ export class SavePrompt {
       nodes.push(list);
     }
     nodes.push(fields);
+    const problem = document.createElement("div");
+    problem.className = "notice error";
+    problem.setAttribute("role", "alert");
+    problem.hidden = true;
+    nodes.push(problem);
+    this.problem = problem;
 
     this.submit = () => {
       if (target !== "new") return this.answer({ kind: "overwrite", id: target });

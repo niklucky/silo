@@ -87,8 +87,10 @@ export class Menu {
   private readonly box: HTMLDivElement;
   private anchor: HTMLElement | null = null;
   private choices: Choice[] = [];
-  /** Highlighted by the arrow keys or the mouse; -1 until then, so Enter still sends the form. */
+  /** Highlighted by the arrow keys or the mouse; -1 until then. */
   private active = -1;
+  /** The highlight came from the arrow keys: only then does Enter take it rather than send the form. */
+  private armed = false;
   private readonly reposition = () => this.place();
 
   constructor(private readonly actions: MenuActions) {
@@ -114,6 +116,7 @@ export class Menu {
   show(anchor: HTMLElement, content: MenuContent) {
     this.choices = [];
     this.active = -1;
+    this.armed = false;
     this.box.replaceChildren(...this.render(content));
     if (!this.host.isConnected) document.documentElement.append(this.host);
     if (this.anchor !== anchor) {
@@ -137,12 +140,18 @@ export class Menu {
     if (this.choices.length === 0) return false;
     const next = this.active < 0 ? (step > 0 ? 0 : this.choices.length - 1) : this.active + step;
     this.highlight((next + this.choices.length) % this.choices.length);
+    this.armed = true;
     return true;
   }
 
-  /** Enter: runs the highlighted choice, if any. */
+  /** Typing in the field: Enter sends the form again until the arrow keys pick a row. */
+  disarm() {
+    this.armed = false;
+  }
+
+  /** Enter: runs the row picked with the arrow keys, if any. A row under the mouse is not enough. */
   activate(): boolean {
-    const choice = this.choices[this.active];
+    const choice = this.armed ? this.choices[this.active] : undefined;
     if (!choice) return false;
     choice.run();
     return true;
@@ -299,7 +308,9 @@ export class Menu {
     const index = this.choices.length;
     node.setAttribute("role", "option");
     node.addEventListener("mousemove", () => {
-      if (this.active !== index) this.highlight(index);
+      if (this.active === index) return;
+      this.highlight(index);
+      this.armed = false;
     });
     this.choices.push({ node, run });
     return node;

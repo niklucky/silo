@@ -726,7 +726,14 @@ export default defineBackground({
     ): Promise<string> {
       const { host, origin } = new URL(url);
       const base = place?.title.trim() || host;
-      const folder = place ? place.folder.trim().replace(/^\/+|\/+$/g, "") : WEB_FOLDER;
+      // "Work / apps/" as the user typed it: the vault takes "Work/apps".
+      const folder = place
+        ? place.folder
+            .split("/")
+            .map((segment) => segment.trim())
+            .filter(Boolean)
+            .join("/")
+        : WEB_FOLDER;
       const taken = new Set((await agent.list({ folder, exact_folder: true })).map((m) => m.meta.title));
       let title = base;
       for (let n = 2; taken.has(title); n++) title = `${base} (${n})`;

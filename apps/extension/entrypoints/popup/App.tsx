@@ -133,12 +133,24 @@ export default function App() {
 
   /** One field of a login, for the copy buttons in the list. */
   async function copyField(id: string, field: "username" | "password") {
-    try {
-      const reply = await call({ method: "get", params: { selector: id } });
+    const what = field === "username" ? "Username" : "Password";
+    const value = call({ method: "get", params: { selector: id } }).then((reply) => {
       if (typeof reply !== "object" || !("secret" in reply)) throw new Error("bad reply");
       const { body } = reply.secret;
-      if (!("login" in body)) return notify("Not a login", true);
-      copy(body.login[field], field === "username" ? "Username" : "Password");
+      if (!("login" in body)) throw new Error("Not a login");
+      return body.login[field];
+    });
+    if (import.meta.env.SAFARI && typeof ClipboardItem !== "undefined") {
+      // WebKit only lets the click itself write: hand it the value still on its way from the agent.
+      const blob = value.then((text) => new Blob([text], { type: "text/plain" }));
+      navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]).then(
+        () => notify(`${what} copied`),
+        (err: unknown) => notify(`Could not copy: ${errorText(err)}`, true),
+      );
+      return;
+    }
+    try {
+      copy(await value, what);
     } catch (err) {
       notify(errorText(err), true);
     }
@@ -213,6 +225,7 @@ export default function App() {
       {unlocked && screen.name === "detail" && (
         <Detail
           id={screen.id}
+          summary={secrets.find((s) => s.id === screen.id) ?? null}
           canFill={matchIds.has(screen.id)}
           copy={copy}
           back={() => setScreen({ name: "list" })}

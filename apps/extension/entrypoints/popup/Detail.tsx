@@ -3,7 +3,7 @@ import { browser } from "wxt/browser";
 import { Avatar } from "@/components/Avatar";
 import { Icon } from "@/components/Icon";
 import { call } from "@/lib/client";
-import type { SecretView } from "@/lib/protocol";
+import type { SecretSummary, SecretView } from "@/lib/protocol";
 import { isBasicAuth, secretPath } from "@/lib/protocol";
 import { hostsOf } from "@/lib/search";
 import { errorText } from "@/lib/util";
@@ -12,6 +12,8 @@ import { KIND_LABEL, KindIcon } from "./VaultList";
 
 interface Props {
   id: string;
+  /** The item as the list knows it: shown while loading, and if its body cannot be. */
+  summary: SecretSummary | null;
   /** The login matches the tab, so the page can fill it. */
   canFill: boolean;
   copy: Copy;
@@ -20,18 +22,27 @@ interface Props {
   fill: () => void;
 }
 
-export function Detail({ id, canFill, copy, back, edit, fill }: Props) {
+export function Detail({ id, summary, canFill, copy, back, edit, fill }: Props) {
   const [view, setView] = useState<SecretView | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setView(null);
+    setError(null);
     call({ method: "get", params: { selector: id } })
       .then((reply) => {
         if (typeof reply === "object" && "secret" in reply) setView(reply.secret);
         else setError("Unexpected reply from the agent.");
       })
-      .catch((err: unknown) => setError(errorText(err)));
+      .catch((err: unknown) => {
+        const message = errorText(err);
+        // The native host refuses replies over 1 MiB: a big file, say.
+        setError(
+          message.includes("native messaging limit")
+            ? "Too large to open in the browser. Use the silo CLI, e.g. silo file pull."
+            : message,
+        );
+      });
   }, [id]);
 
   useEffect(() => {
@@ -46,6 +57,7 @@ export function Detail({ id, canFill, copy, back, edit, fill }: Props) {
   }, [back]);
 
   const editable = view?.meta.kind === "login";
+  const item = view ?? summary;
 
   return (
     <div className="screen">
@@ -61,30 +73,36 @@ export function Detail({ id, canFill, copy, back, edit, fill }: Props) {
           </button>
         )}
       </div>
-      {error && <p className="notice error">{error}</p>}
-      {view && (
+      {!item && error && <p className="notice error">{error}</p>}
+      {item && (
         <div className="detail">
           <div className="detail-head">
-            {view.meta.kind === "login" ? (
-              <Avatar large label={hostsOf(view.meta)[0] ?? view.meta.title} />
+            {item.meta.kind === "login" ? (
+              <Avatar large label={hostsOf(item.meta)[0] ?? item.meta.title} />
             ) : (
-              <KindIcon large kind={view.meta.kind} />
+              <KindIcon large kind={item.meta.kind} />
             )}
             <div className="detail-title">
-              <h2>{view.meta.title}</h2>
+              <h2>{item.meta.title}</h2>
               <span className="muted">
-                {view.meta.folder ? (
+                {item.meta.folder ? (
                   <>
-                    <Icon name="folder" size={12} /> {view.meta.folder}
+                    <Icon name="folder" size={12} /> {item.meta.folder}
                   </>
                 ) : (
-                  KIND_LABEL[view.meta.kind]
+                  KIND_LABEL[item.meta.kind]
                 )}
               </span>
             </div>
           </div>
-          <Body view={view} copy={copy} />
-          <Meta view={view} />
+          {view ? (
+            <Body view={view} copy={copy} />
+          ) : error ? (
+            <p className="notice error">{error}</p>
+          ) : (
+            <p className="muted">Loading…</p>
+          )}
+          <Meta item={item} />
         </div>
       )}
       {view && canFill && (
@@ -236,15 +254,15 @@ function Website({ pattern }: { pattern: string }) {
   );
 }
 
-function Meta({ view }: { view: SecretView }) {
+function Meta({ item }: { item: SecretSummary }) {
   const items: ReactNode[] = [];
-  for (const tag of view.meta.tags ?? []) items.push(<span key={`t-${tag}`} className="badge">#{tag}</span>);
-  if (isBasicAuth(view.meta)) items.push(<span key="basic" className="badge accent">Basic Auth</span>);
+  for (const tag of item.meta.tags ?? []) items.push(<span key={`t-${tag}`} className="badge">#{tag}</span>);
+  if (isBasicAuth(item.meta)) items.push(<span key="basic" className="badge accent">Basic Auth</span>);
   return (
     <div className="meta">
       {items.length > 0 && <div className="tags">{items}</div>}
-      <span className="muted" title={secretPath(view.meta)}>
-        Updated {new Date(view.meta.updated_at * 1000).toLocaleString()} · revision {view.revision}
+      <span className="muted" title={secretPath(item.meta)}>
+        Updated {new Date(item.meta.updated_at * 1000).toLocaleString()} · revision {item.revision}
       </span>
     </div>
   );
