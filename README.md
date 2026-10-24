@@ -36,6 +36,7 @@ deployment/
   provision.sh             workstation entry point for shared-host preparation
   provision-host.sh        remote implementation; invoked by provision.sh
   backup.sh                online SQLite snapshots, installed as silo-backup
+  github-env.sh            validate and upload production GitHub settings
   nginx/                   only the Silo HTTP/TLS site
   tests/                   isolated Debian provisioning and backup checks
 .github/workflows/         reusable native/container checks, called for PRs and main
@@ -233,9 +234,9 @@ docker volume rm silo-server-test-db
 
 Every PR and push to `main` runs formatting, clippy, native build/tests,
 container health/persistence, and isolated Debian provisioning/backup checks.
-The reusable checks will also gate version tag releases. GitHub secrets setup
-and tag deployment are the next piece; these scripts prepare the host without
-deploying the application.
+The reusable checks will also gate version tag releases. The scripts below
+prepare the host and GitHub production environment. Tag deployment is the
+next piece.
 
 ### Provisioning the shared VPS
 
@@ -329,6 +330,46 @@ The disposable Debian test uses real accounts, nginx validation, private data
 directories and SQLite. Docker/systemd service calls are stubbed. It checks
 reruns, a broken nginx render rolling back without changing another site, and
 an online snapshot containing committed rows that are still in the WAL.
+
+### GitHub deployment settings
+
+After provisioning, validate access and then upload production settings:
+
+```sh
+gh auth login --hostname github.com  # skip if already authenticated
+deployment/github-env.sh --check
+deployment/github-env.sh
+```
+
+The helper reads the same ignored `.env.production`, defaulting to repository
+`niklucky/silo` (`GITHUB_REPO` overrides it). It checks that the unencrypted
+deployment private key works as `silodev` and that this user can access Docker
+and Compose before changing GitHub. `--check` performs read-only checks.
+It works from any directory; paths in the env file are relative to the repo
+root, or absolute.
+
+The `production` environment receives secrets `SSH_HOST`, `SSH_PRIVATE_KEY`
+and `SSH_KNOWN_HOSTS`, plus variables `SSH_USER`, `SSH_PORT`, `DOMAIN`,
+`SERVER_PORT`, `SILO_UID` and `SILO_GID`. The key is read directly from
+`SSH_PRIVATE_KEY_PATH` on stdin; secret values are not printed or put in
+command arguments. Host keys are taken from the already trusted entry for the
+configured host and port in `~/.ssh/known_hosts` (or `SSH_KNOWN_HOSTS_PATH`).
+Hashed entries and non-default SSH ports are supported. A missing, changed or
+revoked host key fails the check; verify a changed key before updating your
+trust store and rerunning the helper.
+
+Reruns overwrite only the listed secrets and variables. Existing environment
+protection rules and unrelated settings are retained. Review the result at
+<https://github.com/niklucky/silo/settings/environments>, or list names without
+reading secret values:
+
+```sh
+gh secret list --repo niklucky/silo --env production
+gh variable list --repo niklucky/silo --env production
+```
+
+Uploading settings does not start a deployment. Version tag releases and the
+SSH deployment workflow are the next implementation piece.
 
 ## Browser extension: HTTP Basic Auth
 
