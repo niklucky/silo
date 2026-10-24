@@ -1,20 +1,15 @@
 import { type FormEvent, useState } from "react";
-import { browser } from "wxt/browser";
-import type { UiRequest, UiResponse } from "@/lib/messages";
-import { describe } from "@/lib/protocol";
+import { Icon, Logo } from "@/components/Icon";
+import { call } from "@/lib/client";
 import { errorText } from "@/lib/util";
 
 /**
  * Small window the form-fill menu opens when the vault is locked. The master
  * password is typed here, never into the web page.
  */
-
-async function send(message: UiRequest): Promise<UiResponse> {
-  return (await browser.runtime.sendMessage(message)) as UiResponse;
-}
-
 export default function App() {
   const [password, setPassword] = useState("");
+  const [shown, setShown] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -23,11 +18,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const response = await send({ kind: "agent", request: { method: "unlock", params: { password } } });
-      if (response.kind === "bridge_error") throw new Error(response.message);
-      if (response.kind === "agent" && "err" in response.response) {
-        throw new Error(describe(response.response.err));
-      }
+      await call({ method: "unlock", params: { password } });
       window.close();
     } catch (err) {
       setError(errorText(err));
@@ -37,20 +28,28 @@ export default function App() {
 
   return (
     <main>
-      <h1>Unlock Silo</h1>
+      <div className="title">
+        <Logo size={28} />
+        <h1>Unlock Silo</h1>
+      </div>
       <form onSubmit={(e) => void unlock(e)}>
-        <label htmlFor="password">Master password</label>
-        <input
-          id="password"
-          type="password"
-          autoFocus
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          disabled={busy}
-        />
+        <div className="input-group">
+          <input
+            type={shown ? "text" : "password"}
+            aria-label="Master password"
+            placeholder="Master password"
+            autoFocus
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={busy}
+          />
+          <button type="button" className="icon-button" title={shown ? "Hide" : "Show"} onClick={() => setShown(!shown)}>
+            <Icon name={shown ? "eyeOff" : "eye"} />
+          </button>
+        </div>
         <button type="submit" className="primary" disabled={busy || password.length === 0}>
-          Unlock
+          {busy ? "Unlocking…" : "Unlock"}
         </button>
         {error && <p className="error">{error}</p>}
       </form>

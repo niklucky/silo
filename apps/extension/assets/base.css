@@ -1,17 +1,69 @@
+/* Shared look of the extension's own pages: popup, options, sign-in and unlock.
+   The UI inside web pages has the same tokens in lib/theme.ts. */
+
 :root {
-  font-family: system-ui, sans-serif;
-  font-size: 13px;
   color-scheme: light dark;
-  --muted: #7a7a7a;
-  --error: #b3261e;
-  --ok: #2e7d32;
-  --line: color-mix(in srgb, currentColor 15%, transparent);
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --bg: #ffffff;
+  --surface: #f4f5f6;
+  --surface-2: #e9ebed;
+  --fg: #16181a;
+  --muted: #687078;
+  --line: #e1e4e7;
+  --accent: #1d7a4c;
+  --accent-hover: #17663f;
+  --accent-fg: #ffffff;
+  --accent-soft: #e2f3e9;
+  --error: #c0392b;
+  --error-soft: #fdecea;
+  --warn: #a86400;
+  --warn-soft: #fff3df;
+  --ok: var(--accent);
+  --radius: 8px;
+  --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--fg);
+  background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17191b;
+    --surface: #202326;
+    --surface-2: #2a2e32;
+    --fg: #eceef0;
+    --muted: #98a0a8;
+    --line: #2f3438;
+    --accent: #3fbf7f;
+    --accent-hover: #5ccd93;
+    --accent-fg: #08180f;
+    --accent-soft: #163122;
+    --error: #ff7b6b;
+    --error-soft: #3a1d1a;
+    --warn: #f0b357;
+    --warn-soft: #3a2b12;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
+  background: var(--bg);
 }
 
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 600;
+}
 p {
   margin: 6px 0;
 }
@@ -28,7 +80,11 @@ pre.error {
   font-size: 12px;
 }
 code {
+  font-family: var(--mono);
   font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface);
   user-select: all;
 }
 
@@ -39,31 +95,237 @@ form {
 }
 label {
   color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
-input {
+input,
+textarea,
+select {
   font: inherit;
-  padding: 6px 8px;
+  width: 100%;
+  padding: 7px 9px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
+  border-radius: var(--radius);
+  background: var(--bg);
   color: inherit;
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus);
+}
+input[type="checkbox"],
+input[type="radio"] {
+  width: auto;
+  accent-color: var(--accent);
+}
+textarea {
+  resize: vertical;
+  min-height: 56px;
+}
+
 button {
   font: inherit;
-  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-radius: var(--radius);
+  background: var(--bg);
   color: inherit;
   cursor: pointer;
-  margin-top: 6px;
+  font-weight: 500;
+  transition: background 0.12s, border-color 0.12s;
+}
+button:hover {
+  background: var(--surface);
+}
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
 }
 button.primary {
-  background: color-mix(in srgb, var(--ok) 85%, currentColor);
+  background: var(--accent);
   border-color: transparent;
-  color: white;
+  color: var(--accent-fg);
+}
+button.primary:hover {
+  background: var(--accent-hover);
+}
+button.ghost {
+  border-color: transparent;
+  background: transparent;
+}
+button.ghost:hover {
+  background: var(--surface);
+}
+button.danger {
+  color: var(--error);
 }
 button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Square icon-only button. */
+.icon-button {
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  flex: none;
+}
+.icon-button:hover {
+  color: var(--fg);
+  background: var(--surface);
+}
+.icon-button.active {
+  color: var(--accent);
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 25%;
+  background: var(--accent);
+  color: var(--accent-fg);
+  flex: none;
+}
+
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  color: #fff;
+  flex: none;
+  text-transform: uppercase;
+}
+.avatar.large {
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  font-size: 19px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.badge.accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.badge.error {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+.notice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 12px;
+}
+.notice.error {
+  background: var(--error-soft);
+  color: var(--error);
+}
+.notice.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.notice .icon {
+  margin-top: 1px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.input-group {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.input-group:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--focus);
+}
+.input-group input {
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  min-width: 0;
+}
+.input-group input:focus {
+  box-shadow: none;
+}
+.input-group .icon-button {
+  margin-right: 2px;
+}
+.mono {
+  font-family: var(--mono);
+}
+
+.meter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.meter .bars {
+  display: inline-flex;
+  gap: 2px;
+}
+.meter .bars i {
+  display: block;
+  width: 16px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+.meter.l1 i.on {
+  background: #d93025;
+}
+.meter.l2 i.on {
+  background: #f29900;
+}
+.meter.l3 i.on {
+  background: #34a853;
+}
+.meter.l4 i.on {
+  background: #188038;
 }

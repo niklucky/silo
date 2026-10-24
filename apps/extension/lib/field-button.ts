@@ -1,3 +1,6 @@
+import { icon } from "./dom";
+import { TOKENS } from "./theme";
+
 /**
  * The small Silo button inside a login field, for the "show button" setting:
  * the menu opens only when it is clicked, which leaves the field's focus to
@@ -7,45 +10,17 @@
 
 const SIZE = 22;
 
-const STYLE = `
-:host { all: initial; }
+const STYLE = `${TOKENS}
 button {
-  all: unset; position: fixed; z-index: 2147483646; box-sizing: border-box;
-  width: ${SIZE}px; height: ${SIZE}px; border-radius: 6px; cursor: pointer;
+  position: fixed; z-index: 2147483646; box-sizing: border-box;
+  width: ${SIZE}px; height: ${SIZE}px; border-radius: 6px;
   display: flex; align-items: center; justify-content: center;
-  color: #2e7d32; background: rgba(255,255,255,.9); border: 1px solid rgba(0,0,0,.15);
+  color: var(--accent-fg); background: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  opacity: .9; transition: opacity .12s, transform .12s;
 }
-button:hover { background: #fff; border-color: #2e7d32; }
-@media (prefers-color-scheme: dark) {
-  button { color: #81c784; background: rgba(43,43,46,.9); border-color: rgba(255,255,255,.2); }
-  button:hover { background: #2b2b2e; border-color: #81c784; }
-}
-svg { width: 14px; height: 14px; }
+button:hover { opacity: 1; transform: scale(1.06); }
+svg.icon { width: 13px; height: 13px; }
 `;
-
-const SVG = "http://www.w3.org/2000/svg";
-
-function keyIcon(): SVGSVGElement {
-  const svg = document.createElementNS(SVG, "svg");
-  const attrs: Record<string, string> = {
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    "stroke-width": "2.4",
-    "stroke-linecap": "round",
-    "stroke-linejoin": "round",
-    "aria-hidden": "true",
-  };
-  for (const [name, value] of Object.entries(attrs)) svg.setAttribute(name, value);
-  const circle = document.createElementNS(SVG, "circle");
-  circle.setAttribute("cx", "8");
-  circle.setAttribute("cy", "15");
-  circle.setAttribute("r", "4");
-  const path = document.createElementNS(SVG, "path");
-  path.setAttribute("d", "M10.8 12.2 20 3M16 7l3 3M14 9l2 2");
-  svg.append(circle, path);
-  return svg;
-}
 
 export class FieldButton {
   private readonly host: HTMLElement;
@@ -63,7 +38,7 @@ export class FieldButton {
     this.button.type = "button";
     this.button.title = "Silo";
     this.button.setAttribute("aria-label", "Open Silo");
-    this.button.append(keyIcon());
+    this.button.append(icon("key", 2.6));
     // Keep focus in the field.
     this.button.addEventListener("mousedown", (event) => event.preventDefault());
     this.button.addEventListener("click", (event) => {

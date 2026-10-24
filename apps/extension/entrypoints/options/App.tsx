@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Logo } from "@/components/Icon";
 import { loadSettings, type Settings, saveSettings, type Trigger } from "@/lib/settings";
 import { errorText } from "@/lib/util";
 
@@ -38,7 +39,10 @@ export default function App() {
 
   return (
     <main>
-      <h1>Silo settings</h1>
+      <div className="title">
+        <Logo size={28} />
+        <h1>Silo settings</h1>
+      </div>
       {settings && (
         <fieldset>
           <legend>Login and password fields</legend>

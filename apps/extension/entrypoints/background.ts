@@ -45,6 +45,8 @@ const MAX_CONFLICTS = 3;
 const OFFER_TTL_MS = 3 * 60_000;
 /** The username from the first step of a two-step sign-in is kept this long for the second. */
 const FIRST_STEP_TTL_MS = 5 * 60_000;
+/** Where logins saved from web pages go unless the user picks another folder. */
+const WEB_FOLDER = "web";
 
 interface Header {
   name: string;
@@ -711,15 +713,26 @@ export default defineBackground({
       return secretPath(updated.meta);
     }
 
-    /** A new login in `web/`, titled after the host (`host (2)` when taken), filling on its origin. */
-    async function addWebLogin(url: string, username: string, password: string, notes: string): Promise<string> {
+    /**
+     * A new login filling on the URL's origin: in `web/`, titled after the host,
+     * unless the user named it. A title already taken in the folder gets ` (2)`.
+     */
+    async function addWebLogin(
+      url: string,
+      username: string,
+      password: string,
+      notes: string,
+      place?: { title: string; folder: string },
+    ): Promise<string> {
       const { host, origin } = new URL(url);
-      const taken = new Set((await agent.list({ folder: "web", exact_folder: true })).map((m) => m.meta.title));
-      let title = host;
-      for (let n = 2; taken.has(title); n++) title = `${host} (${n})`;
+      const base = place?.title.trim() || host;
+      const folder = place ? place.folder.trim().replace(/^\/+|\/+$/g, "") : WEB_FOLDER;
+      const taken = new Set((await agent.list({ folder, exact_folder: true })).map((m) => m.meta.title));
+      let title = base;
+      for (let n = 2; taken.has(title); n++) title = `${base} (${n})`;
       const added = await agent.add({
         title,
-        folder: "web",
+        folder,
         urls: [origin],
         body: { login: { username, password, totp: null, notes } },
       });
@@ -774,7 +787,8 @@ export default defineBackground({
 
     /** What to show for a pending offer, or null when there is nothing to offer (any more). */
     async function offerView(offer: PendingOffer): Promise<SaveOffer | null> {
-      const view = { id: offer.id, host: new URL(offer.url).host, username: offer.username };
+      const { host } = new URL(offer.url);
+      const view = { id: offer.id, host, username: offer.username, title: host, folder: WEB_FOLDER };
       try {
         const logins = await updateTargets(offer);
         return logins && { ...view, locked: false, logins };
@@ -862,7 +876,8 @@ export default defineBackground({
         record({ origin, outcome: "saved", detail: `${path} (updated after sign-in)` });
       } else {
         const notes = `Saved from the browser after signing in on ${new Date().toISOString().slice(0, 10)}.`;
-        path = await addWebLogin(offer.url, offer.username, offer.password, notes);
+        const username = answer.as ? answer.as.username.trim() : offer.username;
+        path = await addWebLogin(offer.url, username, offer.password, notes, answer.as);
         record({ origin, outcome: "saved", detail: path });
       }
       offers.delete(tabId);
@@ -935,8 +950,8 @@ export default defineBackground({
             await browser.windows.create({
               url: browser.runtime.getURL("/unlock.html"),
               type: "popup",
-              width: 360,
-              height: 240,
+              width: 380,
+              height: 260,
             });
             return { kind: "ok" };
         }

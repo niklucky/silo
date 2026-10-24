@@ -74,13 +74,27 @@ export interface SaveOffer {
   /** Host of the page the login was sent from. */
   host: string;
   username: string;
+  /** What a new login would be called and where it would go, for the user to change. */
+  title: string;
+  folder: string;
   /** Unlock first; the background works the offer out again afterwards. */
   locked: boolean;
   /** Logins to update instead of adding one; empty means a plain save. */
   logins: UpdateTarget[];
 }
 
-export type OfferAnswer = SaveChoice | { kind: "dismiss" } | { kind: "never" };
+/** How the save panel names a new login; the background checks and fills in the rest. */
+export interface SaveAs {
+  title: string;
+  folder: string;
+  username: string;
+}
+
+export type OfferAnswer =
+  | { kind: "new"; as?: SaveAs }
+  | { kind: "overwrite"; id: string }
+  | { kind: "dismiss" }
+  | { kind: "never" };
 
 export type UiRequest =
   | { kind: "agent"; request: Request }
