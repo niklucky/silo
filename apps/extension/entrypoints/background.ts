@@ -984,7 +984,7 @@ export default defineBackground({
           try {
             const reply = await agent.call(message.request);
             if (message.request.method === "unlock") badge("");
-            if (message.request.method === "lock") await endAllSessions();
+            if (message.request.method === "lock" || message.request.method === "remove") await endAllSessions();
             return { kind: "agent", response: { ok: reply } };
           } catch (err) {
             if (err instanceof AgentError) {

@@ -225,6 +225,18 @@ button:disabled {
   border-radius: 11px;
   font-size: 19px;
 }
+.avatar.favicon {
+  background: var(--surface);
+}
+.avatar.favicon img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+.avatar.large.favicon img {
+  width: 32px;
+  height: 32px;
+}
 
 .badge {
   display: inline-block;

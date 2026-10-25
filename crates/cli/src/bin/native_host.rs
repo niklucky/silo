@@ -80,12 +80,11 @@ impl Bridge {
     }
 
     fn handle(&mut self, request: &Request) -> Response {
-        // Nothing a browser does needs to delete secrets, read old revisions,
-        // or change where the vault syncs.
+        // Browsers can manage secrets, but cannot read old revisions or
+        // change where the vault syncs.
         if matches!(
             request,
             Request::Shutdown
-                | Request::Remove { .. }
                 | Request::History { .. }
                 | Request::SyncRegister { .. }
                 | Request::SyncLogin { .. }
@@ -265,6 +264,30 @@ mod tests {
         ));
         assert!(matches!(responses[2], Response::Ok(Reply::Unlocked(_))));
         assert!(matches!(&responses[3], Response::Ok(Reply::Matches(m)) if m.is_empty()));
+
+        let add: Request = serde_json::from_value(serde_json::json!({
+            "method": "add",
+            "params": { "title": "popup-delete", "body": { "note": { "text": "test" } } }
+        }))
+        .unwrap();
+        let Response::Ok(Reply::Added(added)) = bridge.handle(&add) else {
+            panic!("browser can add a secret");
+        };
+        let selector = added.id.to_string();
+        assert!(matches!(
+            bridge.handle(&Request::Remove { selector: selector.clone() }),
+            Response::Ok(Reply::Removed(removed)) if removed.id == added.id
+        ));
+        assert!(matches!(
+            bridge.handle(&Request::Get {
+                selector: selector.clone()
+            }),
+            Response::Err(AgentError::NotFound { .. })
+        ));
+        assert!(matches!(
+            bridge.handle(&Request::History { selector }),
+            Response::Err(AgentError::Invalid { .. })
+        ));
 
         Client::connect(paths.socket_file())
             .unwrap()

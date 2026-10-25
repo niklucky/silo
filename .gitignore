@@ -5,6 +5,7 @@
 node_modules/
 dist/
 .output/
+/apps/extension/output/
 .wxt/
 *.local
 *.log

@@ -73,8 +73,8 @@ means that field needs raising.
 | Build WASM + JS glue                   | `pnpm build:wasm`                         |
 | Regenerate desktop TS bindings         | `pnpm bindings:desktop`                   |
 | Desktop app, dev mode                  | `pnpm dev:desktop`                        |
-| Extension, build for Firefox / Zen     | `pnpm --filter @silo/extension build:firefox` → `apps/extension/.output/firefox-mv2` |
-| Extension, build for Chrome            | `pnpm build:extension` → `apps/extension/.output/chrome-mv3` |
+| Extension, build for Firefox / Zen     | `pnpm --filter @silo/extension build:firefox` → `apps/extension/output/firefox-mv2` |
+| Extension, build for Chrome            | `pnpm build:extension` → `apps/extension/output/chrome-mv3` |
 | Extension, build for Safari            | `pnpm build:safari` → `apps/safari/build/Silo for Safari.app` |
 | Extension, dev mode with live reload   | `pnpm --filter @silo/extension dev:firefox` or `pnpm dev:extension` |
 | Basic Auth test server                 | `python3 scripts/basic-auth-server.py` → http://localhost:8099 |
@@ -561,10 +561,10 @@ Load the extension:
 
 - **Zen / Firefox:** `pnpm --filter @silo/extension build:firefox`, open
   `about:debugging#/runtime/this-firefox`, *Load Temporary Add-on*, pick
-  `apps/extension/.output/firefox-mv2/manifest.json`. Temporary add-ons vanish on
+  `apps/extension/output/firefox-mv2/manifest.json`. Temporary add-ons vanish on
   restart; a signed build comes later.
 - **Chrome:** `pnpm build:extension`, open `chrome://extensions`, enable Developer
-  mode, *Load unpacked*, pick `apps/extension/.output/chrome-mv3`. The manifest
+  mode, *Load unpacked*, pick `apps/extension/output/chrome-mv3`. The manifest
   pins a public key so the id is the same on every machine.
 - **Safari:** `pnpm build:safari` builds the extension, wraps it in
   `apps/safari/build/Silo for Safari.app` and opens the app once so Safari
@@ -760,7 +760,7 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
   Run `pnpm bindings:desktop` after changing a command; commit the result.
 - **Extension.** No Rust in the browser: `apps/extension/lib/agent.ts` opens one
   native-messaging port to `silo-native-host`, which forwards each JSON request
-  to the agent socket and refuses `shutdown`, `remove`, `history` and the sync
+  to the agent socket and refuses `shutdown`, `history` and the sync
   setup methods (`sync_register`, `sync_login`, `sync_logout`,
   `sync_revoke_device`). `lib/protocol.ts`
   mirrors the agent's wire types by hand. The extension id and host name live in
@@ -772,7 +772,7 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
   sandbox allows connecting to that socket and nothing else
   (`Extension.entitlements`). It cannot start the agent; run `silo unlock`
   first. The extension files are copied into the app at build time from
-  `apps/extension/.output/safari-mv2`.
+  `apps/extension/output/safari-mv2`.
 - **WASM.** `crates/wasm` exports functions with `#[wasm_bindgen]` and
   `scripts/build-wasm.sh` emits `packages/bindings/wasm/` (gitignored). Nothing
   consumes it today; it stays for hosts without an agent.

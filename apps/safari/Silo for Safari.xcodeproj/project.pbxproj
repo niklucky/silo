@@ -230,7 +230,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nsrc=\"$SRCROOT/../extension/.output/safari-mv2\"\nif [ ! -f \"$src/manifest.json\" ]; then\n  echo \"error: $src is missing; run pnpm build:safari\" >&2\n  exit 1\nfi\nrsync -a --delete \"$src/\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/\"\n";
+			shellScript = "set -e\nsrc=\"$SRCROOT/../extension/output/safari-mv2\"\nif [ ! -f \"$src/manifest.json\" ]; then\n  echo \"error: $src is missing; run pnpm build:safari\" >&2\n  exit 1\nfi\nrsync -a --delete \"$src/\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
