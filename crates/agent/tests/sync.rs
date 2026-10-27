@@ -155,10 +155,14 @@ impl Device {
     }
 
     fn sync(&mut self) -> SyncReport {
-        match self.call(Request::Sync) {
+        let report = match self.call(Request::Sync) {
             Reply::Synced(report) => report,
             other => panic!("{other:?}"),
-        }
+        };
+        // This same-connection request is a barrier after post-write notice
+        // acknowledgment, before tests inspect persistent state directly.
+        self.call(Request::SyncStatus);
+        report
     }
 
     fn add_note(&mut self, path: &str, text: &str) {
@@ -1519,6 +1523,7 @@ fn recovery_notices_survive_failed_uploads(through_sharing: bool) {
                 "the first successful retry must deliver the durable notice"
             );
         }
+        stale.call(Request::SyncStatus);
         assert!(store.read_conflict_notices().unwrap().is_empty());
         assert_eq!(stale.sync(), SyncReport::default());
         alice.sync();
@@ -1601,4 +1606,96 @@ fn file_conflict_notice_is_durable_before_history_cleanup() {
     );
     assert_eq!(file_bytes(&file_snapshot(&mut stale, &id).0), b"A=server\n");
     assert!(store.read_conflict_notices().unwrap().is_empty());
+}
+
+#[test]
+fn canceled_sync_and_sharing_responses_leave_recovery_notices_for_retry() {
+    use std::io::Write;
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    for through_sharing in [false, true] {
+        let server = Server::start();
+        let mut alice = Device::start(true);
+        let mut bob = Device::start(true);
+        alice.register(&server, "alice");
+        bob.register(&server, "bob");
+        connect_verified(&mut alice, &mut bob);
+        let (created, _) = add_file(&mut alice, "api/dev", b"A=initial\n", false);
+        alice.sync();
+        let id = created.id.to_string();
+        let mut stale = Device::start(false);
+        stale.login(&server, "alice");
+        stale.sync();
+        stale.call(Request::VerifyPeer {
+            username: "bob".into(),
+            fingerprint: fingerprint(&bob),
+        });
+        let (_, baseline) = file_snapshot(&mut stale, &id);
+        edit_file(&mut stale, &id, b"A=offline\n", &baseline);
+        let (_, baseline) = file_snapshot(&mut alice, &id);
+        edit_file(&mut alice, &id, b"A=server\n", &baseline);
+        alice.sync();
+        let request = if through_sharing {
+            Request::Share {
+                selector: id.clone(),
+                username: "bob".into(),
+                revoke: false,
+            }
+        } else {
+            Request::Sync
+        };
+        let mut canceled = UnixStream::connect(stale.paths.socket_file()).unwrap();
+        let mut message = serde_json::to_vec(&request).unwrap();
+        message.push(b'\n');
+        canceled.write_all(&message).unwrap();
+        canceled.shutdown(Shutdown::Both).unwrap();
+        drop(canceled);
+        // Wait until the canceled request has actually performed recovery;
+        // list/status reads do not synchronize or consume notices.
+        let copy = (0..200)
+            .find_map(|_| {
+                let Reply::List(list) = stale.call(Request::List(ListFilter::default())) else {
+                    panic!("no list")
+                };
+                let copy = list.into_iter().find(|s| s.local_only);
+                if copy.is_none() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                copy
+            })
+            .expect("canceled request recovered its file conflict");
+        let copy_id = copy.id.to_string();
+        assert_eq!(
+            file_bytes(&file_snapshot(&mut stale, &copy_id).0),
+            b"A=offline\n"
+        );
+        assert_eq!(file_bytes(&file_snapshot(&mut stale, &id).0), b"A=server\n");
+        let report = stale.sync();
+        assert_eq!(
+            report.conflicts.len(),
+            1,
+            "an undelivered response must not acknowledge the recovery path"
+        );
+        assert!(report.conflicts[0].contains(&copy_id));
+        assert!(
+            Store::open(stale.paths.clone())
+                .unwrap()
+                .read_conflict_notices()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            stale.sync(),
+            SyncReport::default(),
+            "a successfully delivered report is acknowledged"
+        );
+        if through_sharing {
+            bob.sync();
+            assert!(
+                bob.try_call(Request::Get { selector: id }).is_err(),
+                "cancellation must not turn conflict recovery into an implicit sharing retry"
+            );
+        }
+    }
 }

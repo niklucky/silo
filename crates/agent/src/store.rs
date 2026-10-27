@@ -114,8 +114,23 @@ impl Store {
         write_json(&self.paths.home().join("conflict-notices.json"), &notices)
     }
 
-    pub fn clear_conflict_notices(&self) -> Result<(), StoreError> {
-        remove_optional(self.paths.home().join("conflict-notices.json"))
+    /// Remove only notices delivered by this report. Callers serialize this
+    /// with sync so an older response cannot clear a newer run's notices.
+    pub fn acknowledge_conflict_notices(&self, delivered: &[String]) -> Result<(), StoreError> {
+        if delivered.is_empty() {
+            return Ok(());
+        }
+        let mut pending = self.read_conflict_notices()?;
+        let before = pending.len();
+        pending.retain(|notice| !delivered.contains(notice));
+        if pending.len() == before {
+            return Ok(());
+        }
+        if pending.is_empty() {
+            remove_optional(self.paths.home().join("conflict-notices.json"))
+        } else {
+            self.write_conflict_notices(&pending)
+        }
     }
 
     /// Loads the latest revision of every secret. Order is unspecified; callers sort.
@@ -350,6 +365,36 @@ mod tests {
         assert_eq!(mode(&paths.account_file()), 0o600);
         assert_eq!(store.read_account().unwrap(), record);
         assert!(!paths.home().join("account.json.tmp").exists());
+    }
+
+    #[test]
+    fn an_older_delivery_acknowledgment_keeps_newer_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Paths::new(dir.path())).unwrap();
+        let first = "api/dev: private conflict copy id first".to_owned();
+        let second = "api/dev: private conflict copy id second".to_owned();
+        store
+            .write_conflict_notices(std::slice::from_ref(&first))
+            .unwrap();
+        let sent = store.read_conflict_notices().unwrap();
+        // A later sync adds another recovery path while the older response is
+        // still being delivered on its socket.
+        store
+            .write_conflict_notices(&[first, second.clone()])
+            .unwrap();
+        store.acknowledge_conflict_notices(&sent).unwrap();
+        let reopened = Store::open(Paths::new(dir.path())).unwrap();
+        assert_eq!(
+            reopened.read_conflict_notices().unwrap().as_slice(),
+            std::slice::from_ref(&second)
+        );
+        reopened.acknowledge_conflict_notices(&sent).unwrap();
+        assert_eq!(
+            reopened.read_conflict_notices().unwrap().as_slice(),
+            std::slice::from_ref(&second)
+        );
+        reopened.acknowledge_conflict_notices(&[second]).unwrap();
+        assert!(reopened.read_conflict_notices().unwrap().is_empty());
     }
 
     #[test]

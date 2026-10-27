@@ -148,8 +148,9 @@ fn handle(stream: UnixStream, shared: &Shared) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
+        let mut delivered_conflicts = Vec::new();
         let response = match serde_json::from_str::<Request>(line.trim_end()) {
-            Ok(request) => dispatch(request, shared),
+            Ok(request) => dispatch(request, shared, &mut delivered_conflicts),
             Err(err) => Response::Err(AgentError::Invalid {
                 message: err.to_string(),
             }),
@@ -157,6 +158,7 @@ fn handle(stream: UnixStream, shared: &Shared) {
         line.zeroize();
 
         let mut out = serde_json::to_vec(&response).unwrap_or_else(|err| {
+            delivered_conflicts.clear();
             serde_json::to_vec(&Response::Err(AgentError::Internal {
                 message: err.to_string(),
             }))
@@ -170,6 +172,13 @@ fn handle(stream: UnixStream, shared: &Shared) {
         {
             break;
         }
+        // The outbox is acknowledged only after this exact report (including
+        // a sharing conflict error) was successfully written and flushed.
+        if let Err(err) = acknowledge_conflicts(shared, &delivered_conflicts) {
+            log(&format!(
+                "could not acknowledge delivered conflict notices: {err}"
+            ));
+        }
         if shared.shutdown.load(Ordering::SeqCst) {
             // Wake the accept loop so `run` can return.
             let _ = UnixStream::connect(&shared.socket);
@@ -178,11 +187,14 @@ fn handle(stream: UnixStream, shared: &Shared) {
     }
 }
 
-fn dispatch(request: Request, shared: &Shared) -> Response {
+fn dispatch(request: Request, shared: &Shared, delivered_conflicts: &mut Vec<String>) -> Response {
     // Requests that go to the sync server run without holding the state lock.
     let result = match request {
         Request::Sync => sync_now(shared)
-            .map(Reply::Synced)
+            .map(|report| {
+                delivered_conflicts.clone_from(&report.conflicts);
+                Reply::Synced(report)
+            })
             .map_err(AgentError::from),
         Request::SyncRegister {
             server,
@@ -231,12 +243,14 @@ fn dispatch(request: Request, shared: &Shared) -> Response {
             selector,
             username,
             revoke,
-        } => share_secret(shared, &selector, &[username], revoke).map_err(AgentError::from),
+        } => share_secret(shared, &selector, &[username], revoke, delivered_conflicts)
+            .map_err(AgentError::from),
         Request::ShareMany {
             selector,
             usernames,
             revoke,
-        } => share_secret(shared, &selector, &usernames, revoke).map_err(AgentError::from),
+        } => share_secret(shared, &selector, &usernames, revoke, delivered_conflicts)
+            .map_err(AgentError::from),
         other => return dispatch_locked(other, shared),
     };
     result.into()
@@ -438,7 +452,14 @@ fn sync_loop(shared: &Shared, nudged: &mpsc::Receiver<()>, interval: Duration) {
             return;
         }
         match sync_now(shared) {
-            Ok(report) => log_report(&report),
+            Ok(report) => {
+                log_report(&report);
+                if let Err(err) = acknowledge_conflicts(shared, &report.conflicts) {
+                    log(&format!(
+                        "could not acknowledge logged conflict notices: {err}"
+                    ));
+                }
+            }
             Err(SyncError::Locked | SyncError::NotConfigured) => {}
             Err(err) => log(&format!("sync failed: {err}")),
         }
@@ -495,6 +516,22 @@ fn sync_now(shared: &Shared) -> Result<SyncReport, SyncError> {
     sync::run(shared, &crate::unix_now)
 }
 
+fn acknowledge_conflicts(
+    shared: &Shared,
+    delivered: &[String],
+) -> Result<(), crate::store::StoreError> {
+    if delivered.is_empty() {
+        return Ok(());
+    }
+    let _running = shared
+        .syncing
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    lock_state(shared)
+        .store
+        .acknowledge_conflict_notices(delivered)
+}
+
 fn invalid(message: impl Into<String>) -> SyncError {
     AgentError::Invalid {
         message: message.into(),
@@ -546,6 +583,7 @@ fn share_secret(
     selector: &str,
     usernames: &[String],
     revoke: bool,
+    delivered_conflicts: &mut Vec<String>,
 ) -> Result<Reply, SyncError> {
     let mut usernames = usernames
         .iter()
@@ -567,6 +605,7 @@ fn share_secret(
     let report = sync::run(shared, &crate::unix_now)?;
     log_report(&report);
     if !report.conflicts.is_empty() {
+        delivered_conflicts.clone_from(&report.conflicts);
         return Err(invalid(format!(
             "sharing was not applied because synchronization found conflicts; review the saved copies before retrying:\n{}",
             report.conflicts.join("\n")

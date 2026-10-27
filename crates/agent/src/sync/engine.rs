@@ -101,7 +101,8 @@ pub trait VaultAccess {
     ) -> Result<R, SyncError>;
 }
 
-/// Runs one sync and records its outcome in the sync state.
+/// Runs one sync and records its outcome in the sync state. The caller must
+/// acknowledge reported conflict notices only after delivering or logging them.
 pub fn run(access: &impl VaultAccess, now: &dyn Fn() -> u64) -> Result<SyncReport, SyncError> {
     let client =
         access.with_vault(|v| Ok(HttpClient::new(&v.state.server)?.with_token(&v.state.token)))?;
@@ -134,13 +135,8 @@ pub fn run(access: &impl VaultAccess, now: &dyn Fn() -> u64) -> Result<SyncRepor
     };
     result.map_err(with_recovery)?;
     recorded.map_err(with_recovery)?;
-    // A later network/storage failure cannot consume a notice. Clear the
-    // durable outbox only after all sync steps and final status persistence
-    // succeeded; the caller receives the accumulated report or an error that
-    // also includes its recovery paths.
-    access
-        .with_vault(|v| Ok(v.store.clear_conflict_notices()?))
-        .map_err(with_recovery)?;
+    // Keep the durable notices until the caller confirms response delivery
+    // or background logging. Completing sync alone does not deliver a report.
     Ok(progress.report)
 }
 

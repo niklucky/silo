@@ -225,8 +225,11 @@ or rejected changes, even though the recoverable copies have been saved.
 Recovery paths are retained locally until a complete sync returns them
 successfully. If a later upload fails, the error still includes those paths and
 they survive retries, agent restarts and logout/login. The next successful sync
-reports the queued notices before clearing them; sharing also surfaces them
-before changing grants. These notices contain paths and ids, not file contents.
+reports the queued notices; the agent acknowledges only the notices in a
+successfully written and flushed socket response. Canceled or failed response
+delivery keeps them queued for retry. Background sync acknowledges notices only
+after logging their recovery paths. Sharing also surfaces them before changing
+grants. These notices contain paths and ids, not file contents.
 
 To exclude a file from an otherwise synced vault permanently:
 
