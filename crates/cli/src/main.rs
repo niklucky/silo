@@ -5,10 +5,12 @@ mod args;
 mod browser;
 mod commands;
 mod edit;
+mod files;
 mod format;
 mod generate;
 mod import;
 mod prompt;
+mod sharing;
 mod sync;
 
 use std::process::ExitCode;

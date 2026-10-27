@@ -165,6 +165,127 @@ adds nothing. `--dry-run` shows the plan, `--folder` and `--tag` place the new
 logins. Rows without a password are skipped. Delete the CSV afterwards: it holds
 every password in plain text.
 
+## Secret files and dotenv
+
+A `.env` is a normal file secret. Files preserve their original bytes, including
+comments, blank lines, duplicate keys, quoting and line endings. There is no
+separate `env` command or special env-file type.
+
+`cargo build` builds into `target/`. Update the installed CLI from the repository
+root and restart its agent with:
+
+```sh
+cargo install --path crates/cli --locked --force
+silo agent stop
+silo unlock
+```
+
+Work with the encrypted local vault, with or without a server:
+
+```sh
+silo add file projects/api/dev .env
+silo edit projects/api/dev --file .env
+silo file pull projects/api/dev -o .env
+silo file pull projects/api/prod -o .env.prod.inspect
+silo history projects/api/dev
+silo restore projects/api/dev --revision 1
+
+# Interpret a file as dotenv only when launching a process.
+silo run --dotenv projects/api/dev -- npm start
+
+# Synchronize the vault with its configured server.
+silo sync
+```
+
+Add, edit and file pull work offline. File pull exports the local vault copy to
+disk; it does not contact the server. With sync configured, background sync
+publishes local changes and receives remote ones. Use `silo sync` before pulling
+a file when you want the latest server revision. Each replacement or restore
+creates a new encrypted revision with a fresh data key, retains history, and
+preserves the current sharing permissions. Silo rotates its encryption keys;
+changing credentials at the services that issued them is a separate operation.
+
+Baselines in `$SILO_HOME/files/` track each local filename, account fingerprint,
+document id, exact sealed revision and content hash; they contain no file values.
+A file edit rejects a stale tracked copy. An untracked source explicitly replaces
+the current local revision. `silo edit projects/api/dev --file .env --force`
+bypasses a stale local baseline while still checking that the vault did not
+change during the request.
+File pull rejects local changes or unrelated existing files; `--force` explicitly
+overwrites them. Writes are atomic with mode 0600; symlink destinations are
+refused. Baselines created by the earlier env commands are recognized too.
+
+When a file changes on two devices, sync keeps the server version and saves all
+local offline revisions as a new, encrypted, **local-only conflict copy**. The
+sync report gives its path and id. Export the conflict copy to inspect or merge,
+then explicitly apply the chosen contents with `silo edit <original> --file FILE`
+and sync again. A server deletion is also retained, with conflicting local file
+edits saved privately. `silo sync` exits unsuccessfully when it reports conflicts
+or rejected changes, even though the recoverable copies have been saved.
+
+To exclude a file from an otherwise synced vault permanently:
+
+```sh
+silo add file personal/local-config .env --local-only
+```
+
+The local-only policy persists across edits, restores, lock/unlock and logout/
+login. These encrypted records and their history live separately in
+`$SILO_HOME/local-vault/`, outside the synced vault directory. Such files and
+their history are never uploaded, do not count as pending sync work, and cannot
+be shared. The policy is shown by `ls` and `get`; JSON
+output includes `local_only: true`. There is no command to change that policy on
+an existing secret; explicitly add a new ordinary file secret to publish a copy.
+
+Existing `silo add env` variable sets remain supported. Their `silo run` and
+`export --format dotenv|shell|json` behavior is unchanged. File secrets require
+`run --dotenv`; their bytes are parsed only at execution time and remain intact
+in storage. Use `file pull` to export raw file contents.
+
+## Sharing with a teammate
+
+Each person uses their own Silo account on the same server. Connect mutually,
+then compare the fingerprints from `silo status` through a trusted channel and
+pin them on each device:
+
+```sh
+# Alice requests; Bob accepts the same way on his machine.
+silo connections request bob          # Alice
+silo connections request alice        # Bob
+silo connections                      # list requests, connections and fingerprints
+
+# Use the full fingerprint supplied by the named teammate.
+silo connections verify bob --fingerprint 'BOBS_FINGERPRINT'       # Alice
+silo connections verify alice --fingerprint 'ALICES_FINGERPRINT'   # Bob
+
+silo share projects/api/dev bob        # Alice; read-only access
+silo sync                              # Bob
+silo file pull projects/api/dev -o .env # Bob
+
+silo share projects/api/dev bob --revoke # Alice; new key, no grant for Bob
+silo connections remove bob             # optional; revoke grants before disconnecting
+```
+
+Sharing publishes a new encrypted revision and wraps its data key separately for
+each recipient. The server never receives plaintext or data keys. Readers see
+only their own grant, and only the owner can replace, delete or re-share the
+secret. The owner can use `share` for other secret kinds too. New owner revisions
+remain shared until revoked; earlier revisions are available only where the
+recipient had a grant.
+
+Connections alone do not establish trust. Shared revisions are ignored until the
+owner's fingerprint is verified. Pins and the original owner of each document
+are retained locally across lock/unlock and login/logout; another verified peer
+cannot replace that owner's signed revisions. Pins are per device, so verify
+again on a new machine. Browser bridges cannot manage connections, pins or
+sharing.
+
+Revocation prevents access to future revisions. Previously downloaded files
+and cached old revisions remain readable through `file pull`, `get` and
+`run --dotenv`. Rotate the underlying service credentials when old values must
+stop working. Conflicting offline file edits remain private until you explicitly
+apply them to the latest revision, preserving the current recipient set.
+
 ## Sync
 
 A `silo-server` keeps the vaults of its accounts in step across devices. It
@@ -204,17 +325,19 @@ What makes it safe to sync through a server you may not fully trust:
   password hashing settings weaker than its own minimum, so a server cannot
   ask for a cheap hash.
 - Every revision, grant and deletion is signed with the account's Ed25519 key.
-  A device accepts only what its own account signed; anything else the server
-  hands out is ignored and counted in `silo sync` output. A revision older than
+  A device accepts revisions only from its own account or an explicitly
+  verified owner, with ownership bound to the document id. Other revisions the
+  server hands out are ignored and counted in `silo sync` output. A revision older than
   one the device has already seen is ignored too.
 - The server knows usernames, device names, how many secrets an account has,
   their sizes and when they change. Nothing else.
 
-Changes made on two devices before they sync are kept, never overwritten. When
-both changed the same secret, the newer edit becomes current and the other one
-stays in history on every device (`silo history`). An edit also beats a
-deletion: deleting on one device while editing on another keeps the edited
-secret. `silo sync` lists every such conflict and which side won.
+Changes made on two devices before they sync are kept. For file secrets, the
+server version or deletion stays current; offline edits and their history become
+a private local-only conflict copy for explicit review. For other secret kinds,
+the newer edit becomes current and the other stays in history on every device
+(`silo history`); an edit also beats a deletion. `silo sync` lists each conflict
+and its recovery path.
 
 A device's history covers what it has seen since it joined; revisions made on
 other devices in between are fetched to fill the gaps.
@@ -805,8 +928,10 @@ anywhere yet. The desktop app still only round-trips `silo_core::version()`.
   pulls, resolves conflicts and pushes in rounds without holding the agent's
   lock during network calls; a background thread runs it while unlocked.
 - **`silo`.** init, unlock, lock, status, agent run/stop, ls, add
-  login/env/file/note, get, edit, restore, import, rm, run, export, file pull, history, match, browser
-  install/uninstall/status, sync register/login/status/devices/logout.
+  login/env/file/note (files can be local-only), get, edit, restore, import, rm,
+  run (files via --dotenv), export, file pull, connections request/verify/remove,
+  share/revoke, history, match,
+  browser install/uninstall/status, sync register/login/status/devices/logout.
   `silo-native-host` bridges browsers to the agent.
 - **`silo-server`.** axum over one SQLite file (`--db`, default
   `silo-server.db`; schema versioned with `user_version`). Accounts are created
@@ -852,7 +977,6 @@ Known gaps:
 - A password change has no command yet. The server keeps a versioned account
   record for it, but devices do not fetch a changed record on their own; `silo
   sync logout` and `login` again picks it up.
-- Secrets shared by other accounts are ignored on pull until sharing lands.
 - The agent does not verify the peer's uid on the socket; it relies on file modes.
 - Killing the agent leaves a stale socket; the next `unlock` cleans it up.
 - The native host forwards passwords typed into the popup to the agent; the
@@ -867,8 +991,7 @@ Next steps, in order:
 1. Card kind on the CLI.
 2. Deploying the server: VPS, TLS proxy, backups.
 3. Extension: signed builds; the Safari extension inside the desktop app.
-4. Sharing end to end: connections and fingerprint checks in the CLI, grants to
-   connected accounts, revocation notices.
+4. Sharing: editor roles and revocation notices for cached copies.
 5. Desktop UI over the agent, then login and card autofill, then mobile.
 
 Hardening still to do: set a real CSP in `tauri.conf.json` (currently `null`, the

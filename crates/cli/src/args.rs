@@ -86,6 +86,9 @@ pub enum Command {
     },
     /// Run a command with one or more env sets injected: silo run api/dev -- npm start
     Run {
+        /// Interpret file secrets as dotenv when injecting variables
+        #[arg(long)]
+        dotenv: bool,
         #[arg(required = true)]
         selectors: Vec<String>,
         #[arg(last = true, required = true)]
@@ -96,6 +99,18 @@ pub enum Command {
         selector: String,
         #[arg(long, value_enum, default_value_t = ExportFormat::Dotenv)]
         format: ExportFormat,
+    },
+    /// Request connections and verify teammate identities before sharing
+    Connections {
+        #[command(subcommand)]
+        command: Option<ConnectionsCommand>,
+    },
+    /// Share a secret read-only, or revoke a teammate's future access
+    Share {
+        selector: String,
+        username: String,
+        #[arg(long)]
+        revoke: bool,
     },
     /// Work with secret files
     File {
@@ -146,6 +161,25 @@ pub enum Command {
     Sync {
         #[command(subcommand)]
         command: Option<SyncCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConnectionsCommand {
+    List,
+    /// Ask to connect, or accept an incoming request
+    Request {
+        username: String,
+    },
+    /// Pin the fingerprint obtained from your teammate's `silo status`
+    Verify {
+        username: String,
+        #[arg(long)]
+        fingerprint: String,
+    },
+    /// Disconnect; existing grants must be revoked separately
+    Remove {
+        username: String,
     },
 }
 
@@ -278,6 +312,9 @@ pub enum AddCommand {
         file: PathBuf,
         #[arg(long)]
         tag: Vec<String>,
+        /// Keep this secret exclusively on this device, including future revisions
+        #[arg(long)]
+        local_only: bool,
     },
     /// Free-form text; read from stdin if --text is omitted
     Note {
@@ -337,6 +374,9 @@ pub struct EditArgs {
     /// File: replace the contents with this file's
     #[arg(long)]
     pub file: Option<PathBuf>,
+    /// Replace a file despite a stale tracked revision
+    #[arg(long, requires = "file")]
+    pub force: bool,
 }
 
 #[derive(Subcommand)]

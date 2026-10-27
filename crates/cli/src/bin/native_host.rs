@@ -90,6 +90,12 @@ impl Bridge {
                 | Request::SyncLogin { .. }
                 | Request::SyncLogout
                 | Request::SyncRevokeDevice { .. }
+                | Request::Connections
+                | Request::Connect { .. }
+                | Request::Disconnect { .. }
+                | Request::VerifyPeer { .. }
+                | Request::Share { .. }
+                | Request::AddLocal(_)
         ) {
             return Response::Err(AgentError::Invalid {
                 message: "this method is not available through the browser".to_owned(),
@@ -288,6 +294,29 @@ mod tests {
             bridge.handle(&Request::History { selector }),
             Response::Err(AgentError::Invalid { .. })
         ));
+        for request in [
+            Request::Connections,
+            Request::Connect {
+                username: "bob".into(),
+            },
+            Request::Disconnect {
+                username: "bob".into(),
+            },
+            Request::VerifyPeer {
+                username: "bob".into(),
+                fingerprint: "untrusted".into(),
+            },
+            Request::Share {
+                selector: "api/dev".into(),
+                username: "bob".into(),
+                revoke: false,
+            },
+        ] {
+            assert!(matches!(
+                bridge.handle(&request),
+                Response::Err(AgentError::Invalid { .. })
+            ));
+        }
 
         Client::connect(paths.socket_file())
             .unwrap()

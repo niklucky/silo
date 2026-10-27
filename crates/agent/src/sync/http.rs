@@ -79,6 +79,26 @@ impl HttpClient {
         self.get(&format!("/v1/changes?since={since}"))
     }
 
+    pub fn connections(&self) -> Result<Vec<silo_core::sync::ConnectionInfo>, SyncError> {
+        self.get::<silo_core::sync::ConnectionsReply>("/v1/connections")
+            .map(|r| r.connections)
+    }
+
+    pub fn connect(&self, username: &str) -> Result<silo_core::sync::ConnectionInfo, SyncError> {
+        let request = self
+            .agent
+            .put(self.url(&format!("/v1/connections/{username}")))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.token.as_deref().unwrap_or_default()),
+            );
+        read(request.send_empty().map_err(network)?)
+    }
+
+    pub fn disconnect(&self, username: &str) -> Result<(), SyncError> {
+        self.send_empty("DELETE", &format!("/v1/connections/{username}"))
+    }
+
     pub fn push(&self, request: &PushRequest) -> Result<PushReply, SyncError> {
         self.post("/v1/push", request)
     }

@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use silo_core::crypto::PublicKey;
-use silo_core::sync::DeviceInfo;
+use silo_core::sync::{ConnectionInfo, DeviceInfo};
 use silo_core::vault::{FolderPath, SecretBody, SecretId, SecretKind, SecretMeta, Tag};
 
 use crate::sync::SyncReport;
@@ -30,8 +30,15 @@ pub enum Request {
         selector: String,
     },
     Add(NewSecret),
+    /// Add a secret that must never leave this device.
+    AddLocal(NewSecret),
     /// Replaces parts of a secret, making a new revision. The old revision is kept.
     Update(SecretUpdate),
+    /// Apply changes only to exactly the sealed revision the client read.
+    UpdateChecked {
+        update: SecretUpdate,
+        expected: String,
+    },
     Remove {
         selector: String,
     },
@@ -78,6 +85,26 @@ pub enum Request {
     SyncDevices,
     SyncRevokeDevice {
         device_id: String,
+    },
+    Connections,
+    Connect {
+        username: String,
+    },
+    Disconnect {
+        username: String,
+    },
+    VerifyPeer {
+        username: String,
+        fingerprint: String,
+    },
+    Share {
+        selector: String,
+        username: String,
+        revoke: bool,
+    },
+    /// Read a file from the local vault and return its exact revision token.
+    FileSnapshot {
+        selector: String,
     },
 }
 
@@ -137,6 +164,8 @@ pub struct SecretUpdate {
 /// A secret without its body: what `list` returns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretSummary {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_only: bool,
     pub id: SecretId,
     pub revision: u32,
     pub meta: SecretMeta,
@@ -152,6 +181,8 @@ impl SecretSummary {
 /// A fully decrypted secret: what `get` returns.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SecretView {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_only: bool,
     pub id: SecretId,
     pub revision: u32,
     pub meta: SecretMeta,
@@ -214,6 +245,15 @@ pub enum Reply {
     },
     Devices(Vec<DeviceInfo>),
     DeviceRevoked,
+    Connections(Vec<ConnectionInfo>),
+    Connection(ConnectionInfo),
+    Disconnected,
+    PeerVerified,
+    Shared(SecretSummary),
+    FileSnapshot {
+        secret: Box<SecretView>,
+        version: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

@@ -570,3 +570,487 @@ fn forged_meta() -> SecretMeta {
         updated_at: 0,
     }
 }
+
+fn file_snapshot(
+    device: &mut Device,
+    selector: &str,
+) -> (silo_agent::protocol::SecretView, String) {
+    match device.call(Request::FileSnapshot {
+        selector: selector.into(),
+    }) {
+        Reply::FileSnapshot { secret, version } => (*secret, version),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+fn new_file(path: &str, data: &[u8]) -> NewSecret {
+    let (folder, title) = path.rsplit_once('/').unwrap_or(("", path));
+    NewSecret {
+        title: title.into(),
+        folder: FolderPath::parse(folder).unwrap(),
+        tags: vec![],
+        urls: vec![],
+        basic_auth: false,
+        body: SecretBody::File(silo_core::vault::File {
+            name: ".env".into(),
+            mime: None,
+            data: data.to_vec(),
+        }),
+    }
+}
+
+fn add_file(
+    device: &mut Device,
+    path: &str,
+    data: &[u8],
+    local_only: bool,
+) -> (silo_agent::protocol::SecretView, String) {
+    let new = new_file(path, data);
+    let Reply::Added(added) = device.call(if local_only {
+        Request::AddLocal(new)
+    } else {
+        Request::Add(new)
+    }) else {
+        panic!("not added")
+    };
+    file_snapshot(device, &added.id.to_string())
+}
+
+fn file_update(selector: &str, data: &[u8]) -> SecretUpdate {
+    SecretUpdate {
+        selector: selector.into(),
+        revision: None,
+        title: None,
+        folder: None,
+        tags: None,
+        urls: None,
+        basic_auth: None,
+        body: Some(new_file("file", data).body),
+    }
+}
+
+fn edit_file(
+    device: &mut Device,
+    selector: &str,
+    data: &[u8],
+    expected: &str,
+) -> (silo_agent::protocol::SecretView, String) {
+    match device.call(Request::UpdateChecked {
+        update: file_update(selector, data),
+        expected: expected.into(),
+    }) {
+        Reply::FileSnapshot { secret, version } => (*secret, version),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+fn file_bytes(view: &silo_agent::protocol::SecretView) -> &[u8] {
+    match &view.body {
+        SecretBody::File(file) => &file.data,
+        _ => panic!("not a file"),
+    }
+}
+
+fn fingerprint(device: &Device) -> String {
+    Store::open(device.paths.clone())
+        .unwrap()
+        .read_account()
+        .unwrap()
+        .unlock(PASSWORD.as_bytes())
+        .unwrap()
+        .fingerprint()
+        .to_string()
+}
+
+fn connect_verified(alice: &mut Device, bob: &mut Device) {
+    alice.call(Request::Connect {
+        username: "bob".into(),
+    });
+    bob.call(Request::Connect {
+        username: "alice".into(),
+    });
+    alice.call(Request::VerifyPeer {
+        username: "bob".into(),
+        fingerprint: fingerprint(bob),
+    });
+    bob.call(Request::VerifyPeer {
+        username: "alice".into(),
+        fingerprint: fingerprint(alice),
+    });
+}
+
+#[test]
+fn files_work_offline_preserve_bytes_rotate_keys_and_reject_stale_replacements() {
+    let mut device = Device::start(true);
+    let original =
+        b"# database\r\nDB_URL='postgres://localhost/test'\r\n\r\nEMPTY=\r\nDUP=one\r\nDUP=two";
+    let (created, initial_version) = add_file(&mut device, "projects/api/dev", original, false);
+    let id = created.id.to_string();
+    assert_eq!(created.revision, 1);
+    assert_eq!(file_bytes(&created), original);
+    let store = Store::open(device.paths.clone()).unwrap();
+    let before = store.load_all().unwrap().remove(0);
+    let keys = store
+        .read_account()
+        .unwrap()
+        .unlock(PASSWORD.as_bytes())
+        .unwrap();
+    let old_key = before.grants[0].open(&keys).unwrap();
+    let replacement = b"# rotated\nDB_URL=postgres://localhost/new\n";
+    let (updated, version) = edit_file(&mut device, &id, replacement, &initial_version);
+    assert_eq!(updated.revision, 2);
+    assert_eq!(file_bytes(&updated), replacement);
+    assert!(
+        store
+            .load_all()
+            .unwrap()
+            .remove(0)
+            .secret
+            .open_body(&old_key)
+            .is_err()
+    );
+    assert!(
+        device
+            .try_call(Request::UpdateChecked {
+                update: file_update(&id, b"must-not-win"),
+                expected: initial_version
+            })
+            .is_err()
+    );
+    let Reply::History(history) = device.call(Request::History {
+        selector: id.clone(),
+    }) else {
+        panic!("no history")
+    };
+    assert_eq!(file_bytes(&history[0]), original);
+    let (empty, _) = edit_file(&mut device, &id, b"", &version);
+    assert_eq!(file_bytes(&empty), b"");
+    // Sync configuration is optional for creation, replacement and reading.
+    assert!(matches!(
+        device.call(Request::SyncStatus),
+        Reply::SyncStatus(None)
+    ));
+    let server = Server::start();
+    device.register(&server, "alice");
+    assert_eq!(device.sync().pushed, 1);
+    let mut other = Device::start(false);
+    other.login(&server, "alice");
+    other.sync();
+    assert_eq!(file_bytes(&file_snapshot(&mut other, &id).0), b"");
+}
+
+#[test]
+fn file_sharing_requires_verified_peers_and_preserves_readonly_access_and_revocation() {
+    let server = Server::start();
+    let mut alice = Device::start(true);
+    let mut bob = Device::start(true);
+    alice.register(&server, "alice");
+    bob.register(&server, "bob");
+    let (created, _) = add_file(&mut alice, "api/prod", b"# prod\nTOKEN=one\n", false);
+    let id = created.id.to_string();
+    alice.call(Request::Connect {
+        username: "bob".into(),
+    });
+    bob.call(Request::Connect {
+        username: "alice".into(),
+    });
+    assert!(
+        alice
+            .try_call(Request::Share {
+                selector: id.clone(),
+                username: "bob".into(),
+                revoke: false
+            })
+            .is_err()
+    );
+    assert!(
+        alice
+            .try_call(Request::VerifyPeer {
+                username: "bob".into(),
+                fingerprint: "wrong".into()
+            })
+            .is_err()
+    );
+    alice.call(Request::VerifyPeer {
+        username: "bob".into(),
+        fingerprint: fingerprint(&bob),
+    });
+    alice.call(Request::Share {
+        selector: id.clone(),
+        username: "bob".into(),
+        revoke: false,
+    });
+    assert_eq!(bob.sync().skipped, 1);
+    assert!(
+        bob.try_call(Request::Get {
+            selector: id.clone()
+        })
+        .is_err()
+    );
+    bob.call(Request::VerifyPeer {
+        username: "alice".into(),
+        fingerprint: fingerprint(&alice),
+    });
+    bob.sync();
+    let (shared, baseline) = file_snapshot(&mut bob, &id);
+    assert_eq!(file_bytes(&shared), file_bytes(&created));
+    assert!(
+        bob.try_call(Request::UpdateChecked {
+            update: file_update(&id, b"unauthorized"),
+            expected: baseline
+        })
+        .is_err()
+    );
+    assert!(
+        bob.try_call(Request::Remove {
+            selector: id.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        bob.try_call(Request::Share {
+            selector: id.clone(),
+            username: "alice".into(),
+            revoke: false
+        })
+        .is_err()
+    );
+    bob.call(Request::Lock);
+    bob.call(Request::Unlock {
+        password: PASSWORD.into(),
+        ttl_secs: None,
+    });
+    assert!(
+        bob.try_call(Request::Update(file_update(&id, b"unauthorized")))
+            .is_err()
+    );
+    assert_eq!(bob.sync().pushed, 0);
+    let (_, baseline) = file_snapshot(&mut alice, &id);
+    edit_file(&mut alice, &id, b"TOKEN=two\n", &baseline);
+    alice.sync();
+    bob.sync();
+    assert_eq!(file_bytes(&file_snapshot(&mut bob, &id).0), b"TOKEN=two\n");
+    alice.call(Request::Share {
+        selector: id.clone(),
+        username: "bob".into(),
+        revoke: true,
+    });
+    let (_, baseline) = file_snapshot(&mut alice, &id);
+    edit_file(&mut alice, &id, b"TOKEN=after-revoke\n", &baseline);
+    alice.sync();
+    bob.sync();
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut bob, &id).0),
+        b"TOKEN=two\n",
+        "old cached copies remain readable"
+    );
+    let current = Store::open(alice.paths.clone())
+        .unwrap()
+        .load_all()
+        .unwrap()
+        .remove(0);
+    let bob_keys = Store::open(bob.paths.clone())
+        .unwrap()
+        .read_account()
+        .unwrap()
+        .unlock(PASSWORD.as_bytes())
+        .unwrap();
+    assert!(
+        current
+            .grants
+            .iter()
+            .all(|g| &g.recipient != bob_keys.public_key())
+    );
+}
+
+#[test]
+fn local_only_files_never_upload_and_keep_their_policy_across_edits_lock_and_relogin() {
+    let server = Server::start();
+    let mut first = Device::start(true);
+    let (private, baseline) = add_file(&mut first, "api/private", b"PRIVATE=one\n", true);
+    let id = private.id.to_string();
+    assert!(private.local_only);
+    let (edited, _) = edit_file(&mut first, &id, b"PRIVATE=two\n", &baseline);
+    assert!(edited.local_only);
+    assert!(!first.paths.vault_dir().join(format!("{id}.json")).exists());
+    assert!(
+        first
+            .paths
+            .home()
+            .join("local-vault")
+            .join(format!("{id}.json"))
+            .exists()
+    );
+    assert!(
+        first
+            .paths
+            .home()
+            .join("local-vault/history")
+            .join(&id)
+            .join("1.json")
+            .exists()
+    );
+    // If an older client rewrites the trust registry, the separate on-disk
+    // location still restores the private policy on the next unlock.
+    let trust_path = first.paths.home().join("trust.json");
+    let mut trust: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&trust_path).unwrap()).unwrap();
+    trust.as_object_mut().unwrap().remove("local_only");
+    std::fs::write(&trust_path, serde_json::to_vec(&trust).unwrap()).unwrap();
+
+    first.register(&server, "alice");
+    add_file(&mut first, "api/shared", b"PUBLIC=one\n", false);
+    let report = first.sync();
+    assert_eq!(report.pushed, 1);
+    let Reply::SyncStatus(Some(status)) = first.call(Request::SyncStatus) else {
+        panic!("no status")
+    };
+    assert_eq!(status.pending, Some(0));
+    first.call(Request::Lock);
+    first.call(Request::Unlock {
+        password: PASSWORD.into(),
+        ttl_secs: None,
+    });
+    assert!(file_snapshot(&mut first, &id).0.local_only);
+    first.call(Request::SyncLogout);
+    first.login(&server, "alice");
+    assert_eq!(first.sync().pushed, 0);
+    assert!(file_snapshot(&mut first, &id).0.local_only);
+    let mut second = Device::start(false);
+    second.login(&server, "alice");
+    second.sync();
+    assert!(
+        second
+            .try_call(Request::Get {
+                selector: id.clone()
+            })
+            .is_err()
+    );
+    let mut bob = Device::start(true);
+    bob.register(&server, "bob");
+    connect_verified(&mut first, &mut bob);
+    assert!(
+        first
+            .try_call(Request::Share {
+                selector: id.clone(),
+                username: "bob".into(),
+                revoke: false
+            })
+            .is_err()
+    );
+    first.call(Request::Remove { selector: id });
+    assert_eq!(first.sync().pushed, 0);
+}
+
+#[test]
+fn file_conflicts_keep_the_server_version_and_all_offline_edits_in_a_private_copy() {
+    let server = Server::start();
+    let mut first = Device::start(true);
+    first.register(&server, "alice");
+    let (created, _) = add_file(&mut first, "api/dev", b"A=initial\n", false);
+    first.sync();
+    let id = created.id.to_string();
+    let mut second = Device::start(false);
+    second.login(&server, "alice");
+    second.sync();
+    let (_, version) = file_snapshot(&mut second, &id);
+    let (_, version) = edit_file(&mut second, &id, b"A=offline-one\n", &version);
+    edit_file(&mut second, &id, b"A=offline-two\n", &version);
+    let (_, version) = file_snapshot(&mut first, &id);
+    edit_file(&mut first, &id, b"A=server\n", &version);
+    first.sync();
+    let report = second.sync();
+    assert_eq!(report.conflicts.len(), 1);
+    assert_eq!(
+        report.pushed, 0,
+        "conflicting contents must never become current on the server"
+    );
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut second, &id).0),
+        b"A=server\n"
+    );
+    let Reply::List(list) = second.call(Request::List(ListFilter::default())) else {
+        panic!("no list")
+    };
+    let copy = list
+        .iter()
+        .find(|s| s.local_only)
+        .expect("private conflict copy");
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut second, &copy.id.to_string()).0),
+        b"A=offline-two\n"
+    );
+    let Reply::History(history) = second.call(Request::History {
+        selector: copy.id.to_string(),
+    }) else {
+        panic!("no history")
+    };
+    assert_eq!(file_bytes(&history[0]), b"A=offline-one\n");
+    assert!(history[0].local_only);
+    first.sync();
+    assert_eq!(file_bytes(&file_snapshot(&mut first, &id).0), b"A=server\n");
+    assert_eq!(second.sync().pushed, 0);
+}
+
+#[test]
+fn owner_deletions_of_shared_files_are_verified_and_propagated() {
+    let server = Server::start();
+    let mut alice = Device::start(true);
+    let mut bob = Device::start(true);
+    alice.register(&server, "alice");
+    bob.register(&server, "bob");
+    connect_verified(&mut alice, &mut bob);
+    let (created, _) = add_file(&mut alice, "api/dev", b"A=1\n", false);
+    let id = created.id.to_string();
+    alice.call(Request::Share {
+        selector: id.clone(),
+        username: "bob".into(),
+        revoke: false,
+    });
+    bob.sync();
+    alice.call(Request::Remove {
+        selector: id.clone(),
+    });
+    alice.sync();
+    assert_eq!(bob.sync().removed, 1);
+    assert!(bob.try_call(Request::Get { selector: id }).is_err());
+}
+
+#[test]
+fn deleting_a_file_remotely_keeps_offline_edits_private_instead_of_restoring_it() {
+    let server = Server::start();
+    let mut first = Device::start(true);
+    first.register(&server, "alice");
+    let (created, _) = add_file(&mut first, "api/dev", b"A=one\n", false);
+    let id = created.id.to_string();
+    first.sync();
+    let mut second = Device::start(false);
+    second.login(&server, "alice");
+    second.sync();
+    let (_, baseline) = file_snapshot(&mut second, &id);
+    edit_file(&mut second, &id, b"A=offline\n", &baseline);
+    first.call(Request::Remove {
+        selector: id.clone(),
+    });
+    first.sync();
+    let report = second.sync();
+    assert_eq!(report.pushed, 0);
+    assert_eq!(report.conflicts.len(), 1);
+    assert!(
+        second
+            .try_call(Request::Get {
+                selector: id.clone()
+            })
+            .is_err()
+    );
+    let Reply::List(list) = second.call(Request::List(ListFilter::default())) else {
+        panic!("no list")
+    };
+    let copy = list.iter().find(|s| s.local_only).unwrap();
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut second, &copy.id.to_string()).0),
+        b"A=offline\n"
+    );
+    first.sync();
+    assert!(first.try_call(Request::Get { selector: id }).is_err());
+}

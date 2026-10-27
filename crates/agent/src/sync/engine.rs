@@ -17,7 +17,7 @@
 //! are renumbered on top of the deleted revision the same way.
 
 use serde::{Deserialize, Serialize};
-use silo_core::crypto::CryptoRng;
+use silo_core::crypto::{CryptoRng, PublicKey};
 use silo_core::sync::{
     Change, HistoryQuery, HistoryRequest, PushItem, PushRequest, PushResult, Tombstone,
 };
@@ -48,8 +48,8 @@ pub struct SyncReport {
     pub conflicts: Vec<String>,
     /// One line per change the server refused.
     pub rejected: Vec<String>,
-    /// Changes from the server that were not signed by this account, or could
-    /// not be opened. Ignored.
+    /// Changes not signed by their trusted owner, or that could not be opened.
+    /// Ignored until the owner is explicitly verified.
     pub skipped: usize,
 }
 
@@ -206,9 +206,10 @@ fn fill_gaps(access: &impl VaultAccess, client: &HttpClient, gaps: Vec<HistoryQu
         let _ = access.with_vault(|v| {
             for stored in reply.revisions {
                 let id = stored.secret.id;
-                if v.session.stored(id).is_some()
+                if !v.session.is_local_only(id)
+                    && v.session.stored(id).is_some()
                     && !v.store.has_archived(id, stored.secret.revision)
-                    && v.session.signed_by_me(&stored)
+                    && v.session.trusted_revision(&stored)
                     && v.session.open_parts(&stored).is_ok()
                 {
                     v.store.archive(&stored)?;
@@ -240,9 +241,12 @@ fn apply_put(
 ) -> Result<(), SyncError> {
     let id = remote.secret.id;
     let revision = remote.secret.revision;
-    // Only what this account wrote counts; anyone holding its public key, the
-    // server included, could have sealed the rest.
-    if !v.session.signed_by_me(&remote) || v.session.open_parts(&remote).is_err() {
+    if v.session.is_local_only(id) {
+        progress.report.skipped += 1;
+        return Ok(());
+    }
+    // Accept only signatures from the bound owner or an explicitly pinned peer.
+    if !v.session.trusted_revision(&remote) || v.session.open_parts(&remote).is_err() {
         progress.report.skipped += 1;
         return Ok(());
     }
@@ -303,6 +307,17 @@ fn apply_put(
         v.state.known.insert(id, revision);
         return Ok(());
     }
+    if !v.session.is_owned(id) {
+        if revision <= local.secret.revision {
+            progress.report.skipped += 1;
+            return Ok(());
+        }
+        progress.gap(id, Some(local.secret.revision), revision);
+        v.session.accept(v.store, remote, true)?;
+        v.state.known.insert(id, revision);
+        progress.report.pulled += 1;
+        return Ok(());
+    }
     if known == Some(local.secret.revision) {
         progress.gap(id, known, revision);
         v.session.accept(v.store, remote, true)?;
@@ -324,6 +339,9 @@ fn resolve_conflict(
     let id = remote.secret.id;
     let base = remote.secret.revision;
     let (theirs_meta, theirs_body) = v.session.open_parts(&remote)?;
+    if matches!(theirs_body, silo_core::vault::SecretBody::File(_)) {
+        return preserve_file_conflict(v, rng, remote, progress);
+    }
 
     let known = v.state.known.get(&id).copied();
     let after = match known {
@@ -334,7 +352,8 @@ fn resolve_conflict(
         None => base,
     };
     progress.gap(id, known, base);
-    let (mine, mine_meta) = rebase_local(v, rng, id, after, base, 1)?;
+    let recipients: Vec<_> = remote.grants.iter().map(|g| g.recipient).collect();
+    let (mine, mine_meta) = rebase_local(v, rng, id, after, base, 1, &recipients)?;
     v.store.archive(&remote)?;
     let outcome = if mine_meta.updated_at > theirs_meta.updated_at {
         "kept yours, theirs is in history"
@@ -351,6 +370,98 @@ fn resolve_conflict(
     Ok(())
 }
 
+/// Keep file conflicts private until the user deliberately publishes a chosen
+/// version. Never temporarily upload stale file contents as the current server
+/// revision while replaying offline history.
+fn preserve_file_conflict(
+    v: &mut Vault<'_>,
+    rng: &mut impl CryptoRng,
+    remote: StoredSecret,
+    progress: &mut Progress,
+) -> Result<(), SyncError> {
+    let id = remote.secret.id;
+    let known = v.state.known.get(&id).copied();
+    let copy = save_local_file_copy(v, rng, id, progress.now)?;
+    let revision = remote.secret.revision;
+    progress.gap(id, known, revision);
+    v.session.accept(v.store, remote, false)?;
+    v.state.known.insert(id, revision);
+    v.state.rejected.remove(&id);
+    progress.report.pulled += 1;
+    progress.report.conflicts.push(format!("{}: kept the server version; local edits and history saved privately as {} (id {}); export that copy to review and apply with `silo edit --file`", path(v, id), copy.path(), copy.id));
+    Ok(())
+}
+
+fn save_local_file_copy(
+    v: &mut Vault<'_>,
+    rng: &mut impl CryptoRng,
+    id: SecretId,
+    now: u64,
+) -> Result<crate::protocol::SecretSummary, SyncError> {
+    use crate::protocol::{NewSecret, SecretUpdate};
+    let known = v.state.known.get(&id).copied();
+    let current = v
+        .session
+        .stored(id)
+        .cloned()
+        .expect("conflicting file exists");
+    let (meta, _) = v.session.open_parts(&current)?;
+    let mut chain: Vec<_> = v
+        .store
+        .history(id)?
+        .into_iter()
+        .filter(|s| {
+            s.secret.revision > known.unwrap_or(0) && s.secret.revision < current.secret.revision
+        })
+        .collect();
+    chain.reverse();
+    chain.push(current);
+    let mut suffix = [0u8; 4];
+    rng.fill_bytes(&mut suffix);
+    let suffix: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
+    let mut copy: Option<crate::protocol::SecretSummary> = None;
+    // Persist every offline revision under a new, private id before replacing
+    // or removing any of the original records.
+    for stored in &chain {
+        let (_, body) = v.session.open_parts(stored)?;
+        copy = Some(match copy {
+            None => v.session.add_local(
+                v.store,
+                rng,
+                now,
+                NewSecret {
+                    title: format!("{} (conflict {suffix})", meta.title),
+                    folder: meta.folder.clone(),
+                    tags: meta.tags.clone(),
+                    urls: meta.urls.clone(),
+                    basic_auth: false,
+                    body,
+                },
+            )?,
+            Some(ref previous) => v.session.update(
+                v.store,
+                rng,
+                now,
+                SecretUpdate {
+                    selector: previous.id.to_string(),
+                    revision: Some(previous.revision),
+                    title: None,
+                    folder: None,
+                    tags: None,
+                    urls: None,
+                    basic_auth: None,
+                    body: Some(body),
+                },
+            )?,
+        });
+    }
+    let copy = copy.expect("chain includes current file");
+    for stored in &chain {
+        v.store.unarchive(id, stored.secret.revision)?;
+    }
+    Ok(copy)
+}
+
 /// Moves the revisions made here after `after` on top of the server's
 /// `base`, oldest first, so none shares a number with a revision from
 /// elsewhere: they become `base + 1`, `base + 2`, … and the newest stays
@@ -363,6 +474,7 @@ fn rebase_local(
     after: u32,
     base: u32,
     spare: u32,
+    recipients: &[PublicKey],
 ) -> Result<(u32, SecretMeta), SyncError> {
     let current = v
         .session
@@ -393,8 +505,16 @@ fn rebase_local(
     for (revision, (meta, body)) in (base + 1..=newest).zip(&opened) {
         // The first replaces the current revision, which is in `opened`
         // already; each later one moves the one before it into history.
-        v.session
-            .reseal(v.store, rng, id, revision, meta, body, revision > base + 1)?;
+        v.session.reseal_for(
+            v.store,
+            rng,
+            id,
+            revision,
+            meta,
+            body,
+            revision > base + 1,
+            recipients,
+        )?;
     }
     let (meta, _) = opened
         .into_iter()
@@ -410,7 +530,11 @@ fn apply_delete(
     progress: &mut Progress,
 ) -> Result<(), SyncError> {
     let id = tombstone.secret_id;
-    if tombstone.verify(&v.session.identity().signing_key).is_err() {
+    if v.session.is_local_only(id) {
+        progress.report.skipped += 1;
+        return Ok(());
+    }
+    if tombstone.verify(&v.session.owner(id).signing_key).is_err() {
         progress.report.skipped += 1;
         return Ok(());
     }
@@ -431,11 +555,23 @@ fn apply_delete(
             progress.report.removed += 1;
         }
         Some(_) => {
+            if v.session.get(&id.to_string())?.meta.kind == silo_core::vault::SecretKind::File {
+                let original = path(v, id);
+                let copy = save_local_file_copy(v, rng, id, progress.now)?;
+                v.session.remove_id(v.store, id)?;
+                v.state.known.remove(&id);
+                progress.report.removed += 1;
+                progress.report.conflicts.push(format!("{original}: kept the server deletion; local file edits saved privately as {} (id {})", copy.path(), copy.id));
+                return Ok(());
+            }
             // Changed here since: the edit wins and goes back up as a restore,
             // on top of the deleted revision.
             progress.gap(id, known, tombstone.revision.saturating_add(1));
             let after = known.unwrap_or(tombstone.revision);
-            rebase_local(v, rng, id, after, tombstone.revision, 0)?;
+            // A tombstone does not carry the latest grants. Restore privately
+            // rather than resurrecting recipients from an obsolete revision.
+            let owner = [*v.session.public_key()];
+            rebase_local(v, rng, id, after, tombstone.revision, 0, &owner)?;
             v.state.deleted_remotely.insert(id, tombstone.revision);
             v.state.known.insert(id, tombstone.revision);
             progress.report.conflicts.push(format!(
@@ -459,6 +595,9 @@ fn plan_push(v: &mut Vault<'_>) -> Result<Vec<PushItem>, SyncError> {
         })
         .collect();
     for (id, current) in v.session.revisions() {
+        if !v.session.is_syncable(id) {
+            continue;
+        }
         let known = v.state.known.get(&id).copied();
         if known == Some(current)
             || known.is_some_and(|k| current < k)
@@ -566,6 +705,9 @@ fn apply_result(
 /// Records that a secret was deleted here, so the next sync deletes it on
 /// the server too if the server has it.
 pub fn record_deletion(state: &mut SyncState, session: &Session, id: SecretId, now: u64) {
+    if !session.is_syncable(id) {
+        return;
+    }
     state.rejected.remove(&id);
     if state.deleted_remotely.remove(&id).is_some() {
         // Already deleted on the server; only the local edit was keeping it.

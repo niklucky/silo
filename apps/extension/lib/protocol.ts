@@ -20,6 +20,7 @@ export interface SecretMeta {
 }
 
 export interface SecretSummary {
+  local_only?: boolean;
   id: string;
   revision: number;
   meta: SecretMeta;

@@ -15,7 +15,14 @@ use crate::commands::{connected, fetch, split_path, tags, unexpected, upsert};
 use crate::{format, generate, prompt};
 
 pub fn run(args: EditArgs) -> Result<()> {
-    let view = fetch(&args.selector)?;
+    let source = args.file.clone();
+    let (view, expected) = if let Some(file) = &source {
+        let (view, version) = crate::files::snapshot(&args.selector)?;
+        let expected = crate::files::expected(file, &view, &version, args.force)?;
+        (view, Some(expected))
+    } else {
+        (fetch(&args.selector)?, None)
+    };
     let changes = if args.is_empty() {
         ask(&view)?
     } else {
@@ -24,10 +31,32 @@ pub fn run(args: EditArgs) -> Result<()> {
     let generated = changes.generated;
     let (update, changed) = apply(&view, changes)?;
     if changed.is_empty() {
+        if let (Some(file), Some(version)) = (source.as_ref(), expected.as_ref()) {
+            crate::files::record(file, &view, version.clone())?;
+        }
         println!("Nothing changed.");
         return Ok(());
     }
-    let summary = send(update)?;
+    let summary = if let Some(expected) = expected {
+        let reply = connected()?.call(&Request::UpdateChecked { update, expected })?;
+        let Reply::FileSnapshot { secret, version } = reply else {
+            return Err(unexpected(reply));
+        };
+        crate::files::record(
+            source.as_ref().expect("file edit has source"),
+            &secret,
+            version,
+        )
+        .context("file was updated, but its baseline could not be saved")?;
+        SecretSummary {
+            id: secret.id,
+            revision: secret.revision,
+            meta: secret.meta,
+            local_only: secret.local_only,
+        }
+    } else {
+        send(update)?
+    };
     let path = summary.path();
     println!(
         "Updated {path}: {} (revision {}; `silo history {path}` keeps the old one)",
@@ -45,6 +74,12 @@ pub fn run(args: EditArgs) -> Result<()> {
 /// Without `revision`, the most recent earlier one: an undo of the last change.
 pub fn restore(selector: &str, revision: Option<u32>) -> Result<()> {
     let current = fetch(selector)?;
+    let (current, expected) = if matches!(current.body, SecretBody::File(_)) {
+        let (view, version) = crate::files::snapshot(&current.id.to_string())?;
+        (view, Some(version))
+    } else {
+        (current, None)
+    };
     let path = current.path();
     let history = match connected()?.call(&Request::History {
         selector: current.id.to_string(),
@@ -74,7 +109,20 @@ pub fn restore(selector: &str, revision: Option<u32>) -> Result<()> {
         );
         return Ok(());
     }
-    let summary = send(update)?;
+    let summary = if let Some(expected) = expected {
+        let reply = connected()?.call(&Request::UpdateChecked { update, expected })?;
+        let Reply::FileSnapshot { secret, .. } = reply else {
+            return Err(unexpected(reply));
+        };
+        SecretSummary {
+            id: secret.id,
+            revision: secret.revision,
+            meta: secret.meta,
+            local_only: secret.local_only,
+        }
+    } else {
+        send(update)?
+    };
     let path = summary.path();
     println!(
         "Restored revision {} of {path}: {} (now revision {}; `silo restore {path}` undoes this)",
@@ -168,6 +216,7 @@ impl EditArgs {
             && self.unset.is_empty()
             && self.text.is_none()
             && self.file.is_none()
+            && !self.force
     }
 }
 
@@ -487,6 +536,7 @@ mod tests {
 
     fn view(body: SecretBody, urls: &[&str], tags: &[&str]) -> SecretView {
         SecretView {
+            local_only: false,
             id: SecretId::from_random_bytes([1; 16]),
             revision: 4,
             meta: SecretMeta {

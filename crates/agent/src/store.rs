@@ -47,6 +47,7 @@ impl Store {
     pub fn open(paths: Paths) -> Result<Self, StoreError> {
         create_private_dir(paths.home())?;
         create_private_dir(&paths.vault_dir())?;
+        create_private_dir(&paths.home().join("local-vault"))?;
         Ok(Self { paths })
     }
 
@@ -96,23 +97,51 @@ impl Store {
         remove_optional(self.paths.sync_baseline_file())
     }
 
+    pub fn read_trust<T: DeserializeOwned>(&self) -> Result<Option<T>, StoreError> {
+        read_optional(&self.paths.home().join("trust.json"))
+    }
+
+    pub fn write_trust<T: Serialize>(&self, trust: &T) -> Result<(), StoreError> {
+        write_json(&self.paths.home().join("trust.json"), trust)
+    }
+
     /// Loads the latest revision of every secret. Order is unspecified; callers sort.
     pub fn load_all(&self) -> Result<Vec<StoredSecret>, StoreError> {
-        json_files(&self.paths.vault_dir())?
-            .iter()
-            .map(|path| read_json(path))
-            .collect()
+        let mut paths = json_files(&self.paths.vault_dir())?;
+        paths.extend(json_files(&self.paths.home().join("local-vault"))?);
+        paths.iter().map(|path| read_json(path)).collect()
     }
 
     pub fn save(&self, stored: &StoredSecret) -> Result<(), StoreError> {
         write_json(&self.entry_path(stored.secret.id), stored)
     }
 
+    /// Private records live outside the directory scanned by sync-only/older
+    /// clients, so their absence from sync does not rely on a registry alone.
+    pub fn save_local(&self, stored: &StoredSecret) -> Result<(), StoreError> {
+        write_json(
+            &self
+                .paths
+                .home()
+                .join("local-vault")
+                .join(format!("{}.json", stored.secret.id)),
+            stored,
+        )
+    }
+
+    pub fn is_local_only(&self, id: SecretId) -> bool {
+        self.paths
+            .home()
+            .join("local-vault")
+            .join(format!("{id}.json"))
+            .is_file()
+    }
+
     /// Removes a secret together with its history.
     pub fn delete(&self, id: SecretId) -> Result<(), StoreError> {
         let path = self.entry_path(id);
-        fs::remove_file(&path).map_err(|source| StoreError::Io { path, source })?;
         let history = self.history_dir(id);
+        fs::remove_file(&path).map_err(|source| StoreError::Io { path, source })?;
         if history.is_dir() {
             fs::remove_dir_all(&history).map_err(|source| StoreError::Io {
                 path: history,
@@ -125,7 +154,7 @@ impl Store {
     /// Keeps a revision that is about to be replaced. It stays sealed as it was.
     pub fn archive(&self, stored: &StoredSecret) -> Result<(), StoreError> {
         let dir = self.history_dir(stored.secret.id);
-        create_private_dir(&self.paths.vault_dir().join(HISTORY_DIR))?;
+        create_private_dir(dir.parent().expect("history has a parent"))?;
         create_private_dir(&dir)?;
         write_json(
             &dir.join(format!("{}.json", stored.secret.revision)),
@@ -160,10 +189,26 @@ impl Store {
     }
 
     fn entry_path(&self, id: SecretId) -> PathBuf {
+        if self.is_local_only(id) {
+            return self
+                .paths
+                .home()
+                .join("local-vault")
+                .join(format!("{id}.json"));
+        }
         self.paths.vault_dir().join(format!("{id}.json"))
     }
 
     fn history_dir(&self, id: SecretId) -> PathBuf {
+        let private = self
+            .paths
+            .home()
+            .join("local-vault")
+            .join(HISTORY_DIR)
+            .join(id.to_string());
+        if self.is_local_only(id) || private.is_dir() {
+            return private;
+        }
         self.paths
             .vault_dir()
             .join(HISTORY_DIR)

@@ -1,8 +1,9 @@
 //! An unlocked vault held in memory: account keys plus one decrypted data key
 //! and metadata per secret. Bodies are decrypted on demand only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use silo_core::AccountKeys;
 use silo_core::account::Identity;
 use silo_core::crypto::{CryptoRng, DataKey, Fingerprint, PublicKey};
@@ -17,6 +18,27 @@ use crate::store::{Store, StoredSecret};
 pub struct Session {
     keys: AccountKeys,
     entries: BTreeMap<SecretId, Entry>,
+    trust: Trust,
+}
+
+/// Local pins are explicit, never populated from server responses. Ownership
+/// bindings survive deletion/logout so a peer cannot take over an existing id.
+#[derive(Default, Serialize, Deserialize)]
+struct Trust {
+    peers: BTreeMap<String, Identity>,
+    owners: BTreeMap<SecretId, Identity>,
+    #[serde(default)]
+    local_only: BTreeSet<SecretId>,
+}
+
+pub fn revision_token(stored: &StoredSecret) -> String {
+    let digest: String = stored
+        .secret
+        .digest()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{}:{}:{digest}", stored.secret.id, stored.secret.revision)
 }
 
 impl std::fmt::Debug for Session {
@@ -32,6 +54,7 @@ struct Entry {
     stored: StoredSecret,
     key: DataKey,
     meta: SecretMeta,
+    local_only: bool,
 }
 
 impl Entry {
@@ -45,11 +68,17 @@ impl Entry {
             })?;
         let key = grant.open(keys)?;
         let meta = stored.secret.open_meta(&key)?;
-        Ok(Self { stored, key, meta })
+        Ok(Self {
+            stored,
+            key,
+            meta,
+            local_only: false,
+        })
     }
 
     fn view(&self) -> Result<SecretView, AgentError> {
         Ok(SecretView {
+            local_only: self.local_only,
             id: self.stored.secret.id,
             revision: self.stored.secret.revision,
             meta: self.meta.clone(),
@@ -59,6 +88,7 @@ impl Entry {
 
     fn summary(&self) -> SecretSummary {
         SecretSummary {
+            local_only: self.local_only,
             id: self.stored.secret.id,
             revision: self.stored.secret.revision,
             meta: self.meta.clone(),
@@ -76,17 +106,44 @@ impl Session {
 
     /// Like [`unlock`](Self::unlock) with keys the caller already has.
     pub fn open(store: &Store, keys: AccountKeys) -> Result<(Self, usize), AgentError> {
+        let mut trust: Trust = store.read_trust()?.unwrap_or_default();
+        let original_owner_count = trust.owners.len();
+        let original_private_count = trust.local_only.len();
         let mut entries = BTreeMap::new();
         let mut skipped = 0;
         for stored in store.load_all()? {
             match Entry::open(stored, &keys) {
-                Ok(entry) => {
+                Ok(mut entry) => {
+                    let id = entry.stored.secret.id;
+                    if store.is_local_only(id) {
+                        trust.local_only.insert(id);
+                    }
+                    entry.local_only = trust.local_only.contains(&id);
+                    // Bind pre-existing local secrets before they can be deleted.
+                    // Unsigned entries are legacy local secrets; imported shared
+                    // entries always have a persisted owner binding and signature.
+                    trust
+                        .owners
+                        .entry(entry.stored.secret.id)
+                        .or_insert(keys.identity());
                     entries.insert(entry.stored.secret.id, entry);
                 }
                 Err(_) => skipped += 1,
             }
         }
-        Ok((Self { keys, entries }, skipped))
+        if trust.owners.len() != original_owner_count
+            || trust.local_only.len() != original_private_count
+        {
+            store.write_trust(&trust)?;
+        }
+        Ok((
+            Self {
+                keys,
+                entries,
+                trust,
+            },
+            skipped,
+        ))
     }
 
     pub fn public_key(&self) -> &PublicKey {
@@ -212,6 +269,7 @@ impl Session {
         update: SecretUpdate,
     ) -> Result<SecretSummary, AgentError> {
         let id = self.resolve(&update.selector)?;
+        self.require_owner(id)?;
         let entry = &self.entries[&id];
         let current = entry.stored.secret.revision;
         if let Some(expected) = update.revision
@@ -290,25 +348,50 @@ impl Session {
         archive_current: bool,
     ) -> Result<StoredSecret, AgentError> {
         let entry = self.entry(id)?;
-        let (sealed, key) = SealedSecret::seal(rng, &self.keys, id, revision, meta, body)?;
-        let mut grants: Vec<Grant> = Vec::new();
+        let mut recipients = Vec::new();
         for grant in entry
             .stored
             .grants
             .iter()
             .filter(|g| g.covers(&entry.stored.secret))
         {
-            if grants.iter().any(|g| g.recipient == grant.recipient) {
-                continue;
+            if !recipients.contains(&grant.recipient) {
+                recipients.push(grant.recipient);
             }
-            grants.push(Grant::seal(
-                rng,
-                &self.keys,
-                &sealed,
-                &key,
-                grant.recipient,
-            )?);
         }
+        self.reseal_for(
+            store,
+            rng,
+            id,
+            revision,
+            meta,
+            body,
+            archive_current,
+            &recipients,
+        )
+    }
+
+    /// Rebase content using the authoritative server recipient set. Offline
+    /// edits must never resurrect a recipient revoked by another device.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reseal_for(
+        &mut self,
+        store: &Store,
+        rng: &mut impl CryptoRng,
+        id: SecretId,
+        revision: u32,
+        meta: &SecretMeta,
+        body: &SecretBody,
+        archive_current: bool,
+        recipients: &[PublicKey],
+    ) -> Result<StoredSecret, AgentError> {
+        self.require_owner(id)?;
+        let entry = self.entry(id)?;
+        let (sealed, key) = SealedSecret::seal(rng, &self.keys, id, revision, meta, body)?;
+        let grants = recipients
+            .iter()
+            .map(|recipient| Grant::seal(rng, &self.keys, &sealed, &key, *recipient))
+            .collect::<Result<Vec<_>, _>>()?;
         let stored = StoredSecret {
             secret: sealed,
             grants,
@@ -323,6 +406,7 @@ impl Session {
                 stored: stored.clone(),
                 key,
                 meta: meta.clone(),
+                local_only: self.is_local_only(id),
             },
         );
         Ok(stored)
@@ -333,7 +417,8 @@ impl Session {
         let id = self.resolve(selector)?;
         let mut out = Vec::new();
         for stored in store.history(id)? {
-            if let Ok(entry) = Entry::open(stored, &self.keys) {
+            if let Ok(mut entry) = Entry::open(stored, &self.keys) {
+                entry.local_only = self.is_local_only(id);
                 out.push(entry.view()?);
             }
         }
@@ -347,6 +432,27 @@ impl Session {
         rng: &mut impl CryptoRng,
         now: u64,
         new: NewSecret,
+    ) -> Result<SecretSummary, AgentError> {
+        self.add_with_policy(store, rng, now, new, false)
+    }
+
+    pub fn add_local(
+        &mut self,
+        store: &Store,
+        rng: &mut impl CryptoRng,
+        now: u64,
+        new: NewSecret,
+    ) -> Result<SecretSummary, AgentError> {
+        self.add_with_policy(store, rng, now, new, true)
+    }
+
+    fn add_with_policy(
+        &mut self,
+        store: &Store,
+        rng: &mut impl CryptoRng,
+        now: u64,
+        new: NewSecret,
+        local_only: bool,
     ) -> Result<SecretSummary, AgentError> {
         let NewSecret {
             title,
@@ -381,9 +487,23 @@ impl Session {
             secret: sealed,
             grants: vec![grant],
         };
-        store.save(&stored)?;
+        self.trust.owners.insert(id, self.identity());
+        if local_only {
+            self.trust.local_only.insert(id);
+        }
+        store.write_trust(&self.trust)?;
+        if local_only {
+            store.save_local(&stored)?;
+        } else {
+            store.save(&stored)?;
+        }
 
-        let entry = Entry { stored, key, meta };
+        let entry = Entry {
+            stored,
+            key,
+            meta,
+            local_only,
+        };
         let summary = entry.summary();
         self.entries.insert(id, entry);
         Ok(summary)
@@ -391,6 +511,7 @@ impl Session {
 
     pub fn remove(&mut self, store: &Store, selector: &str) -> Result<SecretSummary, AgentError> {
         let id = self.resolve(selector)?;
+        self.require_owner(id)?;
         store.delete(id)?;
         let entry = self.entries.remove(&id).expect("resolved ids exist");
         Ok(entry.summary())
@@ -419,6 +540,159 @@ impl Session {
         stored.verify(&self.keys.identity().signing_key).is_ok()
     }
 
+    pub fn is_local_only(&self, id: SecretId) -> bool {
+        self.trust.local_only.contains(&id)
+    }
+
+    pub fn is_syncable(&self, id: SecretId) -> bool {
+        self.is_owned(id) && !self.is_local_only(id)
+    }
+
+    pub fn check_version(&self, selector: &str, expected: &str) -> Result<(), AgentError> {
+        let id = self.resolve(selector)?;
+        if revision_token(&self.entry(id)?.stored) != expected {
+            return Err(AgentError::Invalid { message: "the file changed since this copy was read; export the current file to another path and merge, or use --force to replace it deliberately".into() });
+        }
+        Ok(())
+    }
+
+    pub fn is_owned(&self, id: SecretId) -> bool {
+        self.owner(id) == self.identity()
+    }
+
+    pub fn owner(&self, id: SecretId) -> Identity {
+        self.trust
+            .owners
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| self.identity())
+    }
+
+    pub fn require_owner(&self, id: SecretId) -> Result<(), AgentError> {
+        if !self.is_owned(id) {
+            return Err(AgentError::Invalid { message: "shared secrets are read-only; only their owner can change, share or delete them".into() });
+        }
+        Ok(())
+    }
+
+    /// Bind every revision to its original author, including across restarts.
+    pub fn trusted_revision(&self, stored: &StoredSecret) -> bool {
+        let id = stored.secret.id;
+        if self.trust.owners.contains_key(&id) || self.entries.contains_key(&id) {
+            return stored.verify(&self.owner(id).signing_key).is_ok();
+        }
+        self.signed_by_me(stored)
+            || self
+                .trust
+                .peers
+                .values()
+                .any(|peer| stored.verify(&peer.signing_key).is_ok())
+    }
+
+    pub fn pin_peer(
+        &mut self,
+        store: &Store,
+        server: &str,
+        username: &str,
+        identity: Identity,
+        fingerprint: &str,
+    ) -> Result<(), AgentError> {
+        if identity.fingerprint().to_string() != fingerprint.trim() {
+            return Err(AgentError::Invalid {
+                message: "fingerprint does not match; compare with your teammate's `silo status`"
+                    .into(),
+            });
+        }
+        let key = format!("{server}|{username}");
+        if self
+            .trust
+            .peers
+            .get(&key)
+            .is_some_and(|old| old != &identity)
+        {
+            return Err(AgentError::Invalid {
+                message: "this peer's identity changed; the existing fingerprint pin was retained"
+                    .into(),
+            });
+        }
+        self.trust.peers.insert(key, identity);
+        store.write_trust(&self.trust)?;
+        Ok(())
+    }
+
+    pub fn peer(&self, server: &str, username: &str) -> Result<Identity, AgentError> {
+        self.trust
+            .peers
+            .get(&format!("{server}|{username}"))
+            .copied()
+            .ok_or_else(|| AgentError::Invalid {
+                message: format!(
+                    "verify {username}'s fingerprint first with `silo connections verify`"
+                ),
+            })
+    }
+
+    pub fn prepare_share(
+        &self,
+        rng: &mut impl CryptoRng,
+        now: u64,
+        selector: &str,
+        recipient: PublicKey,
+        revoke: bool,
+    ) -> Result<(u32, StoredSecret), AgentError> {
+        let id = self.resolve(selector)?;
+        self.require_owner(id)?;
+        if self.is_local_only(id) {
+            return Err(AgentError::Invalid {
+                message: "local-only secrets cannot be shared".into(),
+            });
+        }
+        if recipient == *self.public_key() {
+            return Err(AgentError::Invalid {
+                message: "cannot change the owner's grant".into(),
+            });
+        }
+        let entry = self.entry(id)?;
+        let mut recipients: Vec<_> = entry
+            .stored
+            .grants
+            .iter()
+            .map(|g| g.recipient)
+            .filter(|r| *r != recipient)
+            .collect();
+        if !revoke {
+            recipients.push(recipient);
+        }
+        let mut meta = entry.meta.clone();
+        meta.updated_at = now;
+        let base = entry.stored.secret.revision;
+        let body = entry.stored.secret.open_body(&entry.key)?;
+        Ok((
+            base,
+            self.prepare_revision(rng, id, base, &meta, &body, &recipients)?,
+        ))
+    }
+
+    fn prepare_revision(
+        &self,
+        rng: &mut impl CryptoRng,
+        id: SecretId,
+        base: u32,
+        meta: &SecretMeta,
+        body: &SecretBody,
+        recipients: &[PublicKey],
+    ) -> Result<StoredSecret, AgentError> {
+        let revision = base.checked_add(1).ok_or_else(|| AgentError::Invalid {
+            message: "revision limit reached".into(),
+        })?;
+        let (secret, key) = SealedSecret::seal(rng, &self.keys, id, revision, meta, body)?;
+        let grants = recipients
+            .iter()
+            .map(|recipient| Grant::seal(rng, &self.keys, &secret, &key, *recipient))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredSecret { secret, grants })
+    }
+
     /// Decrypts a revision this account holds a grant for.
     pub fn open_parts(
         &self,
@@ -437,6 +711,31 @@ impl Session {
         stored: StoredSecret,
         archive_current: bool,
     ) -> Result<(), AgentError> {
+        if self.is_local_only(stored.secret.id) {
+            return Err(AgentError::Invalid {
+                message: "a remote revision cannot replace a local-only secret".into(),
+            });
+        }
+        if !self.trusted_revision(&stored) {
+            return Err(AgentError::Invalid {
+                message: "revision is not signed by its trusted owner".into(),
+            });
+        }
+        let id = stored.secret.id;
+        if !self.trust.owners.contains_key(&id) {
+            let owner = if self.signed_by_me(&stored) {
+                self.identity()
+            } else {
+                *self
+                    .trust
+                    .peers
+                    .values()
+                    .find(|peer| stored.verify(&peer.signing_key).is_ok())
+                    .expect("trusted above")
+            };
+            self.trust.owners.insert(id, owner);
+            store.write_trust(&self.trust)?;
+        }
         let entry = Entry::open(stored, &self.keys)?;
         let id = entry.stored.secret.id;
         if archive_current && let Some(current) = self.entries.get(&id) {
@@ -462,6 +761,7 @@ impl Session {
         store: &Store,
         mut stored: StoredSecret,
     ) -> Result<StoredSecret, AgentError> {
+        self.require_owner(stored.secret.id)?;
         if self.signed_by_me(&stored) {
             return Ok(stored);
         }
@@ -997,6 +1297,75 @@ mod tests {
 
         session.remove(&store, "web/cutstory").unwrap();
         assert!(store.history(added.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn verified_peers_cannot_replace_another_owners_document_even_after_restart() {
+        let (_dir, store, mut rng) = setup();
+        let (mut session, _) = Session::unlock(&store, b"pw").unwrap();
+        let kdf = KdfParams::new(&mut rng, 256, 1, 1);
+        let (_, bob) = AccountRecord::create(&mut rng, b"bob", kdf).unwrap();
+        let kdf = KdfParams::new(&mut rng, 256, 1, 1);
+        let (_, carol) = AccountRecord::create(&mut rng, b"carol", kdf).unwrap();
+        for (name, peer) in [("bob", &bob), ("carol", &carol)] {
+            session
+                .pin_peer(
+                    &store,
+                    "https://example.test",
+                    name,
+                    peer.identity(),
+                    &peer.fingerprint().to_string(),
+                )
+                .unwrap();
+        }
+        // A server swapping either public key cannot replace a saved pin.
+        assert!(
+            session
+                .pin_peer(
+                    &store,
+                    "https://example.test",
+                    "bob",
+                    carol.identity(),
+                    &carol.fingerprint().to_string()
+                )
+                .is_err()
+        );
+        let id = SecretId::from_random_bytes([12; 16]);
+        let new = note("api/env", "original", &[]);
+        let meta = SecretMeta {
+            title: new.title,
+            folder: new.folder,
+            kind: SecretKind::Note,
+            tags: vec![],
+            urls: vec![],
+            basic_auth: false,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let (secret, key) = SealedSecret::seal(&mut rng, &bob, id, 1, &meta, &new.body).unwrap();
+        let grant = Grant::seal(&mut rng, &bob, &secret, &key, *session.public_key()).unwrap();
+        session
+            .accept(
+                &store,
+                StoredSecret {
+                    secret,
+                    grants: vec![grant],
+                },
+                false,
+            )
+            .unwrap();
+        let (secret, key) = SealedSecret::seal(&mut rng, &carol, id, 2, &meta, &new.body).unwrap();
+        let grant = Grant::seal(&mut rng, &carol, &secret, &key, *session.public_key()).unwrap();
+        let forged = StoredSecret {
+            secret,
+            grants: vec![grant],
+        };
+        assert!(!session.trusted_revision(&forged));
+        assert!(session.accept(&store, forged.clone(), true).is_err());
+        session.remove_id(&store, id).unwrap();
+        let (mut reloaded, _) = Session::unlock(&store, b"pw").unwrap();
+        assert!(!reloaded.trusted_revision(&forged));
+        assert!(reloaded.accept(&store, forged, false).is_err());
     }
 
     #[test]

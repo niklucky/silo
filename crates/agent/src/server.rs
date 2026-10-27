@@ -56,6 +56,9 @@ struct Shared {
     nudge: Option<mpsc::Sender<()>>,
     /// Held for a whole sync run, so runs never overlap.
     syncing: Mutex<()>,
+    /// Serializes local mutations only while an explicit document publish is
+    /// in progress. Background sync still allows concurrent local edits.
+    mutating: Mutex<()>,
 }
 
 /// Runs the agent until a `shutdown` request arrives. Blocks the calling thread.
@@ -97,6 +100,7 @@ pub fn run(config: Config) -> io::Result<()> {
         socket: socket.clone(),
         nudge,
         syncing: Mutex::new(()),
+        mutating: Mutex::new(()),
     });
     if let (Some(interval), Some(nudged)) = (config.sync_interval, nudged) {
         let shared = Arc::clone(&shared);
@@ -209,12 +213,48 @@ fn dispatch(request: Request, shared: &Shared) -> Response {
         Request::SyncRevokeDevice { device_id } => {
             sync_revoke(shared, &device_id).map_err(AgentError::from)
         }
+        Request::Connections => sync_client(shared)
+            .and_then(|(c, _)| c.connections())
+            .map(Reply::Connections)
+            .map_err(AgentError::from),
+        Request::Connect { username } => {
+            peer_request(shared, &username, false).map_err(AgentError::from)
+        }
+        Request::Disconnect { username } => {
+            peer_request(shared, &username, true).map_err(AgentError::from)
+        }
+        Request::VerifyPeer {
+            username,
+            fingerprint,
+        } => verify_peer(shared, &username, &fingerprint).map_err(AgentError::from),
+        Request::Share {
+            selector,
+            username,
+            revoke,
+        } => share_secret(shared, &selector, &username, revoke).map_err(AgentError::from),
         other => return dispatch_locked(other, shared),
     };
     result.into()
 }
 
 fn dispatch_locked(request: Request, shared: &Shared) -> Response {
+    // Serialize writes with explicit CAS publishes. Reads and lock/expiry remain
+    // available while network operations run without the state lock.
+    let local_only = matches!(&request, Request::AddLocal(_));
+    let _mutation = matches!(
+        &request,
+        Request::Add(_)
+            | Request::AddLocal(_)
+            | Request::Update(_)
+            | Request::UpdateChecked { .. }
+            | Request::Remove { .. }
+    )
+    .then(|| {
+        shared
+            .mutating
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    });
     let mut state = lock_state(shared);
     state.expire_if_needed();
     let result = match request {
@@ -248,28 +288,42 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
             .session()
             .and_then(|session| session.get(&selector))
             .map(Reply::Secret),
-        Request::Add(new) => {
+        Request::Add(new) | Request::AddLocal(new) => {
             let now = crate::unix_now();
             let mut rng = rand::rng();
             let State { store, session, .. } = &mut *state;
             session
                 .as_mut()
                 .ok_or(AgentError::Locked)
-                .and_then(|s| s.add(store, &mut rng, now, new))
+                .and_then(|s| {
+                    if local_only {
+                        s.add_local(store, &mut rng, now, new)
+                    } else {
+                        s.add(store, &mut rng, now, new)
+                    }
+                })
                 .map(Reply::Added)
                 .inspect(|_| nudge(shared))
         }
-        Request::Update(update) => {
-            let now = crate::unix_now();
-            let mut rng = rand::rng();
-            let State { store, session, .. } = &mut *state;
-            session
-                .as_mut()
-                .ok_or(AgentError::Locked)
-                .and_then(|s| s.update(store, &mut rng, now, update))
-                .map(Reply::Updated)
-                .inspect(|_| nudge(shared))
+        Request::Update(update) => update_local(&mut state, shared, update, None),
+        Request::UpdateChecked { update, expected } => {
+            update_local(&mut state, shared, update, Some(&expected))
         }
+        Request::FileSnapshot { selector } => state.session().and_then(|session| {
+            let secret = session.get(&selector)?;
+            if !matches!(secret.body, silo_core::vault::SecretBody::File(_)) {
+                return Err(AgentError::Invalid {
+                    message: "this secret is not a file".into(),
+                });
+            }
+            let version = crate::session::revision_token(
+                session.stored(secret.id).expect("resolved file exists"),
+            );
+            Ok(Reply::FileSnapshot {
+                secret: Box::new(secret),
+                version,
+            })
+        }),
         Request::Remove { selector } => {
             let now = crate::unix_now();
             let State {
@@ -321,9 +375,40 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
         | Request::SyncLogin { .. }
         | Request::SyncLogout
         | Request::SyncDevices
-        | Request::SyncRevokeDevice { .. } => unreachable!("handled in dispatch"),
+        | Request::SyncRevokeDevice { .. }
+        | Request::Connections
+        | Request::Connect { .. }
+        | Request::Disconnect { .. }
+        | Request::VerifyPeer { .. }
+        | Request::Share { .. } => unreachable!("handled in dispatch"),
     };
     result.into()
+}
+
+fn update_local(
+    state: &mut State,
+    shared: &Shared,
+    update: crate::protocol::SecretUpdate,
+    expected: Option<&str>,
+) -> Result<Reply, AgentError> {
+    let State { store, session, .. } = state;
+    let session = session.as_mut().ok_or(AgentError::Locked)?;
+    if let Some(expected) = expected {
+        session.check_version(&update.selector, expected)?;
+    }
+    let summary = session.update(store, &mut rand::rng(), crate::unix_now(), update)?;
+    nudge(shared);
+    if expected.is_some() && summary.meta.kind == silo_core::vault::SecretKind::File {
+        let version = crate::session::revision_token(
+            session.stored(summary.id).expect("updated file exists"),
+        );
+        Ok(Reply::FileSnapshot {
+            secret: Box::new(session.get(&summary.id.to_string())?),
+            version,
+        })
+    } else {
+        Ok(Reply::Updated(summary))
+    }
 }
 
 fn nudge(shared: &Shared) {
@@ -402,6 +487,140 @@ fn sync_now(shared: &Shared) -> Result<SyncReport, SyncError> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     sync::run(shared, &crate::unix_now)
+}
+
+fn invalid(message: impl Into<String>) -> SyncError {
+    AgentError::Invalid {
+        message: message.into(),
+    }
+    .into()
+}
+
+fn peer_request(shared: &Shared, username: &str, remove: bool) -> Result<Reply, SyncError> {
+    let username = silo_core::sync::normalize_username(username)?;
+    let _running = shared
+        .syncing
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let (client, _) = sync_client(shared)?;
+    if remove {
+        client.disconnect(&username)?;
+        Ok(Reply::Disconnected)
+    } else {
+        Ok(Reply::Connection(client.connect(&username)?))
+    }
+}
+
+fn verify_peer(shared: &Shared, username: &str, fingerprint: &str) -> Result<Reply, SyncError> {
+    let username = silo_core::sync::normalize_username(username)?;
+    let _running = shared
+        .syncing
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let (client, _) = sync_client(shared)?;
+    let peer = client
+        .connections()?
+        .into_iter()
+        .find(|p| p.username == username)
+        .and_then(|p| p.identity)
+        .ok_or_else(|| invalid("accept the mutual connection before verifying its fingerprint"))?;
+    shared.with_vault(|v| {
+        v.session
+            .pin_peer(v.store, &v.state.server, &username, peer, fingerprint)?;
+        // A previously skipped shared secret may precede our current cursor.
+        v.state.cursor = 0;
+        v.save()
+    })?;
+    nudge(shared);
+    Ok(Reply::PeerVerified)
+}
+
+fn share_secret(
+    shared: &Shared,
+    selector: &str,
+    username: &str,
+    revoke: bool,
+) -> Result<Reply, SyncError> {
+    let username = silo_core::sync::normalize_username(username)?;
+    let _running = shared
+        .syncing
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let _mutation = shared
+        .mutating
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    sync::run(shared, &crate::unix_now)?;
+    let (client, _) = sync_client(shared)?;
+    let peer = shared.with_vault(|v| Ok(v.session.peer(&v.state.server, &username)?))?;
+    if !revoke {
+        let connected = client
+            .connections()?
+            .into_iter()
+            .any(|p| p.username == username && p.identity == Some(peer));
+        if !connected {
+            return Err(invalid(
+                "the connection or verified identity changed; refusing to share",
+            ));
+        }
+    }
+    let (base, candidate) = shared.with_vault(|v| {
+        Ok(v.session.prepare_share(
+            &mut rand::rng(),
+            crate::unix_now(),
+            selector,
+            peer.public_key,
+            revoke,
+        )?)
+    })?;
+    let view = publish(shared, &client, base, candidate)?;
+    Ok(Reply::Shared(crate::protocol::SecretSummary {
+        local_only: false,
+        id: view.id,
+        revision: view.revision,
+        meta: view.meta,
+    }))
+}
+
+/// Only persist an explicit replacement after the server accepted its exact
+/// base. A failed/network-ambiguous publish leaves the user's input untouched.
+fn publish(
+    shared: &Shared,
+    client: &HttpClient,
+    base: u32,
+    candidate: silo_core::vault::StoredSecret,
+) -> Result<crate::protocol::SecretView, SyncError> {
+    use silo_core::sync::{PushItem, PushRequest, PushResult};
+    let id = candidate.secret.id;
+    shared.with_vault(|v| {
+        if v.state.known.get(&id).copied().unwrap_or(0) != base {
+            return Err(invalid("the document still has unsynchronized local changes; sync it before replacing or sharing it"));
+        }
+        Ok(())
+    })?;
+    let reply = client.push(&PushRequest {
+        items: vec![PushItem::Put {
+            base_revision: base,
+            entry: candidate.clone(),
+            restore: false,
+        }],
+    })?;
+    match reply.results.as_slice() {
+        [PushResult::Ok { .. }] => shared.with_vault(|v| {
+            v.session.accept(v.store, candidate, true)?;
+            v.state.known.insert(id, base + 1);
+            v.state.rejected.remove(&id);
+            v.save()?;
+            Ok(v.session.get(&id.to_string())?)
+        }),
+        [PushResult::Conflict { .. }] => Err(invalid(
+            "the server document changed during this operation; pull again before retrying",
+        )),
+        [PushResult::Rejected { message }] => {
+            Err(invalid(format!("server refused the change: {message}")))
+        }
+        _ => Err(SyncError::Protocol("expected one publish result".into())),
+    }
 }
 
 fn sync_register(
@@ -605,7 +824,8 @@ impl State {
                 .revisions()
                 .iter()
                 .filter(|(id, revision)| {
-                    sync.known.get(id) != Some(revision)
+                    session.is_syncable(*id)
+                        && sync.known.get(id) != Some(revision)
                         && sync
                             .rejected
                             .get(id)
