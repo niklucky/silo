@@ -1054,3 +1054,154 @@ fn deleting_a_file_remotely_keeps_offline_edits_private_instead_of_restoring_it(
     first.sync();
     assert!(first.try_call(Request::Get { selector: id }).is_err());
 }
+
+#[test]
+fn revocation_publishes_pending_content_after_the_recipient_disconnects() {
+    let server = Server::start();
+    let mut alice = Device::start(true);
+    let mut bob = Device::start(true);
+    alice.register(&server, "alice");
+    bob.register(&server, "bob");
+    connect_verified(&mut alice, &mut bob);
+    let (created, _) = add_file(&mut alice, "api/dev", b"A=initial\n", false);
+    let id = created.id.to_string();
+    alice.call(Request::Share {
+        selector: id.clone(),
+        username: "bob".into(),
+        revoke: false,
+    });
+    bob.sync();
+    bob.call(Request::Disconnect {
+        username: "alice".into(),
+    });
+    let (_, baseline) = file_snapshot(&mut alice, &id);
+    let (_, baseline) = edit_file(&mut alice, &id, b"A=pending-one\n", &baseline);
+    let (latest, _) = edit_file(&mut alice, &id, b"A=pending-two\n", &baseline);
+    assert!(
+        !alice.sync().rejected.is_empty(),
+        "old grants prevent ordinary sync after disconnection"
+    );
+    let reply = alice.call(Request::Share {
+        selector: id.clone(),
+        username: "bob".into(),
+        revoke: true,
+    });
+    let Reply::Shared(revoked) = reply else {
+        panic!("revocation did not complete")
+    };
+    assert_eq!(revoked.revision, latest.revision + 1);
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut alice, &id).0),
+        b"A=pending-two\n"
+    );
+    let Reply::History(history) = alice.call(Request::History {
+        selector: id.clone(),
+    }) else {
+        panic!("no history")
+    };
+    assert!(history.iter().any(|v| file_bytes(v) == b"A=pending-one\n"));
+    assert!(history.iter().any(|v| file_bytes(v) == b"A=pending-two\n"));
+    assert_eq!(
+        alice.sync(),
+        SyncReport::default(),
+        "the actual published revision must be acknowledged, not base + 1"
+    );
+    let Reply::SyncStatus(Some(status)) = alice.call(Request::SyncStatus) else {
+        panic!("no sync status")
+    };
+    assert_eq!(status.pending, Some(0));
+    assert!(status.rejected.is_empty());
+    let mut another_owner = Device::start(false);
+    another_owner.login(&server, "alice");
+    another_owner.sync();
+    let (remote, _) = file_snapshot(&mut another_owner, &id);
+    assert_eq!(file_bytes(&remote), b"A=pending-two\n");
+    assert_eq!(remote.revision, revoked.revision);
+    bob.sync();
+    assert_eq!(file_bytes(&file_snapshot(&mut bob, &id).0), b"A=initial\n");
+    let bob_keys = Store::open(bob.paths.clone())
+        .unwrap()
+        .read_account()
+        .unwrap()
+        .unlock(PASSWORD.as_bytes())
+        .unwrap();
+    let current = Store::open(alice.paths.clone())
+        .unwrap()
+        .load_all()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.secret.id == created.id)
+        .unwrap();
+    assert!(
+        current
+            .grants
+            .iter()
+            .all(|g| &g.recipient != bob_keys.public_key())
+    );
+}
+
+#[test]
+fn sharing_reports_preparatory_conflicts_and_waits_for_an_explicit_retry() {
+    let server = Server::start();
+    let mut alice = Device::start(true);
+    let mut bob = Device::start(true);
+    alice.register(&server, "alice");
+    bob.register(&server, "bob");
+    connect_verified(&mut alice, &mut bob);
+    let (created, _) = add_file(&mut alice, "api/dev", b"A=initial\n", false);
+    alice.sync();
+    let id = created.id.to_string();
+    let mut stale = Device::start(false);
+    stale.login(&server, "alice");
+    stale.sync();
+    stale.call(Request::VerifyPeer {
+        username: "bob".into(),
+        fingerprint: fingerprint(&bob),
+    });
+    let (_, version) = file_snapshot(&mut stale, &id);
+    edit_file(&mut stale, &id, b"A=offline\n", &version);
+    let (_, version) = file_snapshot(&mut alice, &id);
+    edit_file(&mut alice, &id, b"A=server\n", &version);
+    alice.sync();
+    let result = stale.try_call(Request::Share {
+        selector: id.clone(),
+        username: "bob".into(),
+        revoke: false,
+    });
+    let Err(ClientError::Agent(AgentError::Invalid { message })) = result else {
+        panic!("sharing must not silently succeed after a conflict")
+    };
+    assert!(message.contains("sharing was not applied"));
+    assert!(message.contains("kept the server version"));
+    let Reply::List(list) = stale.call(Request::List(ListFilter::default())) else {
+        panic!("no list")
+    };
+    let copy = list.iter().find(|s| s.local_only).unwrap();
+    assert!(
+        message.contains(&copy.id.to_string()),
+        "the caller must receive the recovery path even though sync consumed the conflict"
+    );
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut stale, &copy.id.to_string()).0),
+        b"A=offline\n"
+    );
+    bob.sync();
+    assert!(
+        bob.try_call(Request::Get {
+            selector: id.clone()
+        })
+        .is_err(),
+        "sharing must wait for explicit retry after conflict recovery"
+    );
+    assert!(
+        stale.sync().conflicts.is_empty(),
+        "the conflict was consumed by preparatory sync"
+    );
+    stale.call(Request::Share {
+        selector: id.clone(),
+        username: "bob".into(),
+        revoke: false,
+    });
+    bob.sync();
+    assert_eq!(file_bytes(&file_snapshot(&mut bob, &id).0), b"A=server\n");
+}

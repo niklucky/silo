@@ -550,7 +550,14 @@ fn share_secret(
         .mutating
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    sync::run(shared, &crate::unix_now)?;
+    let report = sync::run(shared, &crate::unix_now)?;
+    log_report(&report);
+    if !report.conflicts.is_empty() {
+        return Err(invalid(format!(
+            "sharing was not applied because synchronization found conflicts; review the saved copies before retrying:\n{}",
+            report.conflicts.join("\n")
+        )));
+    }
     let (client, _) = sync_client(shared)?;
     let peer = shared.with_vault(|v| Ok(v.session.peer(&v.state.server, &username)?))?;
     if !revoke {
@@ -565,13 +572,26 @@ fn share_secret(
         }
     }
     let (base, candidate) = shared.with_vault(|v| {
-        Ok(v.session.prepare_share(
+        let (local_base, candidate) = v.session.prepare_share(
             &mut rand::rng(),
             crate::unix_now(),
             selector,
             peer.public_key,
             revoke,
-        )?)
+        )?;
+        // A disconnected recipient can prevent pending edits from syncing.
+        // Revoke against the acknowledged server base while keeping the latest
+        // local contents and archiving their predecessors on successful publish.
+        let base = if revoke {
+            v.state
+                .known
+                .get(&candidate.secret.id)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            local_base
+        };
+        Ok((base, candidate))
     })?;
     let view = publish(shared, &client, base, candidate)?;
     Ok(Reply::Shared(crate::protocol::SecretSummary {
@@ -592,6 +612,7 @@ fn publish(
 ) -> Result<crate::protocol::SecretView, SyncError> {
     use silo_core::sync::{PushItem, PushRequest, PushResult};
     let id = candidate.secret.id;
+    let revision = candidate.secret.revision;
     shared.with_vault(|v| {
         if v.state.known.get(&id).copied().unwrap_or(0) != base {
             return Err(invalid("the document still has unsynchronized local changes; sync it before replacing or sharing it"));
@@ -608,7 +629,7 @@ fn publish(
     match reply.results.as_slice() {
         [PushResult::Ok { .. }] => shared.with_vault(|v| {
             v.session.accept(v.store, candidate, true)?;
-            v.state.known.insert(id, base + 1);
+            v.state.known.insert(id, revision);
             v.state.rejected.remove(&id);
             v.save()?;
             Ok(v.session.get(&id.to_string())?)

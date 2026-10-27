@@ -273,6 +273,11 @@ secret. The owner can use `share` for other secret kinds too. New owner revision
 remain shared until revoked; earlier revisions are available only where the
 recipient had a grant.
 
+If sharing's preparatory sync finds a conflict, the command reports its recovery
+path and applies no sharing change until you explicitly retry. Revocation can
+publish the latest pending contents even after the recipient disconnects;
+superseded, unsent revisions remain in the owner's local encrypted history.
+
 Connections alone do not establish trust. Shared revisions are ignored until the
 owner's fingerprint is verified. Pins and the original owner of each document
 are retained locally across lock/unlock and login/logout; another verified peer
