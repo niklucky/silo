@@ -51,9 +51,9 @@ pub fn run(command: Command) -> Result<()> {
         Command::Connections { command } => crate::sharing::connections(command),
         Command::Share {
             selector,
-            username,
+            usernames,
             revoke,
-        } => crate::sharing::share(selector, username, revoke),
+        } => crate::sharing::share(selector, usernames, revoke),
         Command::File {
             command:
                 FileCommand::Pull {

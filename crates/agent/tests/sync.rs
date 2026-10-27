@@ -1205,3 +1205,163 @@ fn sharing_reports_preparatory_conflicts_and_waits_for_an_explicit_retry() {
     bob.sync();
     assert_eq!(file_bytes(&file_snapshot(&mut bob, &id).0), b"A=server\n");
 }
+
+#[test]
+fn atomic_revocation_removes_disconnected_recipients_and_retains_connected_ones() {
+    let server = Server::start();
+    let mut alice = Device::start(true);
+    let mut bob = Device::start(true);
+    let mut carol = Device::start(true);
+    let mut dave = Device::start(true);
+    alice.register(&server, "alice");
+    bob.register(&server, "bob");
+    carol.register(&server, "carol");
+    dave.register(&server, "dave");
+    for (name, peer) in [
+        ("bob", &mut bob),
+        ("carol", &mut carol),
+        ("dave", &mut dave),
+    ] {
+        alice.call(Request::Connect {
+            username: name.into(),
+        });
+        peer.call(Request::Connect {
+            username: "alice".into(),
+        });
+        alice.call(Request::VerifyPeer {
+            username: name.into(),
+            fingerprint: fingerprint(peer),
+        });
+        peer.call(Request::VerifyPeer {
+            username: "alice".into(),
+            fingerprint: fingerprint(&alice),
+        });
+    }
+    let (created, _) = add_file(&mut alice, "api/dev", b"A=initial\n", false);
+    let id = created.id.to_string();
+    alice.call(Request::ShareMany {
+        selector: id.clone(),
+        usernames: vec!["bob".into(), "carol".into(), "dave".into(), "bob".into()],
+        revoke: false,
+    });
+    for peer in [&mut bob, &mut carol, &mut dave] {
+        peer.sync();
+        assert_eq!(file_bytes(&file_snapshot(peer, &id).0), b"A=initial\n");
+    }
+    for peer in [&mut bob, &mut carol] {
+        peer.call(Request::Disconnect {
+            username: "alice".into(),
+        });
+    }
+    let (_, baseline) = file_snapshot(&mut alice, &id);
+    let (_, baseline) = edit_file(&mut alice, &id, b"A=pending-one\n", &baseline);
+    let (latest, version) = edit_file(&mut alice, &id, b"A=pending-two\n", &baseline);
+    // Each individual change is still rejected while it retains the other
+    // disconnected recipient; the batch must remove both atomically.
+    for username in ["bob", "carol"] {
+        assert!(
+            alice
+                .try_call(Request::Share {
+                    selector: id.clone(),
+                    username: username.into(),
+                    revoke: true
+                })
+                .is_err()
+        );
+    }
+    assert!(
+        alice
+            .try_call(Request::ShareMany {
+                selector: id.clone(),
+                usernames: vec![],
+                revoke: true
+            })
+            .is_err()
+    );
+    assert!(
+        alice
+            .try_call(Request::ShareMany {
+                selector: id.clone(),
+                usernames: vec!["bob".into(), "unverified".into()],
+                revoke: true
+            })
+            .is_err()
+    );
+    assert_eq!(
+        file_snapshot(&mut alice, &id).1,
+        version,
+        "failed batches must not partially modify recipient grants or contents"
+    );
+    let Reply::Shared(revoked) = alice.call(Request::ShareMany {
+        selector: id.clone(),
+        usernames: vec!["bob".into(), "carol".into(), "bob".into()],
+        revoke: true,
+    }) else {
+        panic!("revocation did not complete")
+    };
+    assert_eq!(
+        revoked.revision,
+        latest.revision + 1,
+        "the recipient set must change in one revision"
+    );
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut alice, &id).0),
+        b"A=pending-two\n"
+    );
+    let Reply::History(history) = alice.call(Request::History {
+        selector: id.clone(),
+    }) else {
+        panic!("no history")
+    };
+    assert!(history.iter().any(|v| file_bytes(v) == b"A=pending-one\n"));
+    assert!(history.iter().any(|v| file_bytes(v) == b"A=pending-two\n"));
+    assert_eq!(alice.sync(), SyncReport::default());
+    dave.sync();
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut dave, &id).0),
+        b"A=pending-two\n"
+    );
+    let current = Store::open(alice.paths.clone())
+        .unwrap()
+        .load_all()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.secret.id == created.id)
+        .unwrap();
+    let dave_keys = Store::open(dave.paths.clone())
+        .unwrap()
+        .read_account()
+        .unwrap()
+        .unlock(PASSWORD.as_bytes())
+        .unwrap();
+    let alice_keys = Store::open(alice.paths.clone())
+        .unwrap()
+        .read_account()
+        .unwrap()
+        .unlock(PASSWORD.as_bytes())
+        .unwrap();
+    assert_eq!(current.grants.len(), 2);
+    assert!(
+        current
+            .grants
+            .iter()
+            .all(|g| &g.recipient == alice_keys.public_key()
+                || &g.recipient == dave_keys.public_key())
+    );
+    for peer in [&mut bob, &mut carol] {
+        peer.sync();
+        assert_eq!(file_bytes(&file_snapshot(peer, &id).0), b"A=initial\n");
+    }
+    let (_, baseline) = file_snapshot(&mut alice, &id);
+    edit_file(&mut alice, &id, b"A=after-revoke\n", &baseline);
+    assert_eq!(
+        alice.sync().pushed,
+        1,
+        "ordinary edits must sync again without reconnecting revoked recipients"
+    );
+    dave.sync();
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut dave, &id).0),
+        b"A=after-revoke\n"
+    );
+}

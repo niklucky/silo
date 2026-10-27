@@ -637,7 +637,7 @@ impl Session {
         rng: &mut impl CryptoRng,
         now: u64,
         selector: &str,
-        recipient: PublicKey,
+        targets: &[PublicKey],
         revoke: bool,
     ) -> Result<(u32, StoredSecret), AgentError> {
         let id = self.resolve(selector)?;
@@ -647,22 +647,28 @@ impl Session {
                 message: "local-only secrets cannot be shared".into(),
             });
         }
-        if recipient == *self.public_key() {
+        if targets.is_empty() {
+            return Err(AgentError::Invalid {
+                message: "at least one recipient is required".into(),
+            });
+        }
+        if targets.contains(self.public_key()) {
             return Err(AgentError::Invalid {
                 message: "cannot change the owner's grant".into(),
             });
         }
         let entry = self.entry(id)?;
-        let mut recipients: Vec<_> = entry
+        let mut recipients: BTreeSet<_> = entry
             .stored
             .grants
             .iter()
             .map(|g| g.recipient)
-            .filter(|r| *r != recipient)
+            .filter(|r| !targets.contains(r))
             .collect();
         if !revoke {
-            recipients.push(recipient);
+            recipients.extend(targets.iter().copied());
         }
+        let recipients: Vec<_> = recipients.into_iter().collect();
         let mut meta = entry.meta.clone();
         meta.updated_at = now;
         let base = entry.stored.secret.revision;

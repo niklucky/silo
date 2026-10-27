@@ -95,6 +95,7 @@ impl Bridge {
                 | Request::Disconnect { .. }
                 | Request::VerifyPeer { .. }
                 | Request::Share { .. }
+                | Request::ShareMany { .. }
                 | Request::AddLocal(_)
         ) {
             return Response::Err(AgentError::Invalid {
@@ -305,6 +306,11 @@ mod tests {
             Request::VerifyPeer {
                 username: "bob".into(),
                 fingerprint: "untrusted".into(),
+            },
+            Request::ShareMany {
+                selector: "api/dev".into(),
+                usernames: vec!["bob".into(), "carol".into()],
+                revoke: true,
             },
             Request::Share {
                 selector: "api/dev".into(),

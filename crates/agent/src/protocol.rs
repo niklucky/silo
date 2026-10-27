@@ -102,6 +102,12 @@ pub enum Request {
         username: String,
         revoke: bool,
     },
+    /// Change several recipient grants atomically in a single revision.
+    ShareMany {
+        selector: String,
+        usernames: Vec<String>,
+        revoke: bool,
+    },
     /// Read a file from the local vault and return its exact revision token.
     FileSnapshot {
         selector: String,

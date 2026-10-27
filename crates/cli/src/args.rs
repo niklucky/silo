@@ -105,10 +105,11 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ConnectionsCommand>,
     },
-    /// Share a secret read-only, or revoke a teammate's future access
+    /// Share a secret read-only, or revoke teammates' future access atomically
     Share {
         selector: String,
-        username: String,
+        #[arg(required = true, num_args = 1..)]
+        usernames: Vec<String>,
         #[arg(long)]
         revoke: bool,
     },

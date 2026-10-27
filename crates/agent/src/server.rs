@@ -231,7 +231,12 @@ fn dispatch(request: Request, shared: &Shared) -> Response {
             selector,
             username,
             revoke,
-        } => share_secret(shared, &selector, &username, revoke).map_err(AgentError::from),
+        } => share_secret(shared, &selector, &[username], revoke).map_err(AgentError::from),
+        Request::ShareMany {
+            selector,
+            usernames,
+            revoke,
+        } => share_secret(shared, &selector, &usernames, revoke).map_err(AgentError::from),
         other => return dispatch_locked(other, shared),
     };
     result.into()
@@ -380,7 +385,8 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
         | Request::Connect { .. }
         | Request::Disconnect { .. }
         | Request::VerifyPeer { .. }
-        | Request::Share { .. } => unreachable!("handled in dispatch"),
+        | Request::Share { .. }
+        | Request::ShareMany { .. } => unreachable!("handled in dispatch"),
     };
     result.into()
 }
@@ -538,10 +544,18 @@ fn verify_peer(shared: &Shared, username: &str, fingerprint: &str) -> Result<Rep
 fn share_secret(
     shared: &Shared,
     selector: &str,
-    username: &str,
+    usernames: &[String],
     revoke: bool,
 ) -> Result<Reply, SyncError> {
-    let username = silo_core::sync::normalize_username(username)?;
+    let mut usernames = usernames
+        .iter()
+        .map(|username| silo_core::sync::normalize_username(username))
+        .collect::<Result<Vec<_>, _>>()?;
+    usernames.sort();
+    usernames.dedup();
+    if usernames.is_empty() {
+        return Err(invalid("at least one recipient is required"));
+    }
     let _running = shared
         .syncing
         .lock()
@@ -559,24 +573,31 @@ fn share_secret(
         )));
     }
     let (client, _) = sync_client(shared)?;
-    let peer = shared.with_vault(|v| Ok(v.session.peer(&v.state.server, &username)?))?;
+    let peers = shared.with_vault(|v| {
+        usernames
+            .iter()
+            .map(|name| Ok((name.clone(), v.session.peer(&v.state.server, name)?)))
+            .collect::<Result<Vec<_>, SyncError>>()
+    })?;
     if !revoke {
-        let connected = client
-            .connections()?
-            .into_iter()
-            .any(|p| p.username == username && p.identity == Some(peer));
-        if !connected {
+        let connections = client.connections()?;
+        if !peers.iter().all(|(name, peer)| {
+            connections
+                .iter()
+                .any(|p| &p.username == name && p.identity == Some(*peer))
+        }) {
             return Err(invalid(
-                "the connection or verified identity changed; refusing to share",
+                "a connection or verified identity changed; refusing to share",
             ));
         }
     }
+    let recipients: Vec<_> = peers.iter().map(|(_, peer)| peer.public_key).collect();
     let (base, candidate) = shared.with_vault(|v| {
         let (local_base, candidate) = v.session.prepare_share(
             &mut rand::rng(),
             crate::unix_now(),
             selector,
-            peer.public_key,
+            &recipients,
             revoke,
         )?;
         // A disconnected recipient can prevent pending edits from syncing.

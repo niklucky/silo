@@ -263,6 +263,8 @@ silo sync                              # Bob
 silo file pull projects/api/dev -o .env # Bob
 
 silo share projects/api/dev bob --revoke # Alice; new key, no grant for Bob
+# Revoke multiple disconnected recipients in one atomic revision.
+silo share projects/api/dev bob carol --revoke
 silo connections remove bob             # optional; revoke grants before disconnecting
 ```
 
@@ -277,6 +279,10 @@ If sharing's preparatory sync finds a conflict, the command reports its recovery
 path and applies no sharing change until you explicitly retry. Revocation can
 publish the latest pending contents even after the recipient disconnects;
 superseded, unsent revisions remain in the owner's local encrypted history.
+Multiple recipients can be shared or revoked in one command and one revision.
+If several recipients have disconnected, name them together with `--revoke` so
+no remaining disconnected grant blocks publication. Other recipients retain
+their access; an invalid recipient prevents the entire change.
 
 Connections alone do not establish trust. Shared revisions are ignored until the
 owner's fingerprint is verified. Pins and the original owner of each document

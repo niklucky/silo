@@ -58,18 +58,28 @@ pub fn connections(command: Option<ConnectionsCommand>) -> Result<()> {
     Ok(())
 }
 
-pub fn share(selector: String, username: String, revoke: bool) -> Result<()> {
-    let reply = connected()?.call(&Request::Share {
-        selector,
-        username: username.clone(),
-        revoke,
-    })?;
+pub fn share(selector: String, usernames: Vec<String>, revoke: bool) -> Result<()> {
+    let names = usernames.join(", ");
+    let request = if let [username] = usernames.as_slice() {
+        Request::Share {
+            selector,
+            username: username.clone(),
+            revoke,
+        }
+    } else {
+        Request::ShareMany {
+            selector,
+            usernames,
+            revoke,
+        }
+    };
+    let reply = connected()?.call(&request)?;
     let Reply::Shared(secret) = reply else {
         return Err(unexpected(reply));
     };
     if revoke {
         println!(
-            "Revoked {username}'s access to future revisions of {} (revision {}).",
+            "Revoked future access to {} for {names} (revision {}).",
             secret.path(),
             secret.revision
         );
@@ -78,7 +88,7 @@ pub fn share(selector: String, username: String, revoke: bool) -> Result<()> {
         );
     } else {
         println!(
-            "Shared {} read-only with {username} (id {}; revision {}).",
+            "Shared {} read-only with {names} (id {}; revision {}).",
             secret.path(),
             secret.id,
             secret.revision
