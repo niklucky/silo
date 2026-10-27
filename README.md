@@ -222,6 +222,11 @@ then explicitly apply the chosen contents with `silo edit <original> --file FILE
 and sync again. A server deletion is also retained, with conflicting local file
 edits saved privately. `silo sync` exits unsuccessfully when it reports conflicts
 or rejected changes, even though the recoverable copies have been saved.
+Recovery paths are retained locally until a complete sync returns them
+successfully. If a later upload fails, the error still includes those paths and
+they survive retries, agent restarts and logout/login. The next successful sync
+reports the queued notices before clearing them; sharing also surfaces them
+before changing grants. These notices contain paths and ids, not file contents.
 
 To exclude a file from an otherwise synced vault permanently:
 

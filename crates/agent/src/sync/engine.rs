@@ -44,7 +44,7 @@ pub struct SyncReport {
     pub removed: usize,
     /// Revisions and deletions the server accepted.
     pub pushed: usize,
-    /// One line per conflict, saying which side won.
+    /// Conflict/recovery notices, including undelivered notices from failed runs.
     pub conflicts: Vec<String>,
     /// One line per change the server refused.
     pub rejected: Vec<String>,
@@ -105,7 +105,15 @@ pub trait VaultAccess {
 pub fn run(access: &impl VaultAccess, now: &dyn Fn() -> u64) -> Result<SyncReport, SyncError> {
     let client =
         access.with_vault(|v| Ok(HttpClient::new(&v.state.server)?.with_token(&v.state.token)))?;
-    let result = run_with(access, &client, now);
+    let mut progress = Progress {
+        now: now(),
+        report: SyncReport {
+            conflicts: access.with_vault(|v| Ok(v.store.read_conflict_notices()?))?,
+            ..SyncReport::default()
+        },
+        ..Progress::default()
+    };
+    let result = run_with(access, &client, &mut progress);
     let error = result.as_ref().err().map(ToString::to_string);
     let recorded = access.with_vault(|v| {
         if error.is_none() {
@@ -114,20 +122,33 @@ pub fn run(access: &impl VaultAccess, now: &dyn Fn() -> u64) -> Result<SyncRepor
         v.state.last_error = error;
         v.save()
     });
-    let report = result?;
-    recorded?;
-    Ok(report)
+    let with_recovery = |error| {
+        if progress.report.conflicts.is_empty() {
+            error
+        } else {
+            SyncError::Recovery {
+                error: Box::new(error),
+                notices: progress.report.conflicts.join("\n"),
+            }
+        }
+    };
+    result.map_err(with_recovery)?;
+    recorded.map_err(with_recovery)?;
+    // A later network/storage failure cannot consume a notice. Clear the
+    // durable outbox only after all sync steps and final status persistence
+    // succeeded; the caller receives the accumulated report or an error that
+    // also includes its recovery paths.
+    access
+        .with_vault(|v| Ok(v.store.clear_conflict_notices()?))
+        .map_err(with_recovery)?;
+    Ok(progress.report)
 }
 
 fn run_with(
     access: &impl VaultAccess,
     client: &HttpClient,
-    now: &dyn Fn() -> u64,
-) -> Result<SyncReport, SyncError> {
-    let mut progress = Progress {
-        now: now(),
-        ..Progress::default()
-    };
+    progress: &mut Progress,
+) -> Result<(), SyncError> {
     let mut rng = rand::rng();
 
     loop {
@@ -143,7 +164,7 @@ fn run_with(
                 true
             } else {
                 for change in reply.changes {
-                    apply_change(v, &mut rng, change, &mut progress)?;
+                    apply_change(v, &mut rng, change, progress)?;
                 }
                 v.state.cursor = reply.cursor;
                 v.state.account_version = reply.account_version;
@@ -184,14 +205,14 @@ fn run_with(
             }
             access.with_vault(|v| {
                 for (item, result) in chunk.iter().zip(reply.results) {
-                    apply_result(v, &mut rng, item, result, &mut progress)?;
+                    apply_result(v, &mut rng, item, result, progress)?;
                 }
                 v.save()
             })?;
         }
     }
     fill_gaps(access, client, std::mem::take(&mut progress.gaps));
-    Ok(progress.report)
+    Ok(())
 }
 
 /// Fetches the revisions a run skipped over and keeps them in history.
@@ -218,6 +239,18 @@ fn fill_gaps(access: &impl VaultAccess, client: &HttpClient, gaps: Vec<HistoryQu
             Ok(())
         });
     }
+}
+
+fn record_conflict(
+    v: &Vault<'_>,
+    progress: &mut Progress,
+    notice: String,
+) -> Result<(), SyncError> {
+    if !progress.report.conflicts.contains(&notice) {
+        progress.report.conflicts.push(notice);
+    }
+    v.store.write_conflict_notices(&progress.report.conflicts)?;
+    Ok(())
 }
 
 /// Brings one change from the server into the local vault.
@@ -265,10 +298,14 @@ fn apply_put(
             v.session.accept(v.store, remote, false)?;
             v.state.known.insert(id, revision);
             progress.report.pulled += 1;
-            progress.report.conflicts.push(format!(
-                "{}: deleted here but changed on another device; kept their version",
-                path(v, id)
-            ));
+            record_conflict(
+                v,
+                progress,
+                format!(
+                    "{}: deleted here but changed on another device; kept their version",
+                    path(v, id)
+                ),
+            )?;
         }
         return Ok(());
     }
@@ -363,10 +400,14 @@ fn resolve_conflict(
         "kept theirs, yours is in history"
     };
     v.state.known.insert(id, base);
-    progress.report.conflicts.push(format!(
-        "{}: changed here and on another device; {outcome}",
-        path(v, id)
-    ));
+    record_conflict(
+        v,
+        progress,
+        format!(
+            "{}: changed here and on another device; {outcome}",
+            path(v, id)
+        ),
+    )?;
     Ok(())
 }
 
@@ -381,14 +422,29 @@ fn preserve_file_conflict(
 ) -> Result<(), SyncError> {
     let id = remote.secret.id;
     let known = v.state.known.get(&id).copied();
-    let copy = save_local_file_copy(v, rng, id, progress.now)?;
+    let (copy, archived_revisions) = save_local_file_copy(v, rng, id, progress.now)?;
     let revision = remote.secret.revision;
     progress.gap(id, known, revision);
+    record_conflict(
+        v,
+        progress,
+        format!(
+            "{}: kept the server version; local edits and history saved privately as {} (id {}); export that copy to review and apply with `silo edit --file`",
+            path(v, id),
+            copy.path(),
+            copy.id
+        ),
+    )?;
+    // Remove old number collisions only after their private replacement and
+    // recovery notice are durable. A cleanup error must retain the copy's path.
+    for revision in archived_revisions {
+        v.store.unarchive(id, revision)?;
+    }
     v.session.accept(v.store, remote, false)?;
     v.state.known.insert(id, revision);
     v.state.rejected.remove(&id);
     progress.report.pulled += 1;
-    progress.report.conflicts.push(format!("{}: kept the server version; local edits and history saved privately as {} (id {}); export that copy to review and apply with `silo edit --file`", path(v, id), copy.path(), copy.id));
+
     Ok(())
 }
 
@@ -397,7 +453,7 @@ fn save_local_file_copy(
     rng: &mut impl CryptoRng,
     id: SecretId,
     now: u64,
-) -> Result<crate::protocol::SecretSummary, SyncError> {
+) -> Result<(crate::protocol::SecretSummary, Vec<u32>), SyncError> {
     use crate::protocol::{NewSecret, SecretUpdate};
     let known = v.state.known.get(&id).copied();
     let current = v
@@ -456,10 +512,7 @@ fn save_local_file_copy(
         });
     }
     let copy = copy.expect("chain includes current file");
-    for stored in &chain {
-        v.store.unarchive(id, stored.secret.revision)?;
-    }
-    Ok(copy)
+    Ok((copy, chain.iter().map(|s| s.secret.revision).collect()))
 }
 
 /// Moves the revisions made here after `after` on top of the server's
@@ -557,11 +610,20 @@ fn apply_delete(
         Some(_) => {
             if v.session.get(&id.to_string())?.meta.kind == silo_core::vault::SecretKind::File {
                 let original = path(v, id);
-                let copy = save_local_file_copy(v, rng, id, progress.now)?;
+                let (copy, _) = save_local_file_copy(v, rng, id, progress.now)?;
+                record_conflict(
+                    v,
+                    progress,
+                    format!(
+                        "{original}: kept the server deletion; local file edits saved privately as {} (id {})",
+                        copy.path(),
+                        copy.id
+                    ),
+                )?;
                 v.session.remove_id(v.store, id)?;
                 v.state.known.remove(&id);
                 progress.report.removed += 1;
-                progress.report.conflicts.push(format!("{original}: kept the server deletion; local file edits saved privately as {} (id {})", copy.path(), copy.id));
+
                 return Ok(());
             }
             // Changed here since: the edit wins and goes back up as a restore,
@@ -574,10 +636,14 @@ fn apply_delete(
             rebase_local(v, rng, id, after, tombstone.revision, 0, &owner)?;
             v.state.deleted_remotely.insert(id, tombstone.revision);
             v.state.known.insert(id, tombstone.revision);
-            progress.report.conflicts.push(format!(
-                "{}: deleted on another device but changed here; kept yours",
-                path(v, id)
-            ));
+            record_conflict(
+                v,
+                progress,
+                format!(
+                    "{}: deleted on another device but changed here; kept yours",
+                    path(v, id)
+                ),
+            )?;
         }
     }
     Ok(())

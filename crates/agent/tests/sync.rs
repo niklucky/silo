@@ -1,6 +1,10 @@
 //! Two devices syncing through a real server, each with its own agent.
 
 use std::net::TcpListener;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -20,12 +24,15 @@ const PASSWORD: &str = "correct horse";
 struct Server {
     url: String,
     db: Db,
+    fail_pushes: Arc<AtomicBool>,
 }
 
 impl Server {
     fn start() -> Self {
         let db = Db::open_in_memory().unwrap();
         let state = AppState::new(db.clone()).unwrap();
+        let fail_pushes = Arc::new(AtomicBool::new(false));
+        let failures = Arc::clone(&fail_pushes);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
@@ -36,14 +43,28 @@ impl Server {
                 .unwrap();
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-                axum::serve(listener, silo_server::app(state))
-                    .await
-                    .unwrap();
+                let app = silo_server::app(state).layer(axum::middleware::from_fn(
+                    move |request: axum::extract::Request, next: axum::middleware::Next| {
+                        let failures = Arc::clone(&failures);
+                        async move {
+                            if request.uri().path() == "/v1/push" && failures.load(Ordering::SeqCst)
+                            {
+                                axum::response::IntoResponse::into_response(
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                )
+                            } else {
+                                next.run(request).await
+                            }
+                        }
+                    },
+                ));
+                axum::serve(listener, app).await.unwrap();
             });
         });
         Self {
             url: format!("http://127.0.0.1:{port}"),
             db,
+            fail_pushes,
         }
     }
 
@@ -99,6 +120,30 @@ impl Device {
             });
         }
         device
+    }
+
+    fn restart(&mut self) {
+        self.call(Request::Shutdown);
+        self.agent.take().unwrap().join().unwrap().unwrap();
+        let store = Store::open(self.paths.clone()).unwrap();
+        self.agent = Some(thread::spawn(move || {
+            server::run(Config {
+                store,
+                default_ttl: server::DEFAULT_TTL,
+                sync_interval: None,
+            })
+        }));
+        self.client = (0..200)
+            .find_map(|_| {
+                Client::connect(self.paths.socket_file())
+                    .inspect_err(|_| thread::sleep(Duration::from_millis(10)))
+                    .ok()
+            })
+            .expect("restarted agent came up");
+        self.call(Request::Unlock {
+            password: PASSWORD.into(),
+            ttl_secs: None,
+        });
     }
 
     fn call(&mut self, request: Request) -> Reply {
@@ -1364,4 +1409,196 @@ fn atomic_revocation_removes_disconnected_recipients_and_retains_connected_ones(
         file_bytes(&file_snapshot(&mut dave, &id).0),
         b"A=after-revoke\n"
     );
+}
+
+fn recovery_notices_survive_failed_uploads(through_sharing: bool) {
+    for remote_deletion in [false, true] {
+        let server = Server::start();
+        let mut alice = Device::start(true);
+        let mut bob = Device::start(true);
+        alice.register(&server, "alice");
+        bob.register(&server, "bob");
+        connect_verified(&mut alice, &mut bob);
+        let (created, _) = add_file(&mut alice, "api/dev", b"A=initial\n", false);
+        alice.sync();
+        let id = created.id.to_string();
+        let mut stale = Device::start(false);
+        stale.login(&server, "alice");
+        stale.sync();
+        stale.call(Request::VerifyPeer {
+            username: "bob".into(),
+            fingerprint: fingerprint(&bob),
+        });
+        let (_, version) = file_snapshot(&mut stale, &id);
+        edit_file(&mut stale, &id, b"A=offline\n", &version);
+        stale.add_note("notes/pending", "pending upload");
+        if remote_deletion {
+            alice.call(Request::Remove {
+                selector: id.clone(),
+            });
+        } else {
+            let (_, version) = file_snapshot(&mut alice, &id);
+            edit_file(&mut alice, &id, b"A=server\n", &version);
+        }
+        alice.sync();
+        server.fail_pushes.store(true, Ordering::SeqCst);
+        let request = if through_sharing {
+            Request::Share {
+                selector: id.clone(),
+                username: "bob".into(),
+                revoke: false,
+            }
+        } else {
+            Request::Sync
+        };
+        let Err(ClientError::Agent(AgentError::Sync { message })) = stale.try_call(request.clone())
+        else {
+            panic!("expected injected upload failure")
+        };
+        assert!(message.contains("HTTP 503"));
+        let Reply::List(list) = stale.call(Request::List(ListFilter::default())) else {
+            panic!("no list")
+        };
+        let copy = list.iter().find(|s| s.local_only).unwrap();
+        let copy_id = copy.id.to_string();
+        assert!(
+            message.contains(&copy_id),
+            "the original failure must include the already-persisted recovery path"
+        );
+        assert_eq!(
+            file_bytes(&file_snapshot(&mut stale, &copy_id).0),
+            b"A=offline\n"
+        );
+        let store = Store::open(stale.paths.clone()).unwrap();
+        let queued = store.read_conflict_notices().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].contains(&copy_id));
+        assert!(
+            !std::fs::read_to_string(stale.paths.home().join("conflict-notices.json"))
+                .unwrap()
+                .contains("A=offline")
+        );
+        stale.restart();
+        let Err(ClientError::Agent(AgentError::Sync { message })) = stale.try_call(request.clone())
+        else {
+            panic!("expected repeated upload failure")
+        };
+        assert!(message.contains("HTTP 503") && message.contains(&copy_id));
+        assert_eq!(
+            store.read_conflict_notices().unwrap(),
+            queued,
+            "failed retries must not duplicate or consume notices"
+        );
+        stale.call(Request::SyncLogout);
+        stale.login(&server, "alice");
+        assert_eq!(store.read_conflict_notices().unwrap(), queued);
+        server.fail_pushes.store(false, Ordering::SeqCst);
+        if through_sharing {
+            let Err(ClientError::Agent(AgentError::Invalid { message })) =
+                stale.try_call(request.clone())
+            else {
+                panic!("sharing must surface the recovered notice before publishing")
+            };
+            assert!(message.contains("sharing was not applied") && message.contains(&copy_id));
+            bob.sync();
+            assert!(
+                bob.try_call(Request::Get {
+                    selector: id.clone()
+                })
+                .is_err()
+            );
+            if !remote_deletion {
+                stale.call(request);
+                bob.sync();
+                assert_eq!(file_bytes(&file_snapshot(&mut bob, &id).0), b"A=server\n");
+            }
+        } else {
+            let report = stale.sync();
+            assert_eq!(
+                report.conflicts, queued,
+                "the first successful retry must deliver the durable notice"
+            );
+        }
+        assert!(store.read_conflict_notices().unwrap().is_empty());
+        assert_eq!(stale.sync(), SyncReport::default());
+        alice.sync();
+        assert_eq!(
+            alice.text("notes/pending").as_deref(),
+            Some("pending upload")
+        );
+        let Reply::List(list) = stale.call(Request::List(ListFilter::default())) else {
+            panic!("no list")
+        };
+        assert_eq!(list.iter().filter(|s| s.local_only).count(), 1);
+    }
+}
+
+#[test]
+fn conflict_notices_survive_failed_uploads_restart_and_relogin() {
+    recovery_notices_survive_failed_uploads(false);
+}
+
+#[test]
+fn sharing_preserves_recovery_notices_after_later_upload_failures() {
+    recovery_notices_survive_failed_uploads(true);
+}
+
+#[test]
+fn file_conflict_notice_is_durable_before_history_cleanup() {
+    let server = Server::start();
+    let mut alice = Device::start(true);
+    alice.register(&server, "alice");
+    let (created, _) = add_file(&mut alice, "api/dev", b"A=initial\n", false);
+    alice.sync();
+    let id = created.id.to_string();
+    let mut stale = Device::start(false);
+    stale.login(&server, "alice");
+    stale.sync();
+    let (_, version) = file_snapshot(&mut stale, &id);
+    let (_, version) = edit_file(&mut stale, &id, b"A=offline-one\n", &version);
+    let (latest, _) = edit_file(&mut stale, &id, b"A=offline-two\n", &version);
+    let (_, version) = file_snapshot(&mut alice, &id);
+    edit_file(&mut alice, &id, b"A=server\n", &version);
+    alice.sync();
+    // This current revision has no history file yet; an unexpected directory
+    // at that path makes cleanup fail after the preceding revision is removed.
+    let obstacle = stale
+        .paths
+        .vault_dir()
+        .join("history")
+        .join(&id)
+        .join(format!("{}.json", latest.revision));
+    std::fs::create_dir(&obstacle).unwrap();
+    let Err(ClientError::Agent(AgentError::Sync { message })) = stale.try_call(Request::Sync)
+    else {
+        panic!("expected cleanup failure")
+    };
+    let store = Store::open(stale.paths.clone()).unwrap();
+    let notices = store.read_conflict_notices().unwrap();
+    assert_eq!(notices.len(), 1);
+    let Reply::List(list) = stale.call(Request::List(ListFilter::default())) else {
+        panic!("no list")
+    };
+    let copy = list.iter().find(|s| s.local_only).unwrap();
+    assert!(message.contains(&copy.id.to_string()) && notices[0].contains(&copy.id.to_string()));
+    let Reply::History(history) = stale.call(Request::History {
+        selector: copy.id.to_string(),
+    }) else {
+        panic!("no history")
+    };
+    assert_eq!(file_bytes(&history[0]), b"A=offline-one\n");
+    assert_eq!(
+        file_bytes(&file_snapshot(&mut stale, &copy.id.to_string()).0),
+        b"A=offline-two\n"
+    );
+    std::fs::remove_dir(obstacle).unwrap();
+    let report = stale.sync();
+    assert!(
+        report
+            .conflicts
+            .iter()
+            .any(|notice| notice.contains(&copy.id.to_string()))
+    );
+    assert_eq!(file_bytes(&file_snapshot(&mut stale, &id).0), b"A=server\n");
+    assert!(store.read_conflict_notices().unwrap().is_empty());
 }

@@ -105,6 +105,19 @@ impl Store {
         write_json(&self.paths.home().join("trust.json"), trust)
     }
 
+    /// Undelivered recovery paths survive a failed sync, restart or logout.
+    pub fn read_conflict_notices(&self) -> Result<Vec<String>, StoreError> {
+        Ok(read_optional(&self.paths.home().join("conflict-notices.json"))?.unwrap_or_default())
+    }
+
+    pub fn write_conflict_notices(&self, notices: &[String]) -> Result<(), StoreError> {
+        write_json(&self.paths.home().join("conflict-notices.json"), &notices)
+    }
+
+    pub fn clear_conflict_notices(&self) -> Result<(), StoreError> {
+        remove_optional(self.paths.home().join("conflict-notices.json"))
+    }
+
     /// Loads the latest revision of every secret. Order is unspecified; callers sort.
     pub fn load_all(&self) -> Result<Vec<StoredSecret>, StoreError> {
         let mut paths = json_files(&self.paths.vault_dir())?;
