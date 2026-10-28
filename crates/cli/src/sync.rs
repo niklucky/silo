@@ -163,6 +163,9 @@ fn sync_now(agent: &mut Client) -> Result<()> {
         other => return Err(unexpected(other)),
     };
     print_report(&report);
+    if !report.conflicts.is_empty() || !report.rejected.is_empty() {
+        bail!("sync completed with conflicts or rejected changes; review the details above");
+    }
     Ok(())
 }
 
@@ -179,7 +182,7 @@ fn print_report(report: &SyncReport) {
         );
     }
     if !report.conflicts.is_empty() {
-        println!("Conflicts (see `silo history <secret>`):");
+        println!("Conflicts (review the saved history or private file copies):");
         for line in &report.conflicts {
             println!("  {line}");
         }
@@ -192,7 +195,7 @@ fn print_report(report: &SyncReport) {
     }
     if report.skipped > 0 {
         println!(
-            "Ignored {} change(s) from the server not signed by this account.",
+            "Ignored {} change(s) without a trusted owner signature or a valid decryption grant.",
             report.skipped
         );
     }

@@ -1,6 +1,5 @@
 use std::io::{IsTerminal, Read};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 use std::time::Duration;
 
@@ -9,7 +8,7 @@ use silo_agent::protocol::{ListFilter, NewSecret, Reply, Request, SecretView, St
 use silo_agent::{Client, ClientError, Paths, Store, client, server};
 use silo_core::AccountRecord;
 use silo_core::crypto::KdfParams;
-use silo_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBody, Tag};
+use silo_core::vault::{EnvSet, EnvVar, FolderPath, Login, Note, SecretBody, Tag};
 use zeroize::Zeroize;
 
 use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand, InitArgs};
@@ -43,8 +42,18 @@ pub fn run(command: Command) -> Result<()> {
         Command::Edit(args) => edit::run(args),
         Command::Restore { selector, revision } => edit::restore(&selector, revision),
         Command::Rm { selector, yes } => rm(&selector, yes),
-        Command::Run { selectors, command } => run_with_env(&selectors, &command),
+        Command::Run {
+            selectors,
+            command,
+            dotenv,
+        } => run_with_env(&selectors, &command, dotenv),
         Command::Export { selector, format } => export(&selector, format),
+        Command::Connections { command } => crate::sharing::connections(command),
+        Command::Share {
+            selector,
+            usernames,
+            revoke,
+        } => crate::sharing::share(selector, usernames, revoke),
         Command::File {
             command:
                 FileCommand::Pull {
@@ -52,7 +61,7 @@ pub fn run(command: Command) -> Result<()> {
                     output,
                     force,
                 },
-        } => file_pull(&selector, output, force),
+        } => crate::files::pull(&selector, output, force),
         Command::History {
             selector,
             revision,
@@ -339,7 +348,11 @@ fn ls(
         .map(|s| {
             vec![
                 s.path(),
-                format::kind_name(s.meta.kind).to_owned(),
+                format!(
+                    "{}{}",
+                    format::kind_name(s.meta.kind),
+                    if s.local_only { " (local-only)" } else { "" }
+                ),
                 s.meta
                     .tags
                     .iter()
@@ -422,27 +435,12 @@ fn add(command: AddCommand) -> Result<()> {
                 body: SecretBody::EnvSet(set),
             }
         }
-        AddCommand::File { path, file, tag } => {
-            let (folder, title) = split_path(&path)?;
-            let data =
-                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-            let name = file
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| title.clone());
-            NewSecret {
-                title,
-                folder,
-                tags: tags(&tag)?,
-                urls: vec![],
-                basic_auth: false,
-                body: SecretBody::File(File {
-                    name,
-                    mime: None,
-                    data,
-                }),
-            }
-        }
+        AddCommand::File {
+            path,
+            file,
+            tag,
+            local_only,
+        } => return crate::files::add(&path, &file, &tag, local_only),
         AddCommand::Note { path, text, tag } => {
             let (folder, title) = split_path(&path)?;
             let text = match text {
@@ -549,6 +547,9 @@ fn print_view(view: &SecretView) {
     println!("{}", view.path());
     println!("  id:       {}", view.id);
     println!("  kind:     {}", format::kind_name(view.meta.kind));
+    if view.local_only {
+        println!("  policy:   local-only");
+    }
     if !view.meta.tags.is_empty() {
         println!(
             "  tags:     {}",
@@ -618,17 +619,11 @@ fn rm(selector: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_with_env(selectors: &[String], command: &[String]) -> Result<()> {
+fn run_with_env(selectors: &[String], command: &[String], dotenv: bool) -> Result<()> {
     let mut env: Vec<(String, String)> = Vec::new();
     for selector in selectors {
         let view = fetch(selector)?;
-        let SecretBody::EnvSet(set) = &view.body else {
-            bail!(
-                "{} is a {}, not an env set",
-                view.path(),
-                format::kind_name(view.meta.kind)
-            );
-        };
+        let set = env_set(&view, dotenv)?;
         for var in &set.vars {
             env.retain(|(k, _)| k != &var.key);
             env.push((var.key.clone(), var.value.clone()));
@@ -643,13 +638,7 @@ fn run_with_env(selectors: &[String], command: &[String]) -> Result<()> {
 
 fn export(selector: &str, format: ExportFormat) -> Result<()> {
     let view = fetch(selector)?;
-    let SecretBody::EnvSet(set) = &view.body else {
-        bail!(
-            "{} is a {}, not an env set",
-            view.path(),
-            format::kind_name(view.meta.kind)
-        );
-    };
+    let set = env_set(&view, false)?;
     match format {
         ExportFormat::Dotenv => {
             for var in &set.vars {
@@ -679,22 +668,24 @@ fn export(selector: &str, format: ExportFormat) -> Result<()> {
     Ok(())
 }
 
-fn file_pull(selector: &str, output: Option<PathBuf>, force: bool) -> Result<()> {
-    let view = fetch(selector)?;
-    let SecretBody::File(file) = &view.body else {
-        bail!(
-            "{} is a {}, not a file",
-            view.path(),
-            format::kind_name(view.meta.kind)
-        );
-    };
-    let target = output.unwrap_or_else(|| PathBuf::from(&file.name));
-    if target.exists() && !force {
-        bail!("{} exists; pass --force to overwrite", target.display());
+fn env_set(view: &SecretView, dotenv: bool) -> Result<EnvSet> {
+    match &view.body {
+        SecretBody::EnvSet(set) => Ok(set.clone()),
+        SecretBody::File(file) if dotenv => {
+            let mut set = EnvSet::default();
+            for pair in dotenvy::from_read_iter(file.data.as_slice()) {
+                let (key, value) =
+                    pair.map_err(|_| anyhow!("{} has invalid dotenv syntax", view.path()))?;
+                upsert(&mut set, key, value);
+            }
+            Ok(set)
+        }
+        SecretBody::File(_) => bail!(
+            "{} is a file; use `silo run --dotenv` to interpret it as dotenv",
+            view.path()
+        ),
+        _ => bail!("{} is not an env set or file", view.path()),
     }
-    write_private(&target, &file.data).with_context(|| format!("writing {}", target.display()))?;
-    println!("Wrote {} ({} bytes)", target.display(), file.data.len());
-    Ok(())
 }
 
 fn match_url(url: &str, site: bool, json: bool) -> Result<()> {
@@ -763,14 +754,45 @@ pub(crate) fn upsert(set: &mut EnvSet, key: String, value: String) {
     }
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use silo_core::vault::{SecretId, SecretKind, SecretMeta};
+
+    #[test]
+    fn generic_files_require_explicit_dotenv_interpretation_and_keep_their_bytes() {
+        let bytes = b"# note\r\nA='hello world'\r\n\r\nEMPTY=\r\nDUP=one\r\nDUP=two\r\n";
+        let view = SecretView {
+            id: SecretId::from_random_bytes([9; 16]),
+            revision: 1,
+            local_only: false,
+            meta: SecretMeta {
+                title: "dev".into(),
+                folder: FolderPath::root(),
+                kind: SecretKind::File,
+                tags: vec![],
+                urls: vec![],
+                basic_auth: false,
+                created_at: 0,
+                updated_at: 0,
+            },
+            body: SecretBody::File(silo_core::vault::File {
+                name: ".env".into(),
+                mime: None,
+                data: bytes.to_vec(),
+            }),
+        };
+        assert!(env_set(&view, false).is_err());
+        let parsed = env_set(&view, true).unwrap();
+        let values: Vec<_> = parsed
+            .vars
+            .iter()
+            .map(|v| (v.key.as_str(), v.value.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            [("A", "hello world"), ("EMPTY", ""), ("DUP", "two")]
+        );
+        assert!(matches!(&view.body, SecretBody::File(file) if file.data == bytes));
+    }
 }

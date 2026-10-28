@@ -33,6 +33,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let refused: Set<String> = [
         "shutdown", "history",
         "sync_register", "sync_login", "sync_logout", "sync_revoke_device",
+        "connections", "connect", "disconnect", "verify_peer", "share", "share_many", "add_local",
     ]
 
     private static func forward(_ message: Any?) throws -> Any {

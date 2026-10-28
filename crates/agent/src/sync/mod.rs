@@ -22,6 +22,12 @@ use crate::protocol::AgentError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
+    #[error("{error}\nConflict recovery notices:\n{notices}")]
+    Recovery {
+        #[source]
+        error: Box<SyncError>,
+        notices: String,
+    },
     #[error("sync is not set up; run `silo sync login` or `silo sync register`")]
     NotConfigured,
     #[error("already syncing with {0}; run `silo sync logout` first")]
