@@ -68,11 +68,16 @@ const STYLE = `${TOKENS}
 .l3 i.on { background: #34a853; } .l4 i.on { background: #188038; }
 .option { display: block; width: 100%; padding: 8px; border-radius: 7px; }
 .option.active { background: var(--surface); }
+.suggestion { display: flex; align-items: center; gap: 4px; }
+.suggestion .option { flex: 1; min-width: 0; }
+.suggestion .copy { margin-right: 4px; }
+.suggestion .copy.active { background: var(--surface); color: var(--fg); }
 .note { display: flex; align-items: center; gap: 8px; padding: 8px; }
 .note .lead { width: 24px; height: 24px; border-radius: 50%; }
 .note.error .lead { background: var(--error-soft); color: var(--error); }
 .secret { margin: 2px 8px 6px; padding: 8px; border-radius: 7px; background: var(--surface); user-select: all; }
-.foot { display: flex; gap: 10px; padding: 6px 8px 3px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); margin-top: 4px; }
+.foot { display: flex; gap: 10px; padding: 6px 8px 3px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); margin-top: 4px; white-space: normal; }
+.foot:empty { display: none; }
 kbd { font: 10px/1 var(--mono); padding: 2px 4px; border-radius: 4px; border: 1px solid var(--line); }
 `;
 
@@ -198,13 +203,19 @@ export class Menu {
       }
       case "unsaved": {
         const password = text("div", "pw secret", content.password);
+        const status = text("div", "sub foot", "");
+        status.setAttribute("role", "status");
         return [
           this.head("Password not saved"),
           notice("warn", content.text),
           password,
           this.item(icon("copy"), "Copy password", "Keep it somewhere until Silo can save it", () => {
-            void copyText(content.password, password);
+            void copyText(content.password).then((copied) => {
+              status.textContent = copied ? "Password copied." : "Could not copy: clipboard access is blocked on this page.";
+              this.place();
+            });
           }),
+          status,
         ];
       }
       case "logins": {
@@ -254,6 +265,8 @@ export class Menu {
       }
       case "generate": {
         const nodes: HTMLElement[] = [this.head("Suggested passwords")];
+        const status = text("div", "sub foot", "");
+        status.setAttribute("role", "status");
         if (content.saving !== "saved") nodes.push(notice("warn", SAVING_NOTE[content.saving]));
         if (content.insecure) nodes.push(insecureWarning());
         for (const option of content.options) {
@@ -270,8 +283,28 @@ export class Menu {
           const meter = document.createElement("span");
           meter.className = "meter";
           meter.append(bars, `${STYLE_LABEL[option.style]} · ${label} · ${option.bits} bits`);
-          button.append(text("span", "pw", option.password), meter);
-          nodes.push(this.choice(button, () => this.actions.useGenerated(option, content.saving)));
+          const password = text("span", "pw", option.password);
+          button.append(password, meter);
+          const copy = async () => {
+            const copied = await copyText(option.password);
+            status.textContent = copied
+              ? "Password copied. Copying does not save it to Silo."
+              : "Could not copy: clipboard access is blocked on this page.";
+            copyButton.replaceChildren(icon(copied ? "check" : "copy"));
+            this.place();
+          };
+          const copyButton = trustedButton(() => void copy());
+          copyButton.className = "icon-btn copy";
+          copyButton.title = `Copy ${STYLE_LABEL[option.style].toLowerCase()} password`;
+          copyButton.setAttribute("aria-label", copyButton.title);
+          copyButton.append(icon("copy"));
+          const row = document.createElement("div");
+          row.className = "suggestion";
+          row.append(
+            this.choice(button, () => this.actions.useGenerated(option, content.saving)),
+            this.choice(copyButton, () => void copy()),
+          );
+          nodes.push(row);
         }
         nodes.push(text("div", "sep", ""));
         nodes.push(this.item(lead("refresh"), "Other suggestions", "", () => this.actions.suggest()));
@@ -281,6 +314,7 @@ export class Menu {
         if (content.saving === "saved") {
           nodes.push(text("div", "sub foot", "The one you pick is saved to Silo before it is filled."));
         }
+        nodes.push(status);
         return nodes;
       }
     }
@@ -344,17 +378,13 @@ function keysHint(verb: string): HTMLElement {
   return node;
 }
 
-/** Clipboard when the page allows it (secure contexts); otherwise select the text for ⌘C / Ctrl+C. */
-async function copyText(value: string, shown: HTMLElement) {
+/** Never select secrets as a fallback: page scripts can read even a closed shadow root's selection. */
+async function copyText(value: string) {
   try {
     await navigator.clipboard.writeText(value);
-    shown.textContent = "Copied to the clipboard.";
+    return true;
   } catch {
-    const range = document.createRange();
-    range.selectNodeContents(shown);
-    const selection = shown.ownerDocument.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
+    return false;
   }
 }
 

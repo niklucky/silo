@@ -7,6 +7,7 @@ import type { SecretSummary, SecretView, StatusInfo } from "@/lib/protocol";
 import { errorText } from "@/lib/util";
 import { Detail } from "./Detail";
 import { Editor } from "./Editor";
+import { Generator } from "./Generator";
 import { VaultList } from "./VaultList";
 
 type Connection =
@@ -32,6 +33,7 @@ export type Copy = (value: string, what: string) => void;
 export default function App() {
   const [connection, setConnection] = useState<Connection>({ state: "loading" });
   const [screen, setScreen] = useState<Screen>({ name: "list" });
+  const [showGenerator, setShowGenerator] = useState(false);
   const [tab, setTab] = useState<Tab | null>(null);
   const [secrets, setSecrets] = useState<SecretSummary[]>([]);
   const [matches, setMatches] = useState<SecretSummary[]>([]);
@@ -180,7 +182,14 @@ export default function App() {
         <Status connection={connection} />
         <span className="spacer" />
         {unlocked && (
-          <button className="icon-button" title="Add a login" onClick={() => setScreen({ name: "edit", id: null })}>
+          <button
+            className="icon-button"
+            title="Add a login"
+            onClick={() => {
+              setShowGenerator(false);
+              setScreen({ name: "edit", id: null });
+            }}
+          >
             <Icon name="plus" />
           </button>
         )}
@@ -201,62 +210,76 @@ export default function App() {
         </button>
       </header>
 
-      {connection.state === "loading" && <div className="center muted">Connecting to the agent…</div>}
-      {connection.state === "bridge_error" && <Offline message={connection.message} retry={() => void refresh()} />}
-      {connection.state === "no_account" && (
-        <div className="center">
-          <Logo size={44} />
-          <h2>No vault yet</h2>
-          <p className="muted">
-            Run <code>silo init</code> in a terminal, then try again.
-          </p>
-          <button onClick={() => void refresh()}>Try again</button>
-        </div>
-      )}
-      {connection.state === "locked" && <Unlock onUnlocked={() => void refresh()} />}
+      {showGenerator ? (
+        <Generator copy={copy} back={() => setShowGenerator(false)} />
+      ) : (
+        <>
+          {connection.state === "loading" && <div className="center muted">Connecting to the agent…</div>}
+          {connection.state === "bridge_error" && <Offline message={connection.message} retry={() => void refresh()} />}
+          {connection.state === "no_account" && (
+            <div className="center">
+              <Logo size={44} />
+              <h2>No vault yet</h2>
+              <p className="muted">
+                Run <code>silo init</code> in a terminal, then try again.
+              </p>
+              <button onClick={() => void refresh()}>Try again</button>
+            </div>
+          )}
+          {connection.state === "locked" && <Unlock onUnlocked={() => void refresh()} />}
 
-      {unlocked && screen.name === "list" && (
-        <VaultList
-          secrets={secrets}
-          matches={matches}
-          refused={refused}
-          tab={tab}
-          query={query}
-          setQuery={setQuery}
-          events={events}
-          open={(id) => setScreen({ name: "detail", id })}
-          add={() => setScreen({ name: "edit", id: null })}
-          fill={(id) => void fill(id)}
-          copyField={(id, field) => void copyField(id, field)}
-        />
-      )}
-      {unlocked && screen.name === "detail" && (
-        <Detail
-          id={screen.id}
-          summary={secrets.find((s) => s.id === screen.id) ?? null}
-          canFill={matchIds.has(screen.id)}
-          copy={copy}
-          back={() => setScreen({ name: "list" })}
-          edit={() => setScreen({ name: "edit", id: screen.id })}
-          fill={() => void fill(screen.id)}
-          deleted={() => {
-            setSecrets((items) => items.filter((item) => item.id !== screen.id));
-            setMatches((items) => items.filter((item) => item.id !== screen.id));
-            setScreen({ name: "list" });
-            void loadVault();
-            void refresh();
-            notify("Deleted");
-          }}
-        />
-      )}
-      {unlocked && screen.name === "edit" && (
-        <Editor
-          id={screen.id}
-          tab={tab}
-          folders={[...new Set(secrets.map((s) => s.meta.folder).filter(Boolean))].sort()}
-          cancel={() => setScreen(screen.id ? { name: "detail", id: screen.id } : { name: "list" })}
-          saved={(summary) => void saved(summary)}
-        />
+          {unlocked && screen.name === "list" && (
+            <VaultList
+              secrets={secrets}
+              matches={matches}
+              refused={refused}
+              tab={tab}
+              query={query}
+              setQuery={setQuery}
+              events={events}
+              open={(id) => setScreen({ name: "detail", id })}
+              add={() => setScreen({ name: "edit", id: null })}
+              fill={(id) => void fill(id)}
+              copyField={(id, field) => void copyField(id, field)}
+            />
+          )}
+          {unlocked && screen.name === "detail" && (
+            <Detail
+              id={screen.id}
+              summary={secrets.find((s) => s.id === screen.id) ?? null}
+              canFill={matchIds.has(screen.id)}
+              copy={copy}
+              back={() => setScreen({ name: "list" })}
+              edit={() => setScreen({ name: "edit", id: screen.id })}
+              fill={() => void fill(screen.id)}
+              deleted={() => {
+                setSecrets((items) => items.filter((item) => item.id !== screen.id));
+                setMatches((items) => items.filter((item) => item.id !== screen.id));
+                setScreen({ name: "list" });
+                void loadVault();
+                void refresh();
+                notify("Deleted");
+              }}
+            />
+          )}
+          {unlocked && screen.name === "edit" && (
+            <Editor
+              id={screen.id}
+              tab={tab}
+              folders={[...new Set(secrets.map((s) => s.meta.folder).filter(Boolean))].sort()}
+              cancel={() => setScreen(screen.id ? { name: "detail", id: screen.id } : { name: "list" })}
+              saved={(summary) => void saved(summary)}
+            />
+          )}
+          {(!unlocked || screen.name !== "edit") && (
+            <div className="footer">
+              <button className="wide" onClick={() => setShowGenerator(true)}>
+                <Icon name="sparkle" size={14} />
+                Generate password
+              </button>
+            </div>
+          )}
+        </>
       )}
 
       {toast && (
