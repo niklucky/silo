@@ -107,33 +107,48 @@ export function fromDotenv(text: string): { key: string; value: string }[] {
   return vars;
 }
 
-/** Current TOTP code (RFC 6238, SHA-1, 6 digits, 30 s) for a base32 seed or `otpauth://` URI. */
-export async function totp(seed: string, at = Date.now()): Promise<{ code: string; remaining: number } | null> {
+const TOTP_HASH: Record<string, string> = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
+
+/**
+ * Current TOTP code (RFC 6238) for a base32 seed (SHA-1, 6 digits, 30 s) or an
+ * `otpauth://totp/` URI with its own algorithm, digits and period. Null for
+ * anything it cannot compute correctly, rather than a code that will not work.
+ */
+export async function totp(seed: string, at = Date.now()): Promise<{ code: string; remaining: number; period: number } | null> {
   let secret = seed.trim();
   let digits = 6;
   let period = 30;
-  if (secret.startsWith("otpauth://")) {
+  let hash = "SHA-1";
+  if (/^otpauth:/i.test(secret)) {
+    let url: URL;
     try {
-      const url = new URL(secret);
-      secret = url.searchParams.get("secret") ?? "";
-      digits = Number(url.searchParams.get("digits") ?? 6) || 6;
-      period = Number(url.searchParams.get("period") ?? 30) || 30;
+      url = new URL(secret);
     } catch {
       return null;
     }
+    if (url.host.toLowerCase() !== "totp") return null; // hotp needs a counter we do not keep
+    const param = (name: string) => url.searchParams.get(name);
+    secret = param("secret") ?? "";
+    const algorithm = TOTP_HASH[(param("algorithm") ?? "SHA1").toUpperCase()];
+    if (!algorithm) return null;
+    hash = algorithm;
+    digits = Number(param("digits") ?? 6);
+    period = Number(param("period") ?? 30);
+    if (!Number.isInteger(digits) || digits < 6 || digits > 8) return null;
+    if (!Number.isInteger(period) || period < 1) return null;
   }
   const key = base32(secret);
   if (!key || key.length === 0) return null;
   const counter = Math.floor(at / 1000 / period);
   const message = new Uint8Array(8);
   new DataView(message.buffer).setBigUint64(0, BigInt(counter));
-  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash }, false, ["sign"]);
   const mac = new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, message));
   const offset = (mac[mac.length - 1] ?? 0) & 0x0f;
   const binary =
     (((mac[offset] ?? 0) & 0x7f) << 24) | ((mac[offset + 1] ?? 0) << 16) | ((mac[offset + 2] ?? 0) << 8) | (mac[offset + 3] ?? 0);
   const code = String(binary % 10 ** digits).padStart(digits, "0");
-  return { code, remaining: period - (Math.floor(at / 1000) % period) };
+  return { code, remaining: period - (Math.floor(at / 1000) % period), period };
 }
 
 function base32(input: string): Uint8Array<ArrayBuffer> | null {

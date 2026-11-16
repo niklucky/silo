@@ -41,6 +41,20 @@ export function VaultApp({ client, host }: VaultAppProps) {
   useEffect(() => {
     if (state === "locked") setSession((n) => n + 1);
   }, [state]);
+  // Drop reads still queued from the session that just ended.
+  useEffect(() => () => username.stop(), [username]);
+
+  /**
+   * Back to the unlock screen, forgetting everything read while unlocked: the
+   * list, the selection and any open editor (which holds a decrypted secret).
+   * Every path that notices a lock goes through here, whoever locked.
+   */
+  const locked = useCallback(() => {
+    setItems([]);
+    setSelected(null);
+    setMode({ type: "view" });
+    setState("locked");
+  }, []);
 
   const refresh = useCallback(async () => {
     setItems(await client.list());
@@ -53,16 +67,16 @@ export function VaultApp({ client, host }: VaultAppProps) {
       const status = await client.status();
       setNoAccount(!status.has_account);
       if (!status.unlocked) {
-        setState("locked");
+        locked();
         return;
       }
       await refresh();
       setState("open");
     } catch (err) {
-      if (isLocked(err)) setState("locked");
+      if (isLocked(err)) locked();
       else setState((s) => (s === "loading" ? "locked" : s));
     }
-  }, [client, refresh]);
+  }, [client, refresh, locked]);
 
   useEffect(() => {
     void reload();
@@ -70,8 +84,6 @@ export function VaultApp({ client, host }: VaultAppProps) {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [reload]);
-
-  const onLocked = useCallback(() => setState("locked"), []);
 
   async function syncNow() {
     setSyncing(true);
@@ -125,11 +137,8 @@ export function VaultApp({ client, host }: VaultAppProps) {
 
   const lock = useCallback(async () => {
     await client.lock();
-    setItems([]);
-    setSelected(null);
-    setMode({ type: "view" });
-    setState("locked");
-  }, [client]);
+    locked();
+  }, [client, locked]);
 
   useEffect(() => {
     if (state !== "open") return;
@@ -171,14 +180,21 @@ export function VaultApp({ client, host }: VaultAppProps) {
           ? await client.update({ selector: mode.view.id, revision: mode.view.revision, ...fields })
           : await client.add(fields);
     } catch (err) {
-      // Keep the draft on screen; only a lock takes the user away from it.
-      if (isLocked(err)) throw new Error("The vault locked itself. Copy anything you need, then unlock again.");
+      if (isLocked(err)) locked();
       throw err;
     }
-    await refresh();
+    // Saved. From here on nothing may send the user back to the editor: a
+    // retry would add a duplicate or fail as stale.
+    let note = mode.type === "edit" ? "Saved" : `${KIND_LABEL[saved.meta.kind]} added`;
+    try {
+      await refresh();
+    } catch (err) {
+      if (isLocked(err)) return locked();
+      note += `, but the list did not reload: ${err instanceof Error ? err.message : String(err)}`;
+    }
     setSelected(saved.id);
     setMode({ type: "view" });
-    setToast(mode.type === "edit" ? "Saved" : `${KIND_LABEL[saved.meta.kind]} added`);
+    setToast(note);
   }
 
   if (state === "loading") return <div className="vault" data-host={host} />;
@@ -258,13 +274,13 @@ export function VaultApp({ client, host }: VaultAppProps) {
                 await refresh();
                 setToast("Deleted");
               } catch (err) {
-                if (isLocked(err)) setState("locked");
+                if (isLocked(err)) locked();
                 else setToast(err instanceof Error ? err.message : String(err));
               }
             }}
             openFolder={(path) => setScope({ type: "folder", path })}
             openTag={(tag) => setScope({ type: "tag", tag })}
-            locked={onLocked}
+            locked={locked}
           />
         )}
         {mode.type === "view" && !current && (

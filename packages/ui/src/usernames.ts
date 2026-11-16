@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { SecretSummary } from "./protocol";
 
-export type UsernameLoader = (secret: Pick<SecretSummary, "id" | "revision">) => Promise<string | null>;
+export interface UsernameLoader {
+  (secret: Pick<SecretSummary, "id" | "revision">): Promise<string | null>;
+  /** Drops queued reads and answers null from now on; for when the vault locks. */
+  stop(): void;
+}
 
 /**
  * Usernames for list rows, read from login bodies a few at a time and kept
@@ -12,8 +16,10 @@ export function createUsernameLoader(read: (id: string) => Promise<string | null
   const cache = new Map<string, Promise<string | null>>();
   const queue: (() => void)[] = [];
   let running = 0;
+  let stopped = false;
 
-  return (secret) => {
+  const load = (secret: Pick<SecretSummary, "id" | "revision">): Promise<string | null> => {
+    if (stopped) return Promise.resolve(null);
     const key = `${secret.id}:${secret.revision}`;
     const cached = cache.get(key);
     if (cached) return cached;
@@ -21,7 +27,7 @@ export function createUsernameLoader(read: (id: string) => Promise<string | null
       const run = () => {
         running++;
         void Promise.resolve()
-          .then(() => read(secret.id))
+          .then(() => (stopped ? null : read(secret.id)))
           .then(resolve, () => {
             cache.delete(key);
             resolve(null);
@@ -37,6 +43,14 @@ export function createUsernameLoader(read: (id: string) => Promise<string | null
     cache.set(key, result);
     return result;
   };
+  return Object.assign(load, {
+    stop() {
+      stopped = true;
+      cache.clear();
+      // Let queued reads settle as null without touching the agent.
+      for (const run of queue.splice(0)) run();
+    },
+  });
 }
 
 /** `id:revision`, the key usernames are kept under. */

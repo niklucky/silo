@@ -39,6 +39,8 @@ interface Props {
 export function Editor({ kind, initial, isNew, folders, save, cancel }: Props) {
   const [draft, setDraft] = useState(initial);
   const [saving, setSaving] = useState(false);
+  // Set at once, unlike state, so a second ⌘S during a save is ignored.
+  const inFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
@@ -48,11 +50,13 @@ export function Editor({ kind, initial, isNew, folders, save, cancel }: Props) {
   }, [isNew]);
 
   async function submit() {
+    if (inFlight.current) return;
     if (!draft.title.trim()) {
       setError("Give it a title.");
       titleRef.current?.focus();
       return;
     }
+    inFlight.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -60,6 +64,7 @@ export function Editor({ kind, initial, isNew, folders, save, cancel }: Props) {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setSaving(false);
+      inFlight.current = false;
     }
   }
 
@@ -162,16 +167,7 @@ function BodyEditor({ draft, set }: { draft: Draft; set: (patch: Partial<Draft>)
         <div className="form-grid">
           <TextField label="Number" value={card.number} mono onChange={(number) => put({ number: number.replace(/[^\d ]/g, "") })} />
           <TextField label="Holder" value={card.holder} onChange={(holder) => put({ holder })} />
-          <TextField
-            label="Expiry (MM/YY)"
-            value={card.expiry_month ? `${String(card.expiry_month).padStart(2, "0")}/${String(card.expiry_year).slice(-2)}` : ""}
-            mono
-            placeholder="08/29"
-            onChange={(v) => {
-              const [m, y] = v.split("/");
-              put({ expiry_month: Number(m) || 0, expiry_year: y ? 2000 + (Number(y) % 100) : 0 });
-            }}
-          />
+          <ExpiryField month={card.expiry_month} year={card.expiry_year} onChange={(expiry_month, expiry_year) => put({ expiry_month, expiry_year })} />
           <TextField label="Security code" value={card.cvv} mono onChange={(cvv) => put({ cvv: cvv.replace(/\D/g, "") })} />
         </div>
         <TextArea label="Notes" value={card.notes} onChange={(notes) => put({ notes })} />
@@ -204,6 +200,42 @@ function TextField({
       <input className={mono ? "mono" : undefined} value={value} placeholder={placeholder} spellCheck={false} onChange={(e) => onChange(e.target.value)} />
     </label>
   );
+}
+
+/**
+ * MM/YY typed freely: the text stays as typed, and the card only changes once
+ * it reads as a full date (or is cleared), so partial input is never rewritten.
+ */
+function ExpiryField({ month, year, onChange }: { month: number; year: number; onChange: (month: number, year: number) => void }) {
+  const [text, setText] = useState(month ? `${String(month).padStart(2, "0")}/${String(year).slice(-2)}` : "");
+  const parsed = parseExpiry(text);
+  return (
+    <label className="form-field">
+      <span>Expiry (MM/YY)</span>
+      <input
+        className={`mono${parsed ? "" : " invalid"}`}
+        value={text}
+        placeholder="08/29"
+        spellCheck={false}
+        onChange={(e) => {
+          setText(e.target.value);
+          const next = parseExpiry(e.target.value);
+          if (next) onChange(next.month, next.year);
+        }}
+      />
+    </label>
+  );
+}
+
+/** `{0, 0}` for an empty field, null while it is not a date yet. */
+function parseExpiry(text: string): { month: number; year: number } | null {
+  if (!text.trim()) return { month: 0, year: 0 };
+  const match = /^\s*(\d{1,2})\s*\/\s*(\d{2}|\d{4})\s*$/.exec(text);
+  if (!match) return null;
+  const month = Number(match[1]);
+  const year = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  return { month, year: year < 100 ? 2000 + year : year };
 }
 
 function TextArea({ label, value, onChange, rows = 4 }: { label: string; value: string; onChange: (value: string) => void; rows?: number }) {

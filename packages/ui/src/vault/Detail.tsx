@@ -245,7 +245,7 @@ function LoginView({ login, urls, basicAuth, copy }: { login: Login; urls: strin
 
 function TotpField({ seed, copy }: { seed: string; copy: Copy }) {
   const [now, setNow] = useState(Date.now());
-  const [code, setCode] = useState<{ code: string; remaining: number } | null>(null);
+  const [code, setCode] = useState<Awaited<ReturnType<typeof totp>>>(null);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -254,7 +254,8 @@ function TotpField({ seed, copy }: { seed: string; copy: Copy }) {
     void totp(seed, now).then(setCode);
   }, [seed, now]);
   if (!code) return <Field label="One-time code" value="Invalid seed" />;
-  const pretty = `${code.code.slice(0, 3)} ${code.code.slice(3)}`;
+  const half = Math.ceil(code.code.length / 2);
+  const pretty = `${code.code.slice(0, half)} ${code.code.slice(half)}`;
   return (
     <Field
       label="One-time code"
@@ -266,7 +267,7 @@ function TotpField({ seed, copy }: { seed: string; copy: Copy }) {
         <span className={`totp-timer${code.remaining <= 5 ? " low" : ""}`} title={`${code.remaining}s left`}>
           <svg viewBox="0 0 20 20" width="18" height="18">
             <circle cx="10" cy="10" r="8" className="track" />
-            <circle cx="10" cy="10" r="8" className="arc" strokeDasharray={`${(code.remaining / 30) * 50.3} 50.3`} />
+            <circle cx="10" cy="10" r="8" className="arc" strokeDasharray={`${(code.remaining / code.period) * 50.3} 50.3`} />
           </svg>
           {code.remaining}
         </span>
