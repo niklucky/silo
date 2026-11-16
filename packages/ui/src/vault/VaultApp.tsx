@@ -16,7 +16,10 @@ export interface VaultAppProps {
   host: "desktop" | "web";
 }
 
-type Mode = { type: "view" } | { type: "edit"; view: SecretView } | { type: "new"; kind: SecretKind };
+/** `session` is unique per opened editor: its React key, so a new editor never inherits one still saving. */
+type Mode = { type: "view" } | { type: "edit"; view: SecretView; session: number } | { type: "new"; kind: SecretKind; session: number };
+
+let editorSessions = 0;
 
 /** The whole vault UI: unlock, browse, search, preview and edit. Hosts only supply the client. */
 export function VaultApp({ client, host }: VaultAppProps) {
@@ -173,7 +176,7 @@ export function VaultApp({ client, host }: VaultAppProps) {
         void lock();
       } else if (mod && e.key === "n" && mode.type === "view") {
         e.preventDefault();
-        setMode({ type: "new", kind: scope.type === "kind" ? scope.kind : "login" });
+        setMode({ type: "new", kind: scope.type === "kind" ? scope.kind : "login", session: ++editorSessions });
       }
     };
     window.addEventListener("keydown", onKey);
@@ -260,13 +263,13 @@ export function VaultApp({ client, host }: VaultAppProps) {
           setSelected(id);
           setMode({ type: "view" });
         }}
-        create={(kind) => setMode({ type: "new", kind })}
+        create={(kind) => setMode({ type: "new", kind, session: ++editorSessions })}
         usernames={usernames}
       />
       <main className="pane">
         {mode.type === "edit" && (
           <Editor
-            key={`edit-${mode.view.id}`}
+            key={mode.session}
             kind={mode.view.meta.kind}
             initial={draftOf(mode.view)}
             isNew={false}
@@ -277,7 +280,7 @@ export function VaultApp({ client, host }: VaultAppProps) {
         )}
         {mode.type === "new" && (
           <Editor
-            key={`new-${mode.kind}`}
+            key={mode.session}
             kind={mode.kind}
             initial={newDraft(mode.kind, newFolder)}
             isNew
@@ -291,7 +294,7 @@ export function VaultApp({ client, host }: VaultAppProps) {
             client={client}
             summary={current}
             copy={copy}
-            edit={(view) => setMode({ type: "edit", view })}
+            edit={(view) => setMode({ type: "edit", view, session: ++editorSessions })}
             remove={async () => {
               try {
                 await client.remove(current.id);
