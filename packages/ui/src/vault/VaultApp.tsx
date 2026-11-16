@@ -113,15 +113,17 @@ export function VaultApp({ client, host }: VaultAppProps) {
   }
 
   const usernames = useUsernames(items, username);
-  const visible = useMemo(
-    () =>
-      search(
-        items.filter((i) => inScope(i, scope)),
-        query,
-        (i) => usernames.get(usernameKey(i)) ?? null,
-      ),
-    [items, scope, query, usernames],
-  );
+  // In display order: inside a folder (not searching) the list groups rows by
+  // subfolder, so sort by folder too; arrow keys and auto-select follow this.
+  const visible = useMemo(() => {
+    const found = search(
+      items.filter((i) => inScope(i, scope)),
+      query,
+      (i) => usernames.get(usernameKey(i)) ?? null,
+    );
+    if (scope.type !== "folder" || query.trim()) return found;
+    return found.sort((a, b) => (a.meta.folder < b.meta.folder ? -1 : a.meta.folder > b.meta.folder ? 1 : 0));
+  }, [items, scope, query, usernames]);
   const current = items.find((i) => i.id === selected) ?? null;
   const folders = useMemo(() => allFolders(items), [items]);
 
@@ -178,7 +180,13 @@ export function VaultApp({ client, host }: VaultAppProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [state, lock, mode.type, scope]);
 
+  // The editor on screen now; a save that finishes after the user moved on
+  // must not close whatever they opened since.
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+
   async function save(draft: Draft) {
+    const editing = mode;
     const fields = {
       title: draft.title,
       folder: draft.folder,
@@ -190,8 +198,8 @@ export function VaultApp({ client, host }: VaultAppProps) {
     let saved: SecretSummary;
     try {
       saved =
-        mode.type === "edit"
-          ? await client.update({ selector: mode.view.id, revision: mode.view.revision, ...fields })
+        editing.type === "edit"
+          ? await client.update({ selector: editing.view.id, revision: editing.view.revision, ...fields })
           : await client.add(fields);
     } catch (err) {
       if (isLocked(err)) locked();
@@ -199,15 +207,17 @@ export function VaultApp({ client, host }: VaultAppProps) {
     }
     // Saved. From here on nothing may send the user back to the editor: a
     // retry would add a duplicate or fail as stale.
-    let note = mode.type === "edit" ? "Saved" : `${KIND_LABEL[saved.meta.kind]} added`;
+    let note = editing.type === "edit" ? "Saved" : `${KIND_LABEL[saved.meta.kind]} added`;
     try {
       await refresh();
     } catch (err) {
       if (isLocked(err)) return locked();
       note += `, but the list did not reload: ${err instanceof Error ? err.message : String(err)}`;
     }
-    setSelected(saved.id);
-    setMode({ type: "view" });
+    if (modeRef.current === editing) {
+      setSelected(saved.id);
+      setMode({ type: "view" });
+    }
     setToast(note);
   }
 

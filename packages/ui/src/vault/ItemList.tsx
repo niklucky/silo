@@ -194,6 +194,7 @@ function group(items: readonly SecretSummary[], scope: Scope, query: string) {
     const rest = item.meta.folder === scope.path ? "" : item.meta.folder.slice(scope.path.length + 1);
     groups.set(rest, [...(groups.get(rest) ?? []), item]);
   }
+  // Same order as VaultApp sorts folders in (code units), so rows and arrow keys agree.
   const keys = [...groups.keys()].sort();
   return keys.map((key) => ({ label: key, items: groups.get(key)! }));
 }
