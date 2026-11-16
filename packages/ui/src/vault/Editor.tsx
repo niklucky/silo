@@ -69,7 +69,7 @@ export function Editor({ kind, initial, isNew, folders, save, cancel }: Props) {
   const inFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
-  const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
+  const set: SetDraft = (patch) => setDraft((d) => ({ ...d, ...(typeof patch === "function" ? patch(d) : patch) }));
 
   useEffect(() => {
     if (isNew) titleRef.current?.focus();
@@ -161,7 +161,10 @@ export function Editor({ kind, initial, isNew, folders, save, cancel }: Props) {
   );
 }
 
-function BodyEditor({ draft, set }: { draft: Draft; set: (patch: Partial<Draft>) => void }) {
+/** A patch, or a function of the latest draft for changes that land later (a file read). */
+type SetDraft = (patch: Partial<Draft> | ((draft: Draft) => Partial<Draft>)) => void;
+
+function BodyEditor({ draft, set }: { draft: Draft; set: SetDraft }) {
   const { body } = draft;
   if ("login" in body) {
     const login = body.login;
@@ -208,7 +211,7 @@ function BodyEditor({ draft, set }: { draft: Draft; set: (patch: Partial<Draft>)
     );
   }
   if ("env_set" in body) return <EnvEditor vars={body.env_set.vars} onChange={(vars) => set({ body: { env_set: { vars } } })} />;
-  if ("file" in body) return <FileEditor file={body.file} onChange={(file) => set({ body: { file }, title: draft.title || file.name })} />;
+  if ("file" in body) return <FileEditor file={body.file} onChange={(file) => set((d) => ({ body: { file }, title: d.title || file.name }))} />;
   return <TextArea label="Text" value={body.note.text} rows={14} onChange={(text) => set({ body: { note: { text } } })} />;
 }
 

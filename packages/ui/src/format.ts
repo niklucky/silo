@@ -99,7 +99,7 @@ const SINGLE = /^'([^']*)'\s*(?:#.*)?$/;
 /**
  * Variables in dotenv text, and the 1-based line numbers it could not read.
  * Blank lines and `#` comments are skipped. Quoted values may span lines;
- * double quotes take `\n`, `\t`, `\r`, `\"` and `\\` escapes. Unquoted values
+ * double quotes take `\n`, `\t`, `\r`, `\"` and `\\` escapes (other backslashes stay). Unquoted values
  * end at ` #`.
  */
 export function parseDotenv(text: string): { vars: { key: string; value: string }[]; bad: number[] } {
@@ -135,8 +135,9 @@ export function parseDotenv(text: string): { vars: { key: string; value: string 
   return { vars, bad };
 }
 
+/** The escapes {@link quote} writes; any other backslash is kept as typed. */
 function unescape(body: string): string {
-  return body.replace(/\\([\s\S])/g, (_, c: string) => ({ n: "\n", t: "\t", r: "\r" })[c] ?? c);
+  return body.replace(/\\([\s\S])/g, (seq, c: string) => ({ n: "\n", t: "\t", r: "\r", '"': '"', "\\": "\\" })[c] ?? seq);
 }
 
 const TOTP_HASH: Record<string, string> = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };
