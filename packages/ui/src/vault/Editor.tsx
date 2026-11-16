@@ -1,5 +1,5 @@
-import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
-import { encodeBase64, formatBytes, fromDotenv, toDotenv } from "../format";
+import { createContext, type KeyboardEvent as ReactKeyboardEvent, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { encodeBase64, formatBytes, parseDotenv, toDotenv } from "../format";
 import { Icon } from "../icons";
 import { emptyBody, KIND_LABEL, type SecretBody, type SecretKind, type SecretView } from "../protocol";
 
@@ -36,7 +36,33 @@ interface Props {
   cancel: () => void;
 }
 
+/**
+ * Fields tell the editor what stops the draft from being saved as shown: a
+ * half-typed date, a line that is not KEY=value, a file still being read.
+ * Save then explains instead of storing something other than what is on screen.
+ */
+type Report = (field: string, problem: string | null) => void;
+const Problems = createContext<Report>(() => undefined);
+
+function useProblem(field: string, problem: string | null) {
+  const report = useContext(Problems);
+  useEffect(() => {
+    report(field, problem);
+    return () => report(field, null);
+  }, [report, field, problem]);
+}
+
 export function Editor({ kind, initial, isNew, folders, save, cancel }: Props) {
+  const [problems, setProblems] = useState<Record<string, string>>({});
+  const report = useCallback<Report>((field, problem) => {
+    setProblems((old) => {
+      if ((old[field] ?? null) === problem) return old;
+      const next = { ...old };
+      if (problem) next[field] = problem;
+      else delete next[field];
+      return next;
+    });
+  }, []);
   const [draft, setDraft] = useState(initial);
   const [saving, setSaving] = useState(false);
   // Set at once, unlike state, so a second ⌘S during a save is ignored.
@@ -51,6 +77,11 @@ export function Editor({ kind, initial, isNew, folders, save, cancel }: Props) {
 
   async function submit() {
     if (inFlight.current) return;
+    const problem = Object.values(problems)[0];
+    if (problem) {
+      setError(problem);
+      return;
+    }
     if (!draft.title.trim()) {
       setError("Give it a title.");
       titleRef.current?.focus();
@@ -122,7 +153,9 @@ export function Editor({ kind, initial, isNew, folders, save, cancel }: Props) {
           </div>
         </div>
 
-        <BodyEditor draft={draft} set={set} />
+        <Problems.Provider value={report}>
+          <BodyEditor draft={draft} set={set} />
+        </Problems.Provider>
       </div>
     </article>
   );
@@ -209,6 +242,7 @@ function TextField({
 function ExpiryField({ month, year, onChange }: { month: number; year: number; onChange: (month: number, year: number) => void }) {
   const [text, setText] = useState(month ? `${String(month).padStart(2, "0")}/${String(year).slice(-2)}` : "");
   const parsed = parseExpiry(text);
+  useProblem("expiry", parsed ? null : "Expiry must be MM/YY, or left empty.");
   return (
     <label className="form-field">
       <span>Expiry (MM/YY)</span>
@@ -306,6 +340,14 @@ function TagInput({ tags, onChange }: { tags: string[]; onChange: (tags: string[
 function EnvEditor({ vars, onChange }: { vars: { key: string; value: string }[]; onChange: (vars: { key: string; value: string }[]) => void }) {
   const [asText, setAsText] = useState(false);
   const [text, setText] = useState("");
+  const bad = asText ? parseDotenv(text).bad : [];
+  const unnamed = asText ? -1 : vars.findIndex((v) => !v.key.trim() && v.value);
+  const problem = bad.length
+    ? `.env line ${bad.join(", ")} is not KEY=value.`
+    : unnamed >= 0
+      ? `Variable ${unnamed + 1} has a value but no name.`
+      : null;
+  useProblem("env", problem);
   const put = (i: number, patch: Partial<{ key: string; value: string }>) => onChange(vars.map((v, j) => (j === i ? { ...v, ...patch } : v)));
 
   return (
@@ -313,10 +355,22 @@ function EnvEditor({ vars, onChange }: { vars: { key: string; value: string }[];
       <span className="env-editor-head">
         Variables
         <span className="segmented">
-          <button type="button" className={asText ? "" : "on"} onClick={() => asText && (onChange(fromDotenv(text)), setAsText(false))}>
+          <button
+            type="button"
+            className={asText ? "" : "on"}
+            disabled={bad.length > 0}
+            title={bad.length ? (problem ?? undefined) : undefined}
+            onClick={() => asText && (onChange(parseDotenv(text).vars), setAsText(false))}
+          >
             <Icon name="table" size={13} /> Table
           </button>
-          <button type="button" className={asText ? "on" : ""} onClick={() => !asText && (setText(toDotenv(vars)), setAsText(true))}>
+          <button
+            type="button"
+            className={asText ? "on" : ""}
+            disabled={unnamed >= 0}
+            title={unnamed >= 0 ? (problem ?? undefined) : undefined}
+            onClick={() => !asText && (setText(toDotenv(vars)), setAsText(true))}
+          >
             <Icon name="text" size={13} /> .env
           </button>
         </span>
@@ -330,7 +384,7 @@ function EnvEditor({ vars, onChange }: { vars: { key: string; value: string }[];
           spellCheck={false}
           onChange={(e) => {
             setText(e.target.value);
-            onChange(fromDotenv(e.target.value));
+            onChange(parseDotenv(e.target.value).vars);
           }}
         />
       ) : (
@@ -346,8 +400,9 @@ function EnvEditor({ vars, onChange }: { vars: { key: string; value: string }[];
                 onChange={(e) => put(i, { value: e.target.value })}
                 onPaste={(e) => {
                   const pasted = e.clipboardData.getData("text");
-                  const parsed = fromDotenv(pasted);
-                  if (parsed.length > 1) {
+                  const { vars: parsed, bad: unparsed } = parseDotenv(pasted);
+                  // Split only a paste that is wholly .env; anything else goes in as typed.
+                  if (parsed.length > 1 && unparsed.length === 0) {
                     e.preventDefault();
                     onChange([...vars.slice(0, i), ...parsed, ...vars.slice(i + 1)].filter((x) => x.key || x.value));
                   }
@@ -363,7 +418,7 @@ function EnvEditor({ vars, onChange }: { vars: { key: string; value: string }[];
           </button>
         </div>
       )}
-      <span className="hint">Paste a whole .env into any value to split it into rows.</span>
+      {problem ? <span className="hint warn">{problem}</span> : <span className="hint">Paste a whole .env into any value to split it into rows.</span>}
     </div>
   );
 }
@@ -372,11 +427,25 @@ function FileEditor({ file, onChange }: { file: { name: string; mime: string | n
   const [over, setOver] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const size = file.data ? Math.floor((file.data.length * 3) / 4) : 0;
+  const [reading, setReading] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  // Only the latest pick may land; an earlier, slower read is dropped.
+  const latest = useRef(0);
+  useProblem("file", reading ? `Still reading ${reading}…` : failed);
 
   async function take(f: File | undefined) {
     if (!f) return;
-    const data = encodeBase64(new Uint8Array(await f.arrayBuffer()));
-    onChange({ name: f.name, mime: f.type || null, data });
+    const pick = ++latest.current;
+    setReading(f.name);
+    setFailed(null);
+    try {
+      const data = encodeBase64(new Uint8Array(await f.arrayBuffer()));
+      if (pick === latest.current) onChange({ name: f.name, mime: f.type || null, data });
+    } catch (err) {
+      if (pick === latest.current) setFailed(`Could not read ${f.name}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      if (pick === latest.current) setReading(null);
+    }
   }
 
   return (
@@ -395,7 +464,11 @@ function FileEditor({ file, onChange }: { file: { name: string; mime: string | n
       onClick={() => input.current?.click()}
     >
       <Icon name="upload" size={20} />
-      {file.data ? (
+      {reading ? (
+        <span>Reading {reading}…</span>
+      ) : failed ? (
+        <span className="warn">{failed}</span>
+      ) : file.data ? (
         <span>
           <strong>{file.name}</strong> · {formatBytes(size)}
           <br />

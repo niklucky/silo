@@ -56,16 +56,28 @@ impl Agent {
             });
         }
         let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        let unreachable = |err: ClientError| {
+            Response::Err(AgentError::Internal {
+                message: format!("cannot reach the agent: {err}"),
+            })
+        };
         match self.try_call(&mut slot, request) {
             Ok(response) => response,
-            Err(_) => {
-                // The agent went away (restart, `silo agent stop`): reconnect once.
+            Err(err) => {
+                // The connection is dead either way (agent restarted, `silo agent stop`).
                 *slot = None;
-                self.try_call(&mut slot, request).unwrap_or_else(|err| {
+                // Send again only what cannot be applied twice: a request the
+                // agent never received, or one that changes nothing.
+                if matches!(err, ClientError::Unsent(_)) || is_read_only(request) {
+                    self.try_call(&mut slot, request)
+                        .unwrap_or_else(unreachable)
+                } else {
                     Response::Err(AgentError::Internal {
-                        message: format!("cannot reach the agent: {err}"),
+                        message: format!(
+                            "the agent stopped answering ({err}); the change may or may not have been saved, so check before trying again"
+                        ),
                     })
-                })
+                }
             }
         }
     }
@@ -90,6 +102,22 @@ impl Agent {
             Err(err) => Err(err),
         }
     }
+}
+
+/// Requests that change nothing in the vault, so sending one twice is harmless.
+fn is_read_only(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Status
+            | Request::Lock
+            | Request::List(_)
+            | Request::Get { .. }
+            | Request::History { .. }
+            | Request::Match { .. }
+            | Request::Site { .. }
+            | Request::SyncStatus
+            | Request::SyncDevices
+    )
 }
 
 fn connect(paths: &Paths) -> Result<Client, ClientError> {
@@ -232,5 +260,82 @@ mod tests {
             id.as_str()
         );
         assert_eq!(call(json!({"method": "lock"}))["ok"], "locked");
+    }
+
+    /// The two ways a kept connection dies. Closed before the request: the
+    /// request is sent again on a new connection. Closed after reading it
+    /// without answering: a change is not sent again, since it may have landed.
+    #[test]
+    fn resends_only_what_cannot_apply_twice() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let store = Store::open(paths.clone()).unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(4);
+        let kdf = KdfParams::new(&mut rng, 256, 1, 1);
+        let (record, _) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
+        store.write_account(&record).unwrap();
+        thread::spawn(move || {
+            server::run(server::Config {
+                store,
+                default_ttl: server::DEFAULT_TTL,
+                sync_interval: None,
+            })
+        });
+        for _ in 0..200 {
+            if Client::connect(paths.socket_file()).is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let agent = Agent::with_paths(paths);
+        let call = |request: Value| -> Value {
+            serde_json::from_str(&agent.call_json(&request.to_string())).unwrap()
+        };
+        assert_eq!(
+            call(json!({"method": "unlock", "params": {"password": "pw"}}))["ok"]["unlocked"]["unlocked"],
+            true
+        );
+        let note =
+            json!({"method": "add", "params": {"title": "n", "body": {"note": {"text": "x"}}}});
+        let count = |call: &dyn Fn(Value) -> Value| {
+            call(json!({"method": "list", "params": {}}))["ok"]["list"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+
+        // A connection to a peer that is already gone.
+        let dead = dir.path().join("dead.sock");
+        let listener = UnixListener::bind(&dead).unwrap();
+        let client = Client::connect(&dead).unwrap();
+        drop(listener.accept().unwrap());
+        *agent.client.lock().unwrap() = Some(client);
+        assert!(call(note.clone())["ok"]["added"].is_object());
+        assert_eq!(count(&call), 1);
+
+        // A peer that takes the request and hangs up without answering.
+        let mute = dir.path().join("mute.sock");
+        let listener = UnixListener::bind(&mute).unwrap();
+        let client = Client::connect(&mute).unwrap();
+        let peer = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            BufReader::new(stream)
+                .read_line(&mut String::new())
+                .unwrap();
+        });
+        *agent.client.lock().unwrap() = Some(client);
+        let reply = call(note);
+        peer.join().unwrap();
+        assert_eq!(reply["err"]["code"], "internal", "{reply}");
+        assert!(
+            reply["err"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("may or may not")
+        );
+        assert_eq!(count(&call), 1, "the change was not sent again");
     }
 }

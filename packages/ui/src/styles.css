@@ -1152,3 +1152,7 @@ code {
 .form-field input.invalid:focus {
   border-color: var(--warn);
 }
+.hint.warn,
+.drop .warn {
+  color: var(--warn);
+}

@@ -80,31 +80,63 @@ export function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/** Dotenv text that {@link parseDotenv} reads back to the same variables. Unnamed rows cannot be written. */
 export function toDotenv(vars: { key: string; value: string }[]): string {
   return vars
     .filter((v) => v.key)
-    .map(({ key, value }) => `${key}=${/[\s#"'$`\\]/.test(value) ? JSON.stringify(value) : value}`)
+    .map(({ key, value }) => `${key}=${/[\s#"'$`\\]/.test(value) ? quote(value) : value}`)
     .join("\n");
 }
 
-export function fromDotenv(text: string): { key: string; value: string }[] {
+function quote(value: string): string {
+  return `"${value.replace(/[\\"\n\r\t]/g, (c) => ({ "\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t" })[c] ?? c)}"`;
+}
+
+const ASSIGNMENT = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*)$/;
+const DOUBLE = /^"((?:[^"\\]|\\[\s\S])*)"\s*(?:#.*)?$/;
+const SINGLE = /^'([^']*)'\s*(?:#.*)?$/;
+
+/**
+ * Variables in dotenv text, and the 1-based line numbers it could not read.
+ * Blank lines and `#` comments are skipped. Quoted values may span lines;
+ * double quotes take `\n`, `\t`, `\r`, `\"` and `\\` escapes. Unquoted values
+ * end at ` #`.
+ */
+export function parseDotenv(text: string): { vars: { key: string; value: string }[]; bad: number[] } {
   const vars: { key: string; value: string }[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*)$/.exec(line);
-    if (!match) continue;
-    let value = (match[2] ?? "").trim();
-    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-      try {
-        value = JSON.parse(value) as string;
-      } catch {
-        value = value.slice(1, -1);
-      }
-    } else if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
-      value = value.slice(1, -1);
+  const bad: number[] = [];
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const match = ASSIGNMENT.exec(line);
+    if (!match) {
+      bad.push(i + 1);
+      continue;
     }
-    vars.push({ key: match[1] ?? "", value });
+    const key = match[1] ?? "";
+    let raw = (match[2] ?? "").trimEnd();
+    const quoteChar = raw[0];
+    if (quoteChar === '"' || quoteChar === "'") {
+      const pattern = quoteChar === '"' ? DOUBLE : SINGLE;
+      const first = i;
+      while (!pattern.test(raw) && i + 1 < lines.length) raw += `\n${lines[++i] ?? ""}`;
+      const quoted = pattern.exec(raw);
+      if (!quoted) {
+        bad.push(first + 1);
+        continue;
+      }
+      const body = quoted[1] ?? "";
+      vars.push({ key, value: quoteChar === '"' ? unescape(body) : body });
+    } else {
+      vars.push({ key, value: raw.replace(/\s+#.*$/, "").trim() });
+    }
   }
-  return vars;
+  return { vars, bad };
+}
+
+function unescape(body: string): string {
+  return body.replace(/\\([\s\S])/g, (_, c: string) => ({ n: "\n", t: "\t", r: "\r" })[c] ?? c);
 }
 
 const TOTP_HASH: Record<string, string> = { SHA1: "SHA-1", SHA256: "SHA-256", SHA512: "SHA-512" };

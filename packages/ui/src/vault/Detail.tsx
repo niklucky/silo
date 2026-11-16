@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { VaultClient } from "../client";
 import {
   asText,
@@ -53,6 +53,21 @@ export function Detail({ client, summary, copy, edit, remove, openFolder, openTa
       live = false;
     };
   }, [client, summary.id, summary.revision, locked]);
+
+  // The item and revision on screen; a history answer for anything else is dropped.
+  const shown = useRef("");
+  shown.current = `${summary.id}:${summary.revision}`;
+  function loadHistory(of: SecretView) {
+    const asked = `${of.id}:${of.revision}`;
+    client.history(of.id).then(
+      (revs) => shown.current === asked && setHistory(revs),
+      (e: unknown) => {
+        if (shown.current !== asked) return;
+        if ((e as { code?: unknown }).code === "locked") locked();
+        else setError(e instanceof Error ? e.message : String(e));
+      },
+    );
+  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -128,7 +143,7 @@ export function Detail({ client, summary, copy, edit, remove, openFolder, openTa
             {view.revision > 1 && (
               <button
                 className="link"
-                onClick={() => (history ? setHistory(null) : client.history(view.id).then(setHistory, () => setHistory([])))}
+                onClick={() => (history ? setHistory(null) : loadHistory(view))}
               >
                 <Icon name="history" size={13} /> {history ? "Hide history" : "History"}
               </button>

@@ -85,12 +85,26 @@ export function VaultApp({ client, host }: VaultAppProps) {
     return () => window.removeEventListener("focus", onFocus);
   }, [reload]);
 
+  // The agent locks on its own (timeout, `silo lock`) without telling clients,
+  // and a window can stay in front for hours: ask now and then.
+  useEffect(() => {
+    if (state !== "open") return;
+    const timer = setInterval(() => {
+      client.status().then(
+        (status) => !status.unlocked && locked(),
+        (err: unknown) => isLocked(err) && locked(),
+      );
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [state, client, locked]);
+
   async function syncNow() {
     setSyncing(true);
     try {
       await client.sync();
       await refresh();
     } catch (err) {
+      if (isLocked(err)) return locked();
       setToast(err instanceof Error ? err.message : String(err));
       client.syncStatus().then(setSync, () => undefined);
     } finally {
