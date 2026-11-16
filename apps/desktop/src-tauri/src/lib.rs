@@ -5,6 +5,7 @@
 //! which also produces the TypeScript bindings in `packages/bindings/src/desktop.ts`.
 
 mod agent;
+mod site;
 
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
@@ -31,8 +32,18 @@ async fn agent_call(app: tauri::AppHandle, request: String) -> String {
         })
 }
 
+/// GETs a website saved in a login (for its favicon); see [`site::get`].
+#[tauri::command]
+#[specta::specta]
+async fn fetch_site(url: String, limit: u32) -> Option<site::SiteResponse> {
+    tauri::async_runtime::spawn_blocking(move || site::get(&url, limit))
+        .await
+        .ok()
+        .flatten()
+}
+
 fn specta_builder() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![core_version, agent_call])
+    Builder::<tauri::Wry>::new().commands(collect_commands![core_version, agent_call, fetch_site])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

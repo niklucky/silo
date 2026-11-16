@@ -1,4 +1,5 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type RefObject, useEffect, useRef, useState } from "react";
+import { firstWebsite, useFavicon } from "../favicon";
 import { avatarFor } from "../format";
 import { Icon } from "../icons";
 import { KIND_LABEL, KINDS, type SecretKind, type SecretSummary } from "../protocol";
@@ -148,7 +149,17 @@ function Row({
 
 export function ItemAvatar({ item, large = false }: { item: SecretSummary; large?: boolean }) {
   const cls = large ? "avatar large" : "avatar";
-  if (item.meta.kind === "login") {
+  const login = item.meta.kind === "login";
+  const favicon = useFavicon(login ? firstWebsite(item.meta.urls) : null);
+  const [broken, setBroken] = useState<string | null>(null);
+  if (login) {
+    if (favicon && broken !== favicon) {
+      return (
+        <span className={`${cls} favicon`} aria-hidden="true">
+          <img src={favicon} alt="" onError={() => setBroken(favicon)} />
+        </span>
+      );
+    }
     const { letter, color } = avatarFor(hostsOf(item.meta)[0] ?? item.meta.title);
     return (
       <span className={cls} style={{ background: color }} aria-hidden="true">

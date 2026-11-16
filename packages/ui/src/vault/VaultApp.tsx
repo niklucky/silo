@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SyncInfo, VaultClient } from "../client";
+import { createFaviconLoader, FaviconContext, type SiteFetcher } from "../favicon";
 import { Icon, Logo } from "../icons";
 import { KIND_LABEL, type SecretKind, type SecretSummary, type SecretView } from "../protocol";
 import { search } from "../search";
@@ -14,6 +15,8 @@ export interface VaultAppProps {
   client: VaultClient;
   /** Shown on the unlock screen; also lets hosts tweak layout via `data-host`. */
   host: "desktop" | "web";
+  /** Lets login avatars show website favicons; letters only without it. */
+  fetchSite?: SiteFetcher;
 }
 
 /** `session` is unique per opened editor: its React key, so a new editor never inherits one still saving. */
@@ -22,7 +25,7 @@ type Mode = { type: "view" } | { type: "edit"; view: SecretView; session: number
 let editorSessions = 0;
 
 /** The whole vault UI: unlock, browse, search, preview and edit. Hosts only supply the client. */
-export function VaultApp({ client, host }: VaultAppProps) {
+export function VaultApp({ client, host, fetchSite }: VaultAppProps) {
   const [state, setState] = useState<"loading" | "locked" | "open">("loading");
   const [items, setItems] = useState<SecretSummary[]>([]);
   const [scope, setScopeRaw] = useState<Scope>({ type: "all" });
@@ -34,6 +37,7 @@ export function VaultApp({ client, host }: VaultAppProps) {
   const [syncing, setSyncing] = useState(false);
   const [noAccount, setNoAccount] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const favicons = useMemo(() => (fetchSite ? createFaviconLoader(fetchSite) : null), [fetchSite]);
 
   // A fresh cache per unlocked session (`session` is only there to force one), so no username outlives a lock.
   const [session, setSession] = useState(0);
@@ -242,87 +246,89 @@ export function VaultApp({ client, host }: VaultAppProps) {
   const newFolder = scope.type === "folder" ? scope.path : "";
 
   return (
-    <div className="vault" data-host={host}>
-      <Sidebar
-        items={items}
-        scope={scope}
-        setScope={setScope}
-        lock={() => void lock()}
-        sync={sync}
-        syncing={syncing}
-        syncNow={() => void syncNow()}
-      />
-      <ItemList
-        scope={scope}
-        items={visible}
-        query={query}
-        setQuery={setQuery}
-        searchRef={searchRef}
-        selected={mode.type === "new" ? null : selected}
-        select={(id) => {
-          setSelected(id);
-          setMode({ type: "view" });
-        }}
-        create={(kind) => setMode({ type: "new", kind, session: ++editorSessions })}
-        usernames={usernames}
-      />
-      <main className="pane">
-        {mode.type === "edit" && (
-          <Editor
-            key={mode.session}
-            kind={mode.view.meta.kind}
-            initial={draftOf(mode.view)}
-            isNew={false}
-            folders={folders}
-            save={save}
-            cancel={() => setMode({ type: "view" })}
-          />
-        )}
-        {mode.type === "new" && (
-          <Editor
-            key={mode.session}
-            kind={mode.kind}
-            initial={newDraft(mode.kind, newFolder)}
-            isNew
-            folders={folders}
-            save={save}
-            cancel={() => setMode({ type: "view" })}
-          />
-        )}
-        {mode.type === "view" && current && (
-          <Detail
-            client={client}
-            summary={current}
-            copy={copy}
-            edit={(view) => setMode({ type: "edit", view, session: ++editorSessions })}
-            remove={async () => {
-              try {
-                await client.remove(current.id);
-                await refresh();
-                setToast("Deleted");
-              } catch (err) {
-                if (isLocked(err)) locked();
-                else setToast(err instanceof Error ? err.message : String(err));
-              }
-            }}
-            openFolder={(path) => setScope({ type: "folder", path })}
-            openTag={(tag) => setScope({ type: "tag", tag })}
-            locked={locked}
-          />
-        )}
-        {mode.type === "view" && !current && (
-          <div className="pane-empty">
-            <Icon name="key" size={28} />
-            <p>Select an item, or press ⌘N to add one.</p>
+    <FaviconContext.Provider value={favicons}>
+      <div className="vault" data-host={host}>
+        <Sidebar
+          items={items}
+          scope={scope}
+          setScope={setScope}
+          lock={() => void lock()}
+          sync={sync}
+          syncing={syncing}
+          syncNow={() => void syncNow()}
+        />
+        <ItemList
+          scope={scope}
+          items={visible}
+          query={query}
+          setQuery={setQuery}
+          searchRef={searchRef}
+          selected={mode.type === "new" ? null : selected}
+          select={(id) => {
+            setSelected(id);
+            setMode({ type: "view" });
+          }}
+          create={(kind) => setMode({ type: "new", kind, session: ++editorSessions })}
+          usernames={usernames}
+        />
+        <main className="pane">
+          {mode.type === "edit" && (
+            <Editor
+              key={mode.session}
+              kind={mode.view.meta.kind}
+              initial={draftOf(mode.view)}
+              isNew={false}
+              folders={folders}
+              save={save}
+              cancel={() => setMode({ type: "view" })}
+            />
+          )}
+          {mode.type === "new" && (
+            <Editor
+              key={mode.session}
+              kind={mode.kind}
+              initial={newDraft(mode.kind, newFolder)}
+              isNew
+              folders={folders}
+              save={save}
+              cancel={() => setMode({ type: "view" })}
+            />
+          )}
+          {mode.type === "view" && current && (
+            <Detail
+              client={client}
+              summary={current}
+              copy={copy}
+              edit={(view) => setMode({ type: "edit", view, session: ++editorSessions })}
+              remove={async () => {
+                try {
+                  await client.remove(current.id);
+                  await refresh();
+                  setToast("Deleted");
+                } catch (err) {
+                  if (isLocked(err)) locked();
+                  else setToast(err instanceof Error ? err.message : String(err));
+                }
+              }}
+              openFolder={(path) => setScope({ type: "folder", path })}
+              openTag={(tag) => setScope({ type: "tag", tag })}
+              locked={locked}
+            />
+          )}
+          {mode.type === "view" && !current && (
+            <div className="pane-empty">
+              <Icon name="key" size={28} />
+              <p>Select an item, or press ⌘N to add one.</p>
+            </div>
+          )}
+        </main>
+        {toast && (
+          <div className="toast" role="status">
+            <Icon name="check" size={14} /> {toast}
           </div>
         )}
-      </main>
-      {toast && (
-        <div className="toast" role="status">
-          <Icon name="check" size={14} /> {toast}
-        </div>
-      )}
-    </div>
+      </div>
+    </FaviconContext.Provider>
   );
 }
 

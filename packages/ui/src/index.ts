@@ -3,6 +3,7 @@ export type { CoreVersionProps } from "./CoreVersion";
 export { AgentError, createAgentClient } from "./agent";
 export type { AgentTransport } from "./agent";
 export type { SyncInfo, VaultClient } from "./client";
+export type { SiteFetcher, SiteResponse } from "./favicon";
 export { createMockClient } from "./mock";
 export * from "./protocol";
 export { VaultApp } from "./vault/VaultApp";
