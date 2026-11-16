@@ -348,7 +348,7 @@ function Unlock({ host, noAccount, unlock }: { host: string; noAccount: boolean;
           });
         }}
       >
-        <Logo size={44} />
+        <Logo size={64} />
         <h1>{noAccount ? "No vault on this machine" : "Silo is locked"}</h1>
         {noAccount ? (
           <p className="muted center">

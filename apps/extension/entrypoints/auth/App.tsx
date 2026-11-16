@@ -396,7 +396,7 @@ export default function App() {
 function Brand() {
   return (
     <div className="brand">
-      <Logo size={22} />
+      <Logo />
       <span>Silo</span>
     </div>
   );

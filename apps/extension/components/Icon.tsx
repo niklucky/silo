@@ -20,11 +20,18 @@ export function Icon({ name, size = 16, strokeWidth = 2 }: { name: IconName; siz
   );
 }
 
-/** The Silo mark: a key on the accent color. */
-export function Logo({ size = 22 }: { size?: number }) {
+/** The Silo sign: a password field with two asterisks. `size` is its width. */
+export function Logo({ size = 24 }: { size?: number }) {
   return (
-    <span className="logo" style={{ width: size, height: size }}>
-      <Icon name="key" size={Math.round(size * 0.64)} strokeWidth={2.6} />
-    </span>
+    <svg className="logo" width={size} height={Math.round((size * 548) / 968)} viewBox="0 0 968 548" fill="currentColor" aria-hidden="true">
+      <path
+        fillRule="evenodd"
+        d="M110 0H858A110 110 0 0 1 968 110V438A110 110 0 0 1 858 548H110A110 110 0 0 1 0 438V110A110 110 0 0 1 110 0ZM110 76A34 34 0 0 0 76 110V438A34 34 0 0 0 110 472H858A34 34 0 0 0 892 438V110A34 34 0 0 0 858 76Z"
+      />
+      <path transform="translate(310 274)" d={STAR} />
+      <path transform="translate(660 274)" d={STAR} />
+    </svg>
   );
 }
+
+const STAR = "M-35-140H35V-60L108-106L143-47L70 0L143 47L108 106L35 60V140H-35V60L-108 106L-143 47L-70 0L-143-47L-108-106L-35-60Z";

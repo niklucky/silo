@@ -9,6 +9,7 @@
     "dev:extension": "pnpm --filter @silo/extension dev",
     "build:extension": "pnpm --filter @silo/extension build",
     "build:safari": "sh scripts/build-safari.sh",
+    "brand:icons": "sh scripts/brand-icons.sh",
     "typecheck": "pnpm -r --if-present typecheck"
   },
   "devDependencies": {
