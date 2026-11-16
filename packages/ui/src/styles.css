@@ -11,10 +11,10 @@
   --fg: #16181a;
   --muted: #687078;
   --line: #e4e7ea;
-  --accent: #1d7a4c;
-  --accent-hover: #17663f;
+  --accent: #0284c7;
+  --accent-hover: #0369a1;
   --accent-fg: #ffffff;
-  --accent-soft: #e2f3e9;
+  --accent-soft: #e0f2fe;
   --error: #c0392b;
   --error-soft: #fdecea;
   --warn: #a86400;
@@ -37,10 +37,10 @@
     --fg: #eceef0;
     --muted: #98a0a8;
     --line: #2a2f33;
-    --accent: #3fbf7f;
-    --accent-hover: #5ccd93;
-    --accent-fg: #08180f;
-    --accent-soft: #163122;
+    --accent: #38bdf8;
+    --accent-hover: #7dd3fc;
+    --accent-fg: #04131c;
+    --accent-soft: #0c2a3a;
     --error: #ff7b6b;
     --error-soft: #3a1d1a;
     --warn: #f0b357;
@@ -749,7 +749,7 @@ kbd {
   border-radius: 14px;
   color: #fff;
   text-align: left;
-  background: linear-gradient(135deg, #1d7a4c, #0f3d27 70%);
+  background: linear-gradient(135deg, #0284c7, #0c3d5c 70%);
   box-shadow: 0 10px 30px rgb(0 0 0 / 0.18);
 }
 .card-brand {
