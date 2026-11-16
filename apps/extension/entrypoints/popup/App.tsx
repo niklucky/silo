@@ -218,7 +218,7 @@ export default function App() {
           {connection.state === "bridge_error" && <Offline message={connection.message} retry={() => void refresh()} />}
           {connection.state === "no_account" && (
             <div className="center">
-              <Logo size={44} />
+              <Logo size={64} />
               <h2>No vault yet</h2>
               <p className="muted">
                 Run <code>silo init</code> in a terminal, then try again.
@@ -344,7 +344,7 @@ function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
 
   return (
     <form className="center unlock" onSubmit={(e) => void unlock(e)}>
-      <Logo size={44} />
+      <Logo size={64} />
       <h2>Unlock Silo</h2>
       <p className="muted">Your master password unlocks the vault on this computer.</p>
       <div className="input-group">

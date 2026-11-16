@@ -29,7 +29,7 @@ export default function App() {
   return (
     <main>
       <div className="title">
-        <Logo size={28} />
+        <Logo size={32} />
         <h1>Unlock Silo</h1>
       </div>
       <form onSubmit={(e) => void unlock(e)}>

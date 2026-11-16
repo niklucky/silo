@@ -11,10 +11,10 @@
   --fg: #16181a;
   --muted: #687078;
   --line: #e1e4e7;
-  --accent: #1d7a4c;
-  --accent-hover: #17663f;
+  --accent: #0284c7;
+  --accent-hover: #0369a1;
   --accent-fg: #ffffff;
-  --accent-soft: #e2f3e9;
+  --accent-soft: #e0f2fe;
   --error: #c0392b;
   --error-soft: #fdecea;
   --warn: #a86400;
@@ -36,10 +36,10 @@
     --fg: #eceef0;
     --muted: #98a0a8;
     --line: #2f3438;
-    --accent: #3fbf7f;
-    --accent-hover: #5ccd93;
-    --accent-fg: #08180f;
-    --accent-soft: #163122;
+    --accent: #38bdf8;
+    --accent-hover: #7dd3fc;
+    --accent-fg: #04131c;
+    --accent-soft: #0c2a3a;
     --error: #ff7b6b;
     --error-soft: #3a1d1a;
     --warn: #f0b357;
@@ -197,12 +197,8 @@ button:disabled {
 }
 
 .logo {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 25%;
-  background: var(--accent);
-  color: var(--accent-fg);
+  display: block;
+  color: var(--fg);
   flex: none;
 }
 

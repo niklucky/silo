@@ -6,5 +6,27 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	/**  Core crate version. First round-trip smoke test from the desktop UI. */
 	coreVersion: () => __TAURI_INVOKE<string>("core_version"),
+	/**
+	 *  Sends one agent-protocol request (JSON) and returns the response (JSON),
+	 *  `{"ok":…}` or `{"err":…}`. Runs off the main thread: unlocking takes a while.
+	 */
+	agentCall: (request: string) => __TAURI_INVOKE<string>("agent_call", { request }),
+	/**  GETs a website saved in a login (for its favicon); see [`site::get`]. */
+	fetchSite: (url: string, limit: number) => __TAURI_INVOKE<{
+	/**  Where the request ended up after redirects, for resolving relative links. */
+	url: string,
+	content_type: string,
+	/**  Base64. */
+	body: string,
+} | null>("fetch_site", { url, limit }),
+};
+
+/* Types */
+export type SiteResponse = {
+	/**  Where the request ended up after redirects, for resolving relative links. */
+	url: string,
+	content_type: string,
+	/**  Base64. */
+	body: string,
 };
 

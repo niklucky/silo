@@ -3612,14 +3612,19 @@ dependencies = [
 name = "silo-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
+ "rand",
  "serde",
  "serde_json",
+ "silo-agent",
  "silo-core",
  "specta",
  "specta-typescript",
  "tauri",
  "tauri-build",
  "tauri-specta",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]

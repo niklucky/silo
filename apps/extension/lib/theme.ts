@@ -8,7 +8,7 @@ export const TOKENS = `
 :host {
   all: initial;
   --bg: #ffffff; --surface: #f4f5f6; --surface-2: #e9ebed; --fg: #16181a; --muted: #687078;
-  --line: #e1e4e7; --accent: #1d7a4c; --accent-hover: #17663f; --accent-fg: #ffffff; --accent-soft: #e2f3e9;
+  --line: #e1e4e7; --accent: #0284c7; --accent-hover: #0369a1; --accent-fg: #ffffff; --accent-soft: #e0f2fe;
   --error: #c0392b; --error-soft: #fdecea; --warn: #a86400; --warn-soft: #fff3df;
   --shadow: 0 2px 6px rgba(0,0,0,.08), 0 12px 32px rgba(0,0,0,.16);
   --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -17,7 +17,7 @@ export const TOKENS = `
 @media (prefers-color-scheme: dark) {
   :host {
     --bg: #1f2225; --surface: #272b2f; --surface-2: #31363b; --fg: #eceef0; --muted: #98a0a8;
-    --line: #363b40; --accent: #3fbf7f; --accent-hover: #5ccd93; --accent-fg: #08180f; --accent-soft: #163122;
+    --line: #363b40; --accent: #38bdf8; --accent-hover: #7dd3fc; --accent-fg: #04131c; --accent-soft: #0c2a3a;
     --error: #ff7b6b; --error-soft: #3a1d1a; --warn: #f0b357; --warn-soft: #3a2b12;
     --shadow: 0 2px 6px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.45);
   }

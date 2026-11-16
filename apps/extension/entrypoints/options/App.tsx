@@ -40,7 +40,7 @@ export default function App() {
   return (
     <main>
       <div className="title">
-        <Logo size={28} />
+        <Logo size={32} />
         <h1>Silo settings</h1>
       </div>
       {settings && (

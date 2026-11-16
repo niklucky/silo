@@ -18,6 +18,10 @@ use crate::protocol::{AgentError, Reply, Request, Response};
 pub enum ClientError {
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// The request could not be written, so the agent never saw it: retrying
+    /// on a fresh connection cannot apply it twice.
+    #[error("could not send to the agent: {0}")]
+    Unsent(io::Error),
     #[error("malformed message from agent: {0}")]
     Protocol(#[from] serde_json::Error),
     #[error("agent closed the connection")]
@@ -52,7 +56,7 @@ impl Client {
             .write_all(&line)
             .and_then(|()| self.writer.flush());
         line.zeroize();
-        sent?;
+        sent.map_err(ClientError::Unsent)?;
 
         let mut buf = String::new();
         if self.reader.read_line(&mut buf)? == 0 {
