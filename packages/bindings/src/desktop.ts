@@ -6,5 +6,10 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	/**  Core crate version. First round-trip smoke test from the desktop UI. */
 	coreVersion: () => __TAURI_INVOKE<string>("core_version"),
+	/**
+	 *  Sends one agent-protocol request (JSON) and returns the response (JSON),
+	 *  `{"ok":…}` or `{"err":…}`. Runs off the main thread: unlocking takes a while.
+	 */
+	agentCall: (request: string) => __TAURI_INVOKE<string>("agent_call", { request }),
 };
 

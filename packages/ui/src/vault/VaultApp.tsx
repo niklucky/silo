@@ -1,0 +1,326 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SyncInfo, VaultClient } from "../client";
+import { Icon, Logo } from "../icons";
+import { KIND_LABEL, type SecretKind, type SecretSummary, type SecretView } from "../protocol";
+import { search } from "../search";
+import { createUsernameLoader, usernameKey, useUsernames } from "../usernames";
+import { type Copy, Detail } from "./Detail";
+import { type Draft, draftOf, Editor, newDraft } from "./Editor";
+import { ItemList } from "./ItemList";
+import { allFolders, inScope, type Scope } from "./scope";
+import { Sidebar } from "./Sidebar";
+
+export interface VaultAppProps {
+  client: VaultClient;
+  /** Shown on the unlock screen; also lets hosts tweak layout via `data-host`. */
+  host: "desktop" | "web";
+}
+
+type Mode = { type: "view" } | { type: "edit"; view: SecretView } | { type: "new"; kind: SecretKind };
+
+/** The whole vault UI: unlock, browse, search, preview and edit. Hosts only supply the client. */
+export function VaultApp({ client, host }: VaultAppProps) {
+  const [state, setState] = useState<"loading" | "locked" | "open">("loading");
+  const [items, setItems] = useState<SecretSummary[]>([]);
+  const [scope, setScopeRaw] = useState<Scope>({ type: "all" });
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>({ type: "view" });
+  const [toast, setToast] = useState<string | null>(null);
+  const [sync, setSync] = useState<SyncInfo | null | undefined>(undefined);
+  const [syncing, setSyncing] = useState(false);
+  const [noAccount, setNoAccount] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // A fresh cache per unlocked session (`session` is only there to force one), so no username outlives a lock.
+  const [session, setSession] = useState(0);
+  const username = useMemo(
+    () => createUsernameLoader((id) => client.get(id).then((view) => ("login" in view.body ? view.body.login.username : null))),
+    [client, session],
+  );
+  useEffect(() => {
+    if (state === "locked") setSession((n) => n + 1);
+  }, [state]);
+
+  const refresh = useCallback(async () => {
+    setItems(await client.list());
+    client.syncStatus().then(setSync, () => setSync(null));
+  }, [client]);
+
+  /** Re-reads status and items: on start, and whenever the window comes back, since the CLI, browsers and sync change the vault too. */
+  const reload = useCallback(async () => {
+    try {
+      const status = await client.status();
+      setNoAccount(!status.has_account);
+      if (!status.unlocked) {
+        setState("locked");
+        return;
+      }
+      await refresh();
+      setState("open");
+    } catch (err) {
+      if (isLocked(err)) setState("locked");
+      else setState((s) => (s === "loading" ? "locked" : s));
+    }
+  }, [client, refresh]);
+
+  useEffect(() => {
+    void reload();
+    const onFocus = () => void reload();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [reload]);
+
+  const onLocked = useCallback(() => setState("locked"), []);
+
+  async function syncNow() {
+    setSyncing(true);
+    try {
+      await client.sync();
+      await refresh();
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : String(err));
+      client.syncStatus().then(setSync, () => undefined);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  const usernames = useUsernames(items, username);
+  const visible = useMemo(
+    () =>
+      search(
+        items.filter((i) => inScope(i, scope)),
+        query,
+        (i) => usernames.get(usernameKey(i)) ?? null,
+      ),
+    [items, scope, query, usernames],
+  );
+  const current = items.find((i) => i.id === selected) ?? null;
+  const folders = useMemo(() => allFolders(items), [items]);
+
+  const setScope = (next: Scope) => {
+    setScopeRaw(next);
+    setMode({ type: "view" });
+  };
+
+  // Keep a selection while browsing so the right pane is never empty for no reason.
+  useEffect(() => {
+    if (mode.type !== "view") return;
+    if (!selected || !visible.some((i) => i.id === selected)) setSelected(visible[0]?.id ?? null);
+  }, [visible, selected, mode.type]);
+
+  const copy: Copy = useCallback((text, what) => {
+    void navigator.clipboard.writeText(text).then(
+      () => setToast(`Copied ${what.toLowerCase()}`),
+      () => setToast("Could not copy"),
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 1600);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  const lock = useCallback(async () => {
+    await client.lock();
+    setItems([]);
+    setSelected(null);
+    setMode({ type: "view" });
+    setState("locked");
+  }, [client]);
+
+  useEffect(() => {
+    if (state !== "open") return;
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+      if (mod && e.key === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      } else if (e.key === "/" && !typing) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (mod && e.key === "l") {
+        e.preventDefault();
+        void lock();
+      } else if (mod && e.key === "n" && mode.type === "view") {
+        e.preventDefault();
+        setMode({ type: "new", kind: scope.type === "kind" ? scope.kind : "login" });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [state, lock, mode.type, scope]);
+
+  async function save(draft: Draft) {
+    const fields = {
+      title: draft.title,
+      folder: draft.folder,
+      tags: draft.tags,
+      urls: draft.urls.map((u) => u.trim()).filter(Boolean),
+      basic_auth: "login" in draft.body ? draft.basicAuth : undefined,
+      body: draft.body,
+    };
+    let saved: SecretSummary;
+    try {
+      saved =
+        mode.type === "edit"
+          ? await client.update({ selector: mode.view.id, revision: mode.view.revision, ...fields })
+          : await client.add(fields);
+    } catch (err) {
+      // Keep the draft on screen; only a lock takes the user away from it.
+      if (isLocked(err)) throw new Error("The vault locked itself. Copy anything you need, then unlock again.");
+      throw err;
+    }
+    await refresh();
+    setSelected(saved.id);
+    setMode({ type: "view" });
+    setToast(mode.type === "edit" ? "Saved" : `${KIND_LABEL[saved.meta.kind]} added`);
+  }
+
+  if (state === "loading") return <div className="vault" data-host={host} />;
+  if (state === "locked") {
+    return (
+      <Unlock
+        host={host}
+        noAccount={noAccount}
+        unlock={async (password) => {
+          await client.unlock(password);
+          await refresh();
+          setState("open");
+        }}
+      />
+    );
+  }
+
+  const newFolder = scope.type === "folder" ? scope.path : "";
+
+  return (
+    <div className="vault" data-host={host}>
+      <Sidebar
+        items={items}
+        scope={scope}
+        setScope={setScope}
+        lock={() => void lock()}
+        sync={sync}
+        syncing={syncing}
+        syncNow={() => void syncNow()}
+      />
+      <ItemList
+        scope={scope}
+        items={visible}
+        query={query}
+        setQuery={setQuery}
+        searchRef={searchRef}
+        selected={mode.type === "new" ? null : selected}
+        select={(id) => {
+          setSelected(id);
+          setMode({ type: "view" });
+        }}
+        create={(kind) => setMode({ type: "new", kind })}
+        usernames={usernames}
+      />
+      <main className="pane">
+        {mode.type === "edit" && (
+          <Editor
+            key={`edit-${mode.view.id}`}
+            kind={mode.view.meta.kind}
+            initial={draftOf(mode.view)}
+            isNew={false}
+            folders={folders}
+            save={save}
+            cancel={() => setMode({ type: "view" })}
+          />
+        )}
+        {mode.type === "new" && (
+          <Editor
+            key={`new-${mode.kind}`}
+            kind={mode.kind}
+            initial={newDraft(mode.kind, newFolder)}
+            isNew
+            folders={folders}
+            save={save}
+            cancel={() => setMode({ type: "view" })}
+          />
+        )}
+        {mode.type === "view" && current && (
+          <Detail
+            client={client}
+            summary={current}
+            copy={copy}
+            edit={(view) => setMode({ type: "edit", view })}
+            remove={async () => {
+              try {
+                await client.remove(current.id);
+                await refresh();
+                setToast("Deleted");
+              } catch (err) {
+                if (isLocked(err)) setState("locked");
+                else setToast(err instanceof Error ? err.message : String(err));
+              }
+            }}
+            openFolder={(path) => setScope({ type: "folder", path })}
+            openTag={(tag) => setScope({ type: "tag", tag })}
+            locked={onLocked}
+          />
+        )}
+        {mode.type === "view" && !current && (
+          <div className="pane-empty">
+            <Icon name="key" size={28} />
+            <p>Select an item, or press ⌘N to add one.</p>
+          </div>
+        )}
+      </main>
+      {toast && (
+        <div className="toast" role="status">
+          <Icon name="check" size={14} /> {toast}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function isLocked(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "locked";
+}
+
+function Unlock({ host, noAccount, unlock }: { host: string; noAccount: boolean; unlock: (password: string) => Promise<void> }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="unlock" data-host={host} data-tauri-drag-region>
+      <form
+        className="unlock-card"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          unlock(password).catch((err: unknown) => {
+            setError(err instanceof Error ? err.message : String(err));
+            setBusy(false);
+          });
+        }}
+      >
+        <Logo size={44} />
+        <h1>{noAccount ? "No vault on this machine" : "Silo is locked"}</h1>
+        {noAccount ? (
+          <p className="muted center">
+            Create one with <code>silo init</code>, or sign in to your server with <code>silo sync login</code>, then come back.
+          </p>
+        ) : (
+          <input type="password" autoFocus placeholder="Master password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        )}
+        {error && <p className="error">{error}</p>}
+        {!noAccount && (
+          <button className="btn primary wide" disabled={busy}>
+            Unlock
+          </button>
+        )}
+      </form>
+    </div>
+  );
+}

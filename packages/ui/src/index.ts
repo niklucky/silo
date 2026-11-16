@@ -1,2 +1,9 @@
 export { CoreVersion } from "./CoreVersion";
 export type { CoreVersionProps } from "./CoreVersion";
+export { AgentError, createAgentClient } from "./agent";
+export type { AgentTransport } from "./agent";
+export type { SyncInfo, VaultClient } from "./client";
+export { createMockClient } from "./mock";
+export * from "./protocol";
+export { VaultApp } from "./vault/VaultApp";
+export type { VaultAppProps } from "./vault/VaultApp";

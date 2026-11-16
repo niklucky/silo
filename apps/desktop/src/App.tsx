@@ -1,22 +1,14 @@
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import { commands } from "@silo/bindings/desktop";
-import { CoreVersion } from "@silo/ui";
+import { createAgentClient, createMockClient, VaultApp } from "@silo/ui";
+
+/** Inside Tauri: the local agent. In a plain browser (`pnpm dev`): made-up data, for UI work. */
+const inTauri = "__TAURI_INTERNALS__" in window;
+
+// macOS draws the traffic lights over the content (titleBarStyle: Overlay).
+if (inTauri && navigator.userAgent.includes("Mac")) document.documentElement.dataset.titlebar = "overlay";
 
 export default function App() {
-  const [version, setVersion] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    commands
-      .coreVersion()
-      .then(setVersion)
-      .catch((err: unknown) => setError(String(err)));
-  }, []);
-
-  return (
-    <main style={{ fontFamily: "system-ui, sans-serif", padding: 24 }}>
-      <h1>Silo</h1>
-      <CoreVersion host="desktop" version={version} error={error} />
-    </main>
-  );
+  const client = useMemo(() => (inTauri ? createAgentClient(commands.agentCall) : createMockClient()), []);
+  return <VaultApp client={client} host="desktop" />;
 }

@@ -16,9 +16,14 @@ tauri-build.workspace = true
 
 [dependencies]
 silo-core.workspace = true
+silo-agent.workspace = true
 tauri.workspace = true
 tauri-specta.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+tempfile.workspace = true
