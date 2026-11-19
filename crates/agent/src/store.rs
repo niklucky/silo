@@ -70,6 +70,25 @@ impl Store {
         write_json(&self.paths.account_file(), record)
     }
 
+    /// Publishes an initial account atomically without overwriting another
+    /// client that finished setting up this vault first.
+    pub fn create_account(&self, record: &AccountRecord) -> Result<(), StoreError> {
+        let path = self.paths.account_file();
+        let io_error = |source| StoreError::Io {
+            path: path.clone(),
+            source,
+        };
+        let mut file = tempfile::NamedTempFile::new_in(self.paths.home()).map_err(io_error)?;
+        serde_json::to_writer_pretty(&mut file, record).map_err(|source| StoreError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        file.as_file().sync_all().map_err(io_error)?;
+        file.persist_noclobber(&path)
+            .map_err(|err| io_error(err.error))?;
+        Ok(())
+    }
+
     /// Sync settings, if this vault syncs with a server.
     pub fn read_sync<T: DeserializeOwned>(&self) -> Result<Option<T>, StoreError> {
         read_optional(&self.paths.sync_file())

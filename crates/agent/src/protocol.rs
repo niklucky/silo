@@ -17,6 +17,10 @@ use crate::sync::SyncReport;
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     Status,
+    /// Creates and unlocks a local vault on a device without an account.
+    Init {
+        password: String,
+    },
     Unlock {
         password: String,
         /// Seconds until the agent locks itself again. Agent default if absent.

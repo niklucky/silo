@@ -32,6 +32,32 @@ pub use protocol::{AgentError, Reply, Request, Response};
 pub use session::Session;
 pub use store::{Store, StoreError, StoredSecret};
 
+use silo_core::crypto::KdfParams;
+use silo_core::{AccountKeys, AccountRecord};
+
+pub const MIN_MASTER_PASSWORD_LEN: usize = 8;
+
+/// Creates the first local account and refuses to replace an existing vault.
+pub fn initialize_account(store: &Store, password: &str) -> Result<AccountKeys, AgentError> {
+    if password.chars().count() < MIN_MASTER_PASSWORD_LEN {
+        return Err(AgentError::Invalid {
+            message: format!(
+                "master password must be at least {MIN_MASTER_PASSWORD_LEN} characters"
+            ),
+        });
+    }
+    if store.has_account() {
+        return Err(AgentError::Invalid {
+            message: "a vault already exists on this machine".to_owned(),
+        });
+    }
+    let mut rng = rand::rng();
+    let kdf = KdfParams::recommended(&mut rng);
+    let (record, keys) = AccountRecord::create(&mut rng, password.as_bytes(), kdf)?;
+    store.create_account(&record)?;
+    Ok(keys)
+}
+
 /// Version of this crate, reported in [`protocol::StatusInfo`].
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

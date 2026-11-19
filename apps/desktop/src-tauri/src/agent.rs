@@ -3,16 +3,16 @@
 //! The desktop app is a client of the same agent as the CLI and the browser
 //! extension: one JSON request in, one JSON response out, over the agent's
 //! Unix socket. Keys and plaintext stay in the agent process; this crate only
-//! forwards lines. If no agent is running, it starts one with the installed
-//! `silo` binary, as `silo unlock` does.
+//! forwards lines. If no agent is running, it starts one with the bundled
+//! `silo` binary, using the same agent command as the standalone CLI.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use silo_agent::Paths;
 use silo_agent::client::{self, Client, ClientError};
 use silo_agent::protocol::{AgentError, Request, Response};
+use silo_agent::{Paths, Store};
 
 #[derive(Default)]
 pub struct Agent {
@@ -122,15 +122,23 @@ fn is_read_only(request: &Request) -> bool {
 
 fn connect(paths: &Paths) -> Result<Client, ClientError> {
     client::connect_or_spawn(paths, || {
+        // On first launch the vault directory must exist before opening the log.
+        Store::open(paths.clone()).map_err(io::Error::other)?;
         client::spawn_detached(&silo_binary()?, &["agent", "run"], paths)
     })
 }
 
-/// The `silo` CLI, which runs the agent. Apps started from Finder get a
-/// minimal PATH, so the usual install locations are tried as well.
+/// Tauri places the CLI beside the desktop executable. Development builds
+/// can use an installed CLI, including common locations outside Finder's PATH.
 fn silo_binary() -> io::Result<PathBuf> {
     if let Some(bin) = std::env::var_os("SILO_BIN").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(bin));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let bundled = exe.with_file_name("silo");
+        if is_executable(&bundled) {
+            return Ok(bundled);
+        }
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")

@@ -1079,6 +1079,11 @@ kbd {
   width: 100%;
   margin: 0;
 }
+.vault-setup-field {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+}
 
 /* ---------- toast ---------- */
 .toast {

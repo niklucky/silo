@@ -455,9 +455,13 @@ use the tag version:
 - `Silo-desktop-linux-x64.zip` contains an executable AppImage built on
   Ubuntu 22.04 for x86-64.
 
-The desktop app uses the Silo CLI to initialize the vault and start the local
-agent. From the tagged source, run `cargo install --path crates/cli --locked`,
-then run `silo init` or `silo sync login` before opening the app.
+Both desktop packages include the Silo CLI, which starts the local vault agent
+when needed. On first launch, create a local vault or sign in to an existing
+sync account from the app. If a vault already exists, open it with the same
+master password. You can install the CLI separately for terminal use.
+
+For a development build, run `cargo install --path crates/cli --locked` before
+`pnpm dev:desktop`, or set `SILO_BIN` to the path of a built `silo` executable.
 
 Each SSH deployment creates a private
 `/opt/silo/releases/<version>-<commit>.<unique-suffix>` directory containing
@@ -800,7 +804,7 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
   Run `pnpm bindings:desktop` after changing a command; commit the result.
 - **Extension.** No Rust in the browser: `apps/extension/lib/agent.ts` opens one
   native-messaging port to `silo-native-host`, which forwards each JSON request
-  to the agent socket and refuses `shutdown`, `history` and the sync
+  to the agent socket and refuses `shutdown`, `init`, `history` and the sync
   setup methods (`sync_register`, `sync_login`, `sync_logout`,
   `sync_revoke_device`). `lib/protocol.ts`
   mirrors the agent's wire types by hand. The extension id and host name live in
@@ -819,10 +823,10 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
 
 ## Status
 
-Core, agent and CLI are implemented and tested for local, single-user work. The
-extension fills HTTP Basic Auth and login forms in Firefox/Zen, Chrome and Safari.
-Sync between devices works through `silo-server`; the server is not deployed
-anywhere yet. The desktop app still only round-trips `silo_core::version()`.
+Core, agent and CLI support local, single-user work. The extension fills HTTP
+Basic Auth and login forms in Firefox/Zen, Chrome and Safari. Desktop users
+can create or unlock a local vault, sign in to an existing sync account, and
+browse and edit secrets. Sync between devices uses `silo-server`.
 
 - **`silo-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
   key), sealed secrets (fresh data key per revision, metadata and body sealed

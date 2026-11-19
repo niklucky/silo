@@ -85,9 +85,6 @@ pub fn connect_or_spawn(
         Err(err) if is_not_running(&err) => {}
         Err(err) => return Err(err.into()),
     }
-    if paths.socket_file().exists() {
-        let _ = fs::remove_file(paths.socket_file());
-    }
     spawn()?;
 
     let timeout = Duration::from_secs(5);
@@ -131,6 +128,9 @@ pub fn spawn_detached(program: &Path, args: &[&str], paths: &Paths) -> io::Resul
             Ok(())
         });
     }
-    command.spawn()?;
+    let mut child = command.spawn()?;
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }

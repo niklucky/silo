@@ -36,3 +36,9 @@ export interface VaultClient {
   /** Pull and push now. */
   sync(): Promise<void>;
 }
+
+/** Account setup offered by hosts that can provision a fresh vault. */
+export interface VaultSetup {
+  createVault(password: string): Promise<StatusInfo>;
+  signIn(server: string, username: string, password: string): Promise<SyncInfo | null>;
+}

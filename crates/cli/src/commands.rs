@@ -6,9 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use silo_agent::protocol::{ListFilter, NewSecret, Reply, Request, SecretView, StatusInfo};
-use silo_agent::{Client, ClientError, Paths, Store, client, server};
-use silo_core::AccountRecord;
-use silo_core::crypto::KdfParams;
+use silo_agent::{Client, ClientError, Paths, Store, client, initialize_account, server};
 use silo_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBody, Tag};
 use zeroize::Zeroize;
 
@@ -89,10 +87,7 @@ fn init(args: InitArgs) -> Result<()> {
         return sync::login_at(&paths, server, username, None);
     }
     let password = prompt::new_password()?;
-    let mut rng = rand::rng();
-    let kdf = KdfParams::recommended(&mut rng);
-    let (record, keys) = AccountRecord::create(&mut rng, password.as_bytes(), kdf)?;
-    store.write_account(&record)?;
+    let keys = initialize_account(&store, &password)?;
     println!("Created account in {}", paths.home().display());
     println!("Fingerprint: {}", keys.fingerprint());
 

@@ -31,7 +31,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     /// Browsers cannot read old revisions or change where the vault syncs.
     /// Keep in step with silo-native-host.
     private static let refused: Set<String> = [
-        "shutdown", "history",
+        "shutdown", "init", "history",
         "sync_register", "sync_login", "sync_logout", "sync_revoke_device",
     ]
 
