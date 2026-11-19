@@ -17,8 +17,11 @@ concurrency:
 jobs:
   version:
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
     steps:
       - name: Require a version tag
+        id: tag
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
         run: |
@@ -26,10 +29,23 @@ jobs:
             echo '::error::Release tags must be vX.Y.Z'
             exit 1
           }
+          echo "version=${RELEASE_VERSION#v}" >> "$GITHUB_OUTPUT"
 
   verify:
     needs: version
     uses: ./.github/workflows/checks.yml
+
+  desktop:
+    needs: [version, verify]
+    uses: ./.github/workflows/desktop.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
   build:
     needs: verify
@@ -119,12 +135,17 @@ jobs:
         run: deployment/deploy-ssh.sh
 
   release:
-    needs: [build, deploy]
+    needs: [build, deploy, desktop]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Publish GitHub release after healthy deployment
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: Silo-desktop-*
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release with desktop downloads
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -132,12 +153,18 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
           SERVER_IMAGE: ${{ needs.build.outputs.image }}
         run: |
+          assets=(dist/Silo-desktop-macos-universal.zip dist/Silo-desktop-linux-x64.zip)
+          for asset in "${assets[@]}"; do test -s "$asset"; done
+
           # shellcheck disable=SC2016
           printf 'Deployed silo-server from commit `%s`.\n\nContainer image: `%s`\n' \
             "$RELEASE_SHA" "$SERVER_IMAGE" > "$RUNNER_TEMP/release-notes.md"
+          printf '\nThe desktop app requires the Silo CLI for vault setup. See the [installation instructions](https://github.com/%s/blob/%s/README.md#version-releases-and-updates).\n' \
+            "$GH_REPO" "$RELEASE_VERSION" >> "$RUNNER_TEMP/release-notes.md"
           if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_VERSION" --clobber "${assets[@]}"
             gh release edit "$RELEASE_VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
             gh release create "$RELEASE_VERSION" --verify-tag --title "$RELEASE_VERSION" \
-              --notes-file "$RUNNER_TEMP/release-notes.md"
+              --notes-file "$RUNNER_TEMP/release-notes.md" "${assets[@]}"
           fi
