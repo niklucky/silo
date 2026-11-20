@@ -105,7 +105,7 @@ jobs:
           exit 1
 
   deploy:
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -161,9 +161,25 @@ jobs:
             "$RELEASE_SHA" "$SERVER_IMAGE" > "$RUNNER_TEMP/release-notes.md"
           printf '\nThe desktop app includes the Silo CLI and can set up a vault on first launch. See the [installation instructions](https://github.com/%s/blob/%s/README.md#version-releases-and-updates).\n' \
             "$GH_REPO" "$RELEASE_VERSION" >> "$RUNNER_TEMP/release-notes.md"
-          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_VERSION" --clobber "${assets[@]}"
-            gh release edit "$RELEASE_VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          if existing=$(gh release view "$RELEASE_VERSION" --json assets,isDraft 2>/dev/null); then
+            missing=()
+            for asset in "${assets[@]}"; do
+              name=${asset##*/}
+              state=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state' <<< "$existing")
+              case "$state" in
+                uploaded) continue ;;
+                starter) gh release delete-asset "$RELEASE_VERSION" "$name" --yes ;;
+              esac
+              missing+=("$asset")
+            done
+            if (( ${#missing[@]} )); then
+              gh release upload "$RELEASE_VERSION" "${missing[@]}"
+            fi
+            edit_options=(--notes-file "$RUNNER_TEMP/release-notes.md")
+            if jq -e '.isDraft' <<< "$existing" >/dev/null; then
+              edit_options+=(--draft=false)
+            fi
+            gh release edit "$RELEASE_VERSION" "${edit_options[@]}"
           else
             gh release create "$RELEASE_VERSION" --verify-tag --title "$RELEASE_VERSION" \
               --notes-file "$RUNNER_TEMP/release-notes.md" "${assets[@]}"

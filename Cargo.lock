@@ -3625,6 +3625,7 @@ dependencies = [
  "tauri-specta",
  "tempfile",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]

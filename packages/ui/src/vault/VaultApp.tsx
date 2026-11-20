@@ -237,8 +237,11 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
         <VaultOnboarding
           host={host}
           createVault={async (password) => {
-            await setup.createVault(password);
-            await reload();
+            try {
+              await setup.createVault(password);
+            } finally {
+              await reload();
+            }
           }}
           signIn={async (server, username, password) => {
             await setup.signIn(server, username, password);

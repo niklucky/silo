@@ -11,6 +11,8 @@ export const commands = {
 	 *  `{"ok":…}` or `{"err":…}`. Runs off the main thread: unlocking takes a while.
 	 */
 	agentCall: (request: string) => __TAURI_INVOKE<string>("agent_call", { request }),
+	/**  Creates the first local account with the same setup as `silo init`. */
+	createVault: (password: string) => typedError<null, string>(__TAURI_INVOKE("create_vault", { password })),
 	/**  GETs a website saved in a login (for its favicon); see [`site::get`]. */
 	fetchSite: (url: string, limit: number) => __TAURI_INVOKE<{
 	/**  Where the request ended up after redirects, for resolving relative links. */
@@ -29,4 +31,14 @@ export type SiteResponse = {
 	/**  Base64. */
 	body: string,
 };
+
+/* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
 

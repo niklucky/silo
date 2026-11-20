@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroize;
 
-use silo_core::AccountKeys;
 use silo_core::sync::ErrorCode;
+use silo_core::{AccountKeys, AccountRecord};
 
 use crate::protocol::{AgentError, Reply, Request, Response, StatusInfo, SyncStatusInfo};
 use crate::session::Session;
@@ -236,11 +236,6 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
     state.expire_if_needed();
     let result = match request {
         Request::Status => Ok(Reply::Status(state.status())),
-        Request::Init { mut password } => {
-            let result = state.initialize(&password);
-            password.zeroize();
-            result
-        }
         Request::Unlock {
             mut password,
             ttl_secs,
@@ -486,23 +481,13 @@ fn sync_login(
         &device,
     )?;
     let mut state = lock_state(shared);
-    // A new machine gets the account; one whose password changed elsewhere
-    // gets the record that opens with the new password.
-    if let Some(sync) = &state.sync {
-        return Err(SyncError::AlreadyConfigured(sync.server.clone()));
-    }
-    match local {
-        None => state.store.create_account(&record)?,
-        Some(previous) => {
-            if state.store.read_account()? != previous {
-                return Err(SyncError::Config(
-                    "the local account changed during sign-in; try again".to_owned(),
-                ));
-            }
-            if previous != record {
-                state.store.write_account(&record)?;
-            }
-        }
+    if let Err(err) = state.accept_login_account(local.as_ref(), &record) {
+        drop(state);
+        // The server has already registered this device. Discard it when
+        // another client completed setup while this login was in flight.
+        let _ = HttpClient::new(&sync_state.server)
+            .and_then(|client| client.with_token(&sync_state.token).logout());
+        return Err(err);
     }
     state.start_syncing(sync_state, keys, true)?;
     let status = state.sync_status();
@@ -567,6 +552,33 @@ fn lock_state(shared: &Shared) -> std::sync::MutexGuard<'_, State> {
 }
 
 impl State {
+    fn accept_login_account(
+        &self,
+        previous: Option<&AccountRecord>,
+        record: &AccountRecord,
+    ) -> Result<(), SyncError> {
+        if let Some(sync) = &self.sync {
+            return Err(SyncError::AlreadyConfigured(sync.server.clone()));
+        }
+        // A new machine gets the account. An existing one can receive a
+        // newer record for that same account, as long as it hasn't changed
+        // while the login was in flight.
+        match previous {
+            None => self.store.create_account(record)?,
+            Some(previous) => {
+                if self.store.read_account()? != *previous {
+                    return Err(SyncError::Config(
+                        "the local account changed during sign-in; try again".to_owned(),
+                    ));
+                }
+                if previous != record {
+                    self.store.write_account(record)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn expire_if_needed(&mut self) -> bool {
         if let Some(expires_at) = self.expires_at
             && Instant::now() >= expires_at
@@ -584,16 +596,6 @@ impl State {
 
     fn unlock(&mut self, password: &[u8], ttl: Option<Duration>) -> Result<Reply, AgentError> {
         let (session, skipped) = Session::unlock(&self.store, password)?;
-        Ok(self.set_unlocked(session, skipped, ttl))
-    }
-
-    fn initialize(&mut self, password: &str) -> Result<Reply, AgentError> {
-        let keys = crate::initialize_account(&self.store, password)?;
-        let (session, skipped) = Session::open(&self.store, keys)?;
-        Ok(self.set_unlocked(session, skipped, None))
-    }
-
-    fn set_unlocked(&mut self, session: Session, skipped: usize, ttl: Option<Duration>) -> Reply {
         if skipped > 0 {
             log(&format!(
                 "warning: {skipped} stored secret(s) could not be opened with this account"
@@ -602,7 +604,7 @@ impl State {
         self.session = Some(session);
         self.expires_at = Some(Instant::now() + ttl.unwrap_or(self.default_ttl));
         log("unlocked");
-        Reply::Unlocked(self.status())
+        Ok(Reply::Unlocked(self.status()))
     }
 
     /// With `resume`, picks up what an earlier login to the same account
@@ -717,59 +719,6 @@ mod tests {
     use silo_core::AccountRecord;
     use silo_core::crypto::KdfParams;
     use silo_core::vault::{FolderPath, Note, SecretBody};
-
-    #[test]
-    fn first_run_creates_and_unlocks_a_vault_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::new(dir.path());
-        let store = Store::open(paths.clone()).unwrap();
-        let thread = thread::spawn(move || {
-            run(Config {
-                store,
-                default_ttl: DEFAULT_TTL,
-                sync_interval: None,
-            })
-        });
-        let mut client = crate::client::connect_or_spawn(&paths, || Ok(())).unwrap();
-        assert!(matches!(
-            client.call(&Request::Status).unwrap(),
-            Reply::Status(status) if !status.has_account
-        ));
-        assert!(matches!(
-            client.call(&Request::Init {
-                password: String::new(),
-            }),
-            Err(crate::ClientError::Agent(AgentError::Invalid { .. }))
-        ));
-        assert!(!paths.account_file().exists());
-
-        let example = "example master phrase".to_owned();
-        let Reply::Unlocked(status) = client
-            .call(&Request::Init {
-                password: example.clone(),
-            })
-            .unwrap()
-        else {
-            panic!("new vault should open");
-        };
-        assert!(status.has_account && status.unlocked);
-        let original = fs::read(paths.account_file()).unwrap();
-        assert!(matches!(
-            client.call(&Request::Init {
-                password: format!("{example} again"),
-            }),
-            Err(crate::ClientError::Agent(AgentError::Invalid { .. }))
-        ));
-        assert_eq!(fs::read(paths.account_file()).unwrap(), original);
-        assert_eq!(client.call(&Request::Lock).unwrap(), Reply::Locked);
-        assert!(matches!(
-            client.call(&Request::Unlock { password: example, ttl_secs: None }).unwrap(),
-            Reply::Unlocked(reopened) if reopened.fingerprint == status.fingerprint
-        ));
-
-        client.call(&Request::Shutdown).unwrap();
-        thread.join().unwrap().unwrap();
-    }
 
     #[test]
     fn end_to_end_over_the_socket() {

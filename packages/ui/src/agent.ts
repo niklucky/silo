@@ -47,7 +47,7 @@ function describe(error: AgentErrorBody): string {
   }
 }
 
-export function createAgentClient(send: AgentTransport): VaultClient & VaultSetup {
+export function createAgentClient(send: AgentTransport): VaultClient & Pick<VaultSetup, "signIn"> {
   async function call<T>(method: string, params: unknown, key: string): Promise<T> {
     const request = params === undefined ? { method } : { method, params };
     const response = JSON.parse(await send(JSON.stringify(request))) as { ok: unknown } | { err: AgentErrorBody };
@@ -60,7 +60,6 @@ export function createAgentClient(send: AgentTransport): VaultClient & VaultSetu
 
   return {
     status: () => call<StatusInfo>("status", undefined, "status"),
-    createVault: (password) => call<StatusInfo>("init", { password }, "unlocked"),
     signIn: (server, username, password) => call<SyncInfo | null>("sync_login", { server, username, password }, "sync_status"),
     unlock: (password) => call<StatusInfo>("unlock", { password }, "unlocked"),
     lock: () => call<void>("lock", undefined, "locked"),

@@ -24,8 +24,13 @@ struct Server {
 
 impl Server {
     fn start() -> Self {
+        Self::start_with(|app| app)
+    }
+
+    fn start_with(configure: impl FnOnce(axum::Router) -> axum::Router) -> Self {
         let db = Db::open_in_memory().unwrap();
         let state = AppState::new(db.clone()).unwrap();
+        let app = configure(silo_server::app(state));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
@@ -36,9 +41,7 @@ impl Server {
                 .unwrap();
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-                axum::serve(listener, silo_server::app(state))
-                    .await
-                    .unwrap();
+                axum::serve(listener, app).await.unwrap();
             });
         });
         Self {
@@ -209,6 +212,54 @@ fn note_text(body: &SecretBody) -> String {
         SecretBody::Note(note) => note.text.clone(),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn sign_in_revokes_the_device_if_local_setup_wins() {
+    use axum::extract::Request as HttpRequest;
+    use axum::middleware::{Next, from_fn};
+    use std::sync::{Arc, mpsc};
+    use tokio::sync::Notify;
+
+    let (login_received, wait_for_login) = mpsc::channel();
+    let proceed = Arc::new(Notify::new());
+    let server = Server::start_with(|app| {
+        let proceed = Arc::clone(&proceed);
+        app.layer(from_fn(move |request: HttpRequest, next: Next| {
+            let login_received = login_received.clone();
+            let proceed = Arc::clone(&proceed);
+            async move {
+                if request.uri().path() == "/v1/login" {
+                    login_received.send(()).unwrap();
+                    proceed.notified().await;
+                }
+                next.run(request).await
+            }
+        }))
+    });
+    let mut remote = Device::start(true);
+    remote.register(&server, "nikita");
+    let fresh = Device::start(false);
+    let mut connection = Client::connect(fresh.paths.socket_file()).unwrap();
+    let request = Request::SyncLogin {
+        server: server.url.clone(),
+        username: "nikita".into(),
+        password: PASSWORD.into(),
+        device_name: Some("abandoned".into()),
+    };
+    let login = thread::spawn(move || connection.call(&request));
+    wait_for_login.recv_timeout(Duration::from_secs(5)).unwrap();
+    silo_agent::initialize_account(&Store::open(fresh.paths.clone()).unwrap(), PASSWORD).unwrap();
+    proceed.notify_one();
+
+    assert!(matches!(
+        login.join().unwrap(),
+        Err(ClientError::Agent(AgentError::Storage { .. }))
+    ));
+    let Reply::Devices(devices) = remote.call(Request::SyncDevices) else {
+        panic!("missing device list");
+    };
+    assert_eq!(devices.len(), 1, "the losing sign-in left a device active");
 }
 
 #[test]

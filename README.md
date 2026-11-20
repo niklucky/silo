@@ -442,9 +442,9 @@ names beginning with `v` fail validation before building or deploying.
 `.github/workflows/release.yml` runs the existing checks, publishes an
 `linux/amd64` image at `ghcr.io/niklucky/silo/server` tagged with both the
 version and commit SHA, and health-checks the published image on the runner.
-The deploy job runs in the `production` GitHub environment and passes the
-image's immutable `@sha256:…` digest to the VPS. The workflow's scoped
-`GITHUB_TOKEN` supplies registry access; no registry password or PAT is needed.
+After both desktop packages pass, the deploy job runs in the `production`
+GitHub environment and passes the image's immutable `@sha256:…` digest to the
+VPS. The workflow's scoped `GITHUB_TOKEN` supplies registry access.
 
 After the server deploys successfully and both desktop builds pass, the
 GitHub Release includes the container digest and two ZIPs. The desktop bundles
@@ -491,11 +491,11 @@ the newer schema; inspect the logs and follow the explicit restore procedure
 above if a database restore is necessary.
 
 For a failed workflow, rerun the failed jobs from the Actions run. A new remote
-release directory is created each time. A full rerun rebuilds the image from
-the same source commit and may pick up newer base image packages; it can have
-a different digest, recorded in that release's notes. Successful releases and
-cached images are retained on the host; the deploy script does not prune
-shared-host images or delete database files.
+release directory is created each time. A rerun keeps desktop ZIPs already
+uploaded to the GitHub Release and uploads any missing ZIPs. A full rerun
+rebuilds the image from the same source commit and may pick up newer base image
+packages. The release notes record the corresponding image digest. The deploy
+script retains successful releases, cached images and database files on the host.
 
 Inspect the running release, logs and backups after the first deployment:
 
@@ -804,7 +804,7 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
   Run `pnpm bindings:desktop` after changing a command; commit the result.
 - **Extension.** No Rust in the browser: `apps/extension/lib/agent.ts` opens one
   native-messaging port to `silo-native-host`, which forwards each JSON request
-  to the agent socket and refuses `shutdown`, `init`, `history` and the sync
+  to the agent socket and refuses `shutdown`, `history` and the sync
   setup methods (`sync_register`, `sync_login`, `sync_logout`,
   `sync_revoke_device`). `lib/protocol.ts`
   mirrors the agent's wire types by hand. The extension id and host name live in

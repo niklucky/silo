@@ -2,8 +2,8 @@
 //!
 //! The desktop app is a client of the same agent as the CLI and the browser
 //! extension: one JSON request in, one JSON response out, over the agent's
-//! Unix socket. Keys and plaintext stay in the agent process; this crate only
-//! forwards lines. If no agent is running, it starts one with the bundled
+//! Unix socket. The agent holds the unlocked session. The desktop also creates
+//! the first local account. If no agent is running, it starts one with the bundled
 //! `silo` binary, using the same agent command as the standalone CLI.
 
 use std::io;
@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use silo_agent::client::{self, Client, ClientError};
 use silo_agent::protocol::{AgentError, Request, Response};
-use silo_agent::{Paths, Store};
+use silo_agent::{Paths, Store, initialize_account};
 
 #[derive(Default)]
 pub struct Agent {
@@ -27,6 +27,23 @@ impl Agent {
         Self {
             paths: Some(paths),
             client: Mutex::default(),
+        }
+    }
+
+    /// Local setup belongs to the desktop, outside the shared socket protocol.
+    /// A running agent only needs to support the existing unlock request.
+    pub fn create_vault(&self, password: &str) -> Result<(), String> {
+        let paths = self.paths().map_err(|err| err.to_string())?;
+        let store = Store::open(paths).map_err(|err| err.to_string())?;
+        initialize_account(&store, password)
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    fn paths(&self) -> io::Result<Paths> {
+        match &self.paths {
+            Some(paths) => Ok(paths.clone()),
+            None => Paths::from_env().map_err(io::Error::other),
         }
     }
 
@@ -89,11 +106,7 @@ impl Agent {
         request: &Request,
     ) -> Result<Response, ClientError> {
         if slot.is_none() {
-            let paths = match &self.paths {
-                Some(paths) => paths.clone(),
-                None => Paths::from_env().map_err(|e| io::Error::other(e.to_string()))?,
-            };
-            *slot = Some(connect(&paths)?);
+            *slot = Some(connect(&self.paths()?)?);
         }
         let client = slot.as_mut().expect("set above");
         match client.call(request) {
@@ -177,10 +190,59 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use serde_json::{Value, json};
+    use silo_agent::Reply;
     use silo_agent::{Store, server};
     use silo_core::AccountRecord;
     use silo_core::crypto::KdfParams;
     use std::{thread, time::Duration};
+
+    #[test]
+    fn creates_a_vault_on_the_existing_agent_protocol() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let store = Store::open(paths.clone()).unwrap();
+        let worker = thread::spawn(move || {
+            server::run(server::Config {
+                store,
+                default_ttl: server::DEFAULT_TTL,
+                sync_interval: None,
+            })
+        });
+        let mut client = client::connect_or_spawn(&paths, || Ok(())).unwrap();
+        assert!(matches!(
+            client.call(&Request::Status).unwrap(),
+            Reply::Status(status) if !status.has_account
+        ));
+        let setup = Agent::with_paths(paths.clone());
+        let mut old_bridge = UnixStream::connect(paths.socket_file()).unwrap();
+        old_bridge
+            .write_all(b"{\"method\":\"init\",\"params\":{\"password\":\"\"}}\n")
+            .unwrap();
+        let mut response = String::new();
+        BufReader::new(old_bridge).read_line(&mut response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap()["err"]["code"],
+            "invalid"
+        );
+        assert!(setup.create_vault("").is_err());
+        assert!(!paths.account_file().exists());
+
+        let example = "example master phrase";
+        setup.create_vault(example).unwrap();
+        let original = std::fs::read(paths.account_file()).unwrap();
+        assert!(setup.create_vault(&format!("{example} again")).is_err());
+        assert_eq!(std::fs::read(paths.account_file()).unwrap(), original);
+        assert!(matches!(
+            client.call(&Request::Unlock { password: example.into(), ttl_secs: None }).unwrap(),
+            Reply::Unlocked(status) if status.has_account && status.unlocked
+        ));
+
+        client.call(&Request::Shutdown).unwrap();
+        worker.join().unwrap().unwrap();
+    }
 
     /// Requests shaped exactly as `@silo/ui`'s agent client sends them.
     #[test]

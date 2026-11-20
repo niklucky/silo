@@ -85,7 +85,6 @@ impl Bridge {
         if matches!(
             request,
             Request::Shutdown
-                | Request::Init { .. }
                 | Request::History { .. }
                 | Request::SyncRegister { .. }
                 | Request::SyncLogin { .. }
@@ -262,13 +261,6 @@ mod tests {
         assert!(matches!(
             responses[1],
             Response::Err(AgentError::Invalid { .. })
-        ));
-        assert!(matches!(
-            bridge.handle(&Request::Init {
-                password: String::new(),
-            }),
-            Response::Err(AgentError::Invalid { message })
-                if message == "this method is not available through the browser"
         ));
         assert!(matches!(responses[2], Response::Ok(Reply::Unlocked(_))));
         assert!(matches!(&responses[3], Response::Ok(Reply::Matches(m)) if m.is_empty()));
