@@ -168,7 +168,8 @@ jobs:
               state=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state' <<< "$existing")
               case "$state" in
                 uploaded) continue ;;
-                starter) gh release delete-asset "$RELEASE_VERSION" "$name" --yes ;;
+                "") ;;
+                *) gh release delete-asset "$RELEASE_VERSION" "$name" --yes ;;
               esac
               missing+=("$asset")
             done

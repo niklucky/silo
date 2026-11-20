@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use silo_agent::client::{self, Client, ClientError};
-use silo_agent::protocol::{AgentError, Request, Response};
+use silo_agent::protocol::{AgentError, Reply, Request, Response};
 use silo_agent::{Paths, Store, initialize_account};
 
 #[derive(Default)]
@@ -31,10 +31,11 @@ impl Agent {
     }
 
     /// Local setup belongs to the desktop, outside the shared socket protocol.
-    /// A running agent only needs to support the existing unlock request.
     pub fn create_vault(&self, password: &str) -> Result<(), String> {
         let paths = self.paths().map_err(|err| err.to_string())?;
-        let store = Store::open(paths).map_err(|err| err.to_string())?;
+        let status = Result::from(self.call(&Request::Status)).map_err(|err| err.to_string())?;
+        let home = check_setup_home(&paths, status).map_err(|err| err.to_string())?;
+        let store = Store::open(Paths::new(home)).map_err(|err| err.to_string())?;
         initialize_account(&store, password)
             .map(|_| ())
             .map_err(|err| err.to_string())
@@ -109,12 +110,44 @@ impl Agent {
             *slot = Some(connect(&self.paths()?)?);
         }
         let client = slot.as_mut().expect("set above");
+        if matches!(request, Request::SyncLogin { .. }) {
+            let paths = self.paths()?;
+            let status = client
+                .call(&Request::Status)
+                .map_err(|err| ClientError::Unsent(io::Error::other(err)))?;
+            if let Err(err) = check_setup_home(&paths, status) {
+                return Ok(Response::Err(err));
+            }
+        }
         match client.call(request) {
             Ok(reply) => Ok(Response::Ok(reply)),
             Err(ClientError::Agent(err)) => Ok(Response::Err(err)),
             Err(err) => Err(err),
         }
     }
+}
+
+fn check_setup_home(paths: &Paths, response: Reply) -> Result<PathBuf, AgentError> {
+    let Reply::Status(status) = response else {
+        return Err(AgentError::Internal {
+            message: "the agent did not return its vault status".to_owned(),
+        });
+    };
+    let Some(agent_home) = status.setup_home.map(PathBuf::from) else {
+        return Err(AgentError::Invalid {
+            message: "First-run setup requires an updated agent. Run `silo agent stop` and retry so Silo Desktop can start its bundled agent.".to_owned(),
+        });
+    };
+    if paths.home().canonicalize().ok().as_deref() != Some(agent_home.as_path()) {
+        return Err(AgentError::Invalid {
+            message: format!(
+                "The connected agent uses {}. Set SILO_HOME to that directory or choose the socket for {} and restart Silo Desktop.",
+                agent_home.display(),
+                paths.home().display(),
+            ),
+        });
+    }
+    Ok(agent_home)
 }
 
 /// Requests that change nothing in the vault, so sending one twice is harmless.
@@ -190,7 +223,6 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use serde_json::{Value, json};
-    use silo_agent::Reply;
     use silo_agent::{Store, server};
     use silo_core::AccountRecord;
     use silo_core::crypto::KdfParams;
@@ -231,6 +263,27 @@ mod tests {
         assert!(!paths.account_file().exists());
 
         let example = "example master phrase";
+        let other_paths =
+            Paths::new(dir.path().join("other-vault")).with_socket(paths.socket_file());
+        let other = Agent::with_paths(other_paths.clone());
+        assert!(
+            other
+                .create_vault(example)
+                .unwrap_err()
+                .contains("SILO_HOME")
+        );
+        assert!(matches!(
+            other.call(&Request::SyncLogin {
+                server: String::new(),
+                username: String::new(),
+                password: example.into(),
+                device_name: None,
+            }),
+            Response::Err(AgentError::Invalid { message }) if message.contains("SILO_HOME")
+        ));
+        assert!(!other_paths.home().exists());
+        assert!(!paths.account_file().exists());
+
         setup.create_vault(example).unwrap();
         let original = std::fs::read(paths.account_file()).unwrap();
         assert!(setup.create_vault(&format!("{example} again")).is_err());
@@ -242,6 +295,57 @@ mod tests {
 
         client.call(&Request::Shutdown).unwrap();
         worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn older_agent_can_report_status_but_cannot_run_desktop_setup() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let listener = UnixListener::bind(paths.socket_file()).unwrap();
+        let home = paths.home().display().to_string();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut requests = BufReader::new(stream.try_clone().unwrap()).lines();
+            let legacy_status = json!({ "ok": { "status": {
+                "agent_version": "0.1.0", "core_version": "0.1.0", "home": home,
+                "has_account": false, "unlocked": false, "secrets": 0
+            }}});
+            for _ in 0..3 {
+                assert_eq!(requests.next().unwrap().unwrap(), r#"{"method":"status"}"#);
+                writeln!(stream, "{legacy_status}").unwrap();
+            }
+            assert!(
+                requests.next().is_none(),
+                "legacy agent got a setup request"
+            );
+        });
+        let desktop = Agent::with_paths(paths.clone());
+        assert!(matches!(
+            desktop.call(&Request::Status),
+            Response::Ok(Reply::Status(_))
+        ));
+        let example = "example master phrase";
+        assert!(
+            desktop
+                .create_vault(example)
+                .unwrap_err()
+                .contains("silo agent stop")
+        );
+        assert!(matches!(
+            desktop.call(&Request::SyncLogin {
+                server: String::new(),
+                username: String::new(),
+                password: example.into(),
+                device_name: None,
+            }),
+            Response::Err(AgentError::Invalid { message }) if message.contains("silo agent stop")
+        ));
+        assert!(!paths.account_file().exists());
+        drop(desktop);
+        worker.join().unwrap();
     }
 
     /// Requests shaped exactly as `@silo/ui`'s agent client sends them.

@@ -459,6 +459,8 @@ Both desktop packages include the Silo CLI, which starts the local vault agent
 when needed. On first launch, create a local vault or sign in to an existing
 sync account from the app. If a vault already exists, open it with the same
 master password. You can install the CLI separately for terminal use.
+If first-run setup encounters an older agent, run `silo agent stop` and retry
+in the app to start the bundled agent.
 
 For a development build, run `cargo install --path crates/cli --locked` before
 `pnpm dev:desktop`, or set `SILO_BIN` to the path of a built `silo` executable.

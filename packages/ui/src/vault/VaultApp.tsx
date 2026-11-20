@@ -244,13 +244,16 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
             }
           }}
           signIn={async (server, username, password) => {
-            await setup.signIn(server, username, password);
             try {
-              await client.sync();
-            } catch (err) {
-              setToast(`Signed in. Initial sync failed: ${err instanceof Error ? err.message : String(err)}`);
+              await setup.signIn(server, username, password);
+              try {
+                await client.sync();
+              } catch (err) {
+                setToast(`Signed in. Initial sync failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            } finally {
+              await reload();
             }
-            await reload();
           }}
         />
       );

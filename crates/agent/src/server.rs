@@ -692,6 +692,13 @@ impl State {
             agent_version: crate::VERSION.to_owned(),
             core_version: silo_core::version().to_owned(),
             home: self.store.paths().home().display().to_string(),
+            setup_home: self
+                .store
+                .paths()
+                .home()
+                .canonicalize()
+                .ok()
+                .map(PathBuf::into_os_string),
             has_account: self.store.has_account(),
             unlocked: self.session.is_some(),
             fingerprint: self.session.as_ref().map(|s| s.fingerprint().to_string()),
