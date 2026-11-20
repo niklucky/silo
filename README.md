@@ -442,20 +442,22 @@ names beginning with `v` fail validation before building or deploying.
 `.github/workflows/release.yml` runs the existing checks, publishes an
 `linux/amd64` image at `ghcr.io/niklucky/silo/server` tagged with both the
 version and commit SHA, and health-checks the published image on the runner.
-After both desktop packages pass, the deploy job runs in the `production`
+After all desktop packages pass, the deploy job runs in the `production`
 GitHub environment and passes the image's immutable `@sha256:…` digest to the
 VPS. The workflow's scoped `GITHUB_TOKEN` supplies registry access.
 
-After the server deploys successfully and both desktop builds pass, the
-GitHub Release includes the container digest and two ZIPs. The desktop bundles
+After the server deploys successfully and all desktop builds pass, the
+GitHub Release includes the container digest and three ZIPs. The desktop bundles
 use the tag version:
 
-- `Silo-desktop-macos-universal.zip` contains the signed and notarized
-  `Silo.app` for Apple Silicon and Intel.
+- `Silo-desktop-macos-arm64.zip` contains the signed and notarized
+  `Silo.app` for Apple Silicon.
+- `Silo-desktop-macos-x64.zip` contains the signed and notarized
+  `Silo.app` for Intel.
 - `Silo-desktop-linux-x64.zip` contains an executable AppImage built on
   Ubuntu 22.04 for x86-64.
 
-Both desktop packages include the Silo CLI, which starts the local vault agent
+All desktop packages include the Silo CLI, which starts the local vault agent
 when needed. On first launch, create a local vault or sign in to an existing
 sync account from the app. If a vault already exists, open it with the same
 master password. You can install the CLI separately for terminal use.
