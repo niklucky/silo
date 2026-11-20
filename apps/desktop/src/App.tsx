@@ -17,6 +17,20 @@ const fetchSite: SiteFetcher = async (url, limit) => {
 };
 
 export default function App() {
-  const client = useMemo(() => (inTauri ? createAgentClient(commands.agentCall) : createMockClient()), []);
-  return <VaultApp client={client} host="desktop" fetchSite={inTauri ? fetchSite : undefined} />;
+  const vault = useMemo(() => {
+    if (!inTauri) return { client: createMockClient() };
+    const client = createAgentClient(commands.agentCall);
+    return {
+      client,
+      setup: {
+        async createVault(password: string) {
+          const result = await commands.createVault(password);
+          if (result.status === "error") throw new Error(result.error);
+          return client.unlock(password);
+        },
+        signIn: client.signIn,
+      },
+    };
+  }, []);
+  return <VaultApp {...vault} host="desktop" fetchSite={inTauri ? fetchSite : undefined} />;
 }

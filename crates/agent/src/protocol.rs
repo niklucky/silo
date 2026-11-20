@@ -6,6 +6,8 @@
 //! ← {"err":{"code":"locked"}}
 //! ```
 
+use std::ffi::OsString;
+
 use serde::{Deserialize, Serialize};
 use silo_core::crypto::PublicKey;
 use silo_core::sync::DeviceInfo;
@@ -169,6 +171,9 @@ pub struct StatusInfo {
     pub agent_version: String,
     pub core_version: String,
     pub home: String,
+    /// The canonical vault directory for agents with race-safe first-run sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_home: Option<OsString>,
     pub has_account: bool,
     pub unlocked: bool,
     pub fingerprint: Option<String>,

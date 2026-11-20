@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SyncInfo, VaultClient } from "../client";
+import type { SyncInfo, VaultClient, VaultSetup } from "../client";
 import { createFaviconLoader, FaviconContext, type SiteFetcher } from "../favicon";
 import { Icon, Logo } from "../icons";
 import { KIND_LABEL, type SecretKind, type SecretSummary, type SecretView } from "../protocol";
@@ -10,9 +10,11 @@ import { type Draft, draftOf, Editor, newDraft } from "./Editor";
 import { ItemList } from "./ItemList";
 import { allFolders, inScope, type Scope } from "./scope";
 import { Sidebar } from "./Sidebar";
+import { VaultOnboarding } from "./VaultOnboarding";
 
 export interface VaultAppProps {
   client: VaultClient;
+  setup?: VaultSetup;
   /** Shown on the unlock screen; also lets hosts tweak layout via `data-host`. */
   host: "desktop" | "web";
   /** Lets login avatars show website favicons; letters only without it. */
@@ -25,7 +27,7 @@ type Mode = { type: "view" } | { type: "edit"; view: SecretView; session: number
 let editorSessions = 0;
 
 /** The whole vault UI: unlock, browse, search, preview and edit. Hosts only supply the client. */
-export function VaultApp({ client, host, fetchSite }: VaultAppProps) {
+export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
   const [state, setState] = useState<"loading" | "locked" | "open">("loading");
   const [items, setItems] = useState<SecretSummary[]>([]);
   const [scope, setScopeRaw] = useState<Scope>({ type: "all" });
@@ -230,6 +232,32 @@ export function VaultApp({ client, host, fetchSite }: VaultAppProps) {
 
   if (state === "loading") return <div className="vault" data-host={host} />;
   if (state === "locked") {
+    if (noAccount && setup) {
+      return (
+        <VaultOnboarding
+          host={host}
+          createVault={async (password) => {
+            try {
+              await setup.createVault(password);
+            } finally {
+              await reload();
+            }
+          }}
+          signIn={async (server, username, password) => {
+            try {
+              await setup.signIn(server, username, password);
+              try {
+                await client.sync();
+              } catch (err) {
+                setToast(`Signed in. Initial sync failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            } finally {
+              await reload();
+            }
+          }}
+        />
+      );
+    }
     return (
       <Unlock
         host={host}

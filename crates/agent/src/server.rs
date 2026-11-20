@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroize;
 
-use silo_core::AccountKeys;
 use silo_core::sync::ErrorCode;
+use silo_core::{AccountKeys, AccountRecord};
 
 use crate::protocol::{AgentError, Reply, Request, Response, StatusInfo, SyncStatusInfo};
 use crate::session::Session;
@@ -61,6 +61,23 @@ struct Shared {
 /// Runs the agent until a `shutdown` request arrives. Blocks the calling thread.
 pub fn run(config: Config) -> io::Result<()> {
     let socket = config.store.paths().socket_file().to_path_buf();
+    // Starting the desktop and CLI together must not let either agent remove
+    // a socket the other agent just bound.
+    let mut lock_path = socket.clone().into_os_string();
+    lock_path.push(".lock");
+    let socket_lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)?;
+    socket_lock.try_lock().map_err(|err| match err {
+        fs::TryLockError::WouldBlock => io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "another agent is already listening",
+        ),
+        fs::TryLockError::Error(err) => err,
+    })?;
     if socket.exists() {
         if UnixStream::connect(&socket).is_ok() {
             return Err(io::Error::new(
@@ -464,10 +481,13 @@ fn sync_login(
         &device,
     )?;
     let mut state = lock_state(shared);
-    // A new machine gets the account; one whose password changed elsewhere
-    // gets the record that opens with the new password.
-    if local.as_ref() != Some(&record) {
-        state.store.write_account(&record)?;
+    if let Err(err) = state.accept_login_account(local.as_ref(), &record) {
+        drop(state);
+        // The server has already registered this device. Discard it when
+        // another client completed setup while this login was in flight.
+        let _ = HttpClient::new(&sync_state.server)
+            .and_then(|client| client.with_token(&sync_state.token).logout());
+        return Err(err);
     }
     state.start_syncing(sync_state, keys, true)?;
     let status = state.sync_status();
@@ -532,6 +552,33 @@ fn lock_state(shared: &Shared) -> std::sync::MutexGuard<'_, State> {
 }
 
 impl State {
+    fn accept_login_account(
+        &self,
+        previous: Option<&AccountRecord>,
+        record: &AccountRecord,
+    ) -> Result<(), SyncError> {
+        if let Some(sync) = &self.sync {
+            return Err(SyncError::AlreadyConfigured(sync.server.clone()));
+        }
+        // A new machine gets the account. An existing one can receive a
+        // newer record for that same account, as long as it hasn't changed
+        // while the login was in flight.
+        match previous {
+            None => self.store.create_account(record)?,
+            Some(previous) => {
+                if self.store.read_account()? != *previous {
+                    return Err(SyncError::Config(
+                        "the local account changed during sign-in; try again".to_owned(),
+                    ));
+                }
+                if previous != record {
+                    self.store.write_account(record)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn expire_if_needed(&mut self) -> bool {
         if let Some(expires_at) = self.expires_at
             && Instant::now() >= expires_at
@@ -645,6 +692,13 @@ impl State {
             agent_version: crate::VERSION.to_owned(),
             core_version: silo_core::version().to_owned(),
             home: self.store.paths().home().display().to_string(),
+            setup_home: self
+                .store
+                .paths()
+                .home()
+                .canonicalize()
+                .ok()
+                .map(PathBuf::into_os_string),
             has_account: self.store.has_account(),
             unlocked: self.session.is_some(),
             fingerprint: self.session.as_ref().map(|s| s.fingerprint().to_string()),

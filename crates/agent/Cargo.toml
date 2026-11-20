@@ -13,6 +13,7 @@ libc.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
 zeroize.workspace = true
@@ -20,5 +21,4 @@ zeroize.workspace = true
 [dev-dependencies]
 axum.workspace = true
 silo-server.workspace = true
-tempfile.workspace = true
 tokio.workspace = true

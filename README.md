@@ -41,7 +41,7 @@ deployment/
   deploy.sh                remote pull, pre-deploy backup, health check and recovery
   nginx/                   only the Silo HTTP/TLS site
   tests/                   isolated Debian provisioning and backup checks
-.github/workflows/         PR/main checks and vX.Y.Z server releases
+.github/workflows/         PR/main checks and vX.Y.Z server and desktop releases
 ```
 
 The core crate is the only place that touches keys or plaintext. Hosts supply
@@ -396,6 +396,34 @@ gh variable list --repo niklucky/silo --env production
 
 Uploading settings does not start a deployment.
 
+### Desktop signing
+
+Silo uses the same GitHub Actions secret names as Testron. Add the following
+[repository secrets](https://github.com/niklucky/silo/settings/secrets/actions):
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE` | Base64-encoded `.p12` export of the Apple **Developer ID Application** certificate and its private key |
+| `MACOS_CERTIFICATE_PASSWORD` | Password set when exporting the `.p12` |
+| `APPLE_ID` | Apple Account email for notarization |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for that Apple Account |
+| `APPLE_TEAM_ID` | Apple Developer Team ID |
+
+For the certificate, export the signing identity from Keychain Access as a
+password-protected `.p12`. You can stream the encoded export directly to GitHub:
+
+```sh
+openssl base64 -A -in /path/to/DeveloperID.p12 |
+  gh secret set MACOS_CERTIFICATE --repo niklucky/silo
+```
+
+Tauri imports the certificate into a temporary keychain and submits the signed
+app to Apple for notarization. The workflow verifies the signature, stapled
+ticket and Gatekeeper assessment before archiving the app. Run **Desktop
+packages** from the Actions tab once the workflow is on `main` to check signing
+and download both ZIPs using the checked-in desktop version. The manual run
+uploads Actions artifacts only.
+
 ### Version releases and updates
 
 After the deployment changes are committed, merged and checked on `main`,
@@ -404,8 +432,8 @@ push a version tag to release and deploy:
 ```sh
 git switch main
 git pull --ff-only
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 gh run list --repo niklucky/silo --workflow release.yml --limit 5
 ```
 
@@ -414,9 +442,28 @@ names beginning with `v` fail validation before building or deploying.
 `.github/workflows/release.yml` runs the existing checks, publishes an
 `linux/amd64` image at `ghcr.io/niklucky/silo/server` tagged with both the
 version and commit SHA, and health-checks the published image on the runner.
-The deploy job runs in the `production` GitHub environment and passes the
-image's immutable `@sha256:…` digest to the VPS. The workflow's scoped
-`GITHUB_TOKEN` supplies registry access; no registry password or PAT is needed.
+After both desktop packages pass, the deploy job runs in the `production`
+GitHub environment and passes the image's immutable `@sha256:…` digest to the
+VPS. The workflow's scoped `GITHUB_TOKEN` supplies registry access.
+
+After the server deploys successfully and both desktop builds pass, the
+GitHub Release includes the container digest and two ZIPs. The desktop bundles
+use the tag version:
+
+- `Silo-desktop-macos-universal.zip` contains the signed and notarized
+  `Silo.app` for Apple Silicon and Intel.
+- `Silo-desktop-linux-x64.zip` contains an executable AppImage built on
+  Ubuntu 22.04 for x86-64.
+
+Both desktop packages include the Silo CLI, which starts the local vault agent
+when needed. On first launch, create a local vault or sign in to an existing
+sync account from the app. If a vault already exists, open it with the same
+master password. You can install the CLI separately for terminal use.
+If first-run setup encounters an older agent, run `silo agent stop` and retry
+in the app to start the bundled agent.
+
+For a development build, run `cargo install --path crates/cli --locked` before
+`pnpm dev:desktop`, or set `SILO_BIN` to the path of a built `silo` executable.
 
 Each SSH deployment creates a private
 `/opt/silo/releases/<version>-<commit>.<unique-suffix>` directory containing
@@ -432,8 +479,7 @@ configured retention before changing the container. A pull or backup failure
 leaves the existing process running. Compose waits up to 120 seconds for
 container health; the script also checks `https://silo.warpunit.com/health`
 through nginx. Success atomically updates `/opt/silo/current`, retaining
-`/opt/silo/previous`. A GitHub Release containing the commit and image digest
-is published only after deployment succeeds. The workflow queues release runs
+`/opt/silo/previous`. The workflow queues release runs
 instead of canceling a deployment in progress, using GitHub's
 [`queue: max` concurrency setting](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
 
@@ -447,11 +493,11 @@ the newer schema; inspect the logs and follow the explicit restore procedure
 above if a database restore is necessary.
 
 For a failed workflow, rerun the failed jobs from the Actions run. A new remote
-release directory is created each time. A full rerun rebuilds the image from
-the same source commit and may pick up newer base image packages; it can have
-a different digest, recorded in that release's notes. Successful releases and
-cached images are retained on the host; the deploy script does not prune
-shared-host images or delete database files.
+release directory is created each time. A rerun keeps desktop ZIPs already
+uploaded to the GitHub Release and uploads any missing ZIPs. A full rerun
+rebuilds the image from the same source commit and may pick up newer base image
+packages. The release notes record the corresponding image digest. The deploy
+script retains successful releases, cached images and database files on the host.
 
 Inspect the running release, logs and backups after the first deployment:
 
@@ -779,10 +825,10 @@ shadow DOM, TOTP codes, choosing the folder and title when saving.
 
 ## Status
 
-Core, agent and CLI are implemented and tested for local, single-user work. The
-extension fills HTTP Basic Auth and login forms in Firefox/Zen, Chrome and Safari.
-Sync between devices works through `silo-server`; the server is not deployed
-anywhere yet. The desktop app still only round-trips `silo_core::version()`.
+Core, agent and CLI support local, single-user work. The extension fills HTTP
+Basic Auth and login forms in Firefox/Zen, Chrome and Safari. Desktop users
+can create or unlock a local vault, sign in to an existing sync account, and
+browse and edit secrets. Sync between devices uses `silo-server`.
 
 - **`silo-core`.** Accounts (Argon2id, X25519 keypair wrapped under a derived
   key), sealed secrets (fresh data key per revision, metadata and body sealed

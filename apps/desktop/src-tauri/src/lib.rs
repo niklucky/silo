@@ -9,6 +9,7 @@ mod site;
 
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
+use zeroize::Zeroizing;
 
 /// Core crate version. First round-trip smoke test from the desktop UI.
 #[tauri::command]
@@ -32,6 +33,18 @@ async fn agent_call(app: tauri::AppHandle, request: String) -> String {
         })
 }
 
+/// Creates the first local account with the same setup as `silo init`.
+#[tauri::command]
+#[specta::specta]
+async fn create_vault(app: tauri::AppHandle, password: String) -> Result<(), String> {
+    let password = Zeroizing::new(password);
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<agent::Agent>().create_vault(&password)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 /// GETs a website saved in a login (for its favicon); see [`site::get`].
 #[tauri::command]
 #[specta::specta]
@@ -43,7 +56,12 @@ async fn fetch_site(url: String, limit: u32) -> Option<site::SiteResponse> {
 }
 
 fn specta_builder() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![core_version, agent_call, fetch_site])
+    Builder::<tauri::Wry>::new().commands(collect_commands![
+        core_version,
+        agent_call,
+        create_vault,
+        fetch_site
+    ])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

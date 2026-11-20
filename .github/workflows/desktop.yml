@@ -1,0 +1,151 @@
+name: Desktop packages
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+    secrets:
+      MACOS_CERTIFICATE:
+        required: true
+      MACOS_CERTIFICATE_PASSWORD:
+        required: true
+      APPLE_ID:
+        required: true
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: true
+      APPLE_TEAM_ID:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: universal-apple-darwin
+            asset: Silo-desktop-macos-universal
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: Silo-desktop-linux-x64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf libfuse2
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          fi
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the bundled Silo CLI
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sidecars=apps/desktop/src-tauri/binaries
+          mkdir -p "$sidecars"
+          if [[ "$TARGET" == universal-apple-darwin ]]; then
+            cargo build --locked --release -p silo-cli --bin silo \
+              --target aarch64-apple-darwin --target x86_64-apple-darwin
+            for arch in aarch64 x86_64; do
+              cp "target/$arch-apple-darwin/release/silo" "$sidecars/silo-$arch-apple-darwin"
+            done
+            lipo -create "$sidecars/silo-aarch64-apple-darwin" "$sidecars/silo-x86_64-apple-darwin" \
+              -output "$sidecars/silo-$TARGET"
+          else
+            cargo build --locked --release -p silo-cli --bin silo --target "$TARGET"
+            cp "target/$TARGET/release/silo" "$sidecars/silo-$TARGET"
+          fi
+      - name: Build desktop app
+        id: build
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          config=$(jq -cn --arg version "$RELEASE_VERSION" '
+            {bundle: {externalBin: ["binaries/silo"]}} +
+            (if $version == "" then {} else {version: $version} end)')
+          echo "config=$config" >> "$GITHUB_OUTPUT"
+          pnpm --filter @silo/desktop tauri build --ci --no-bundle --target "$TARGET" --config "$config" -- --locked
+      - name: Bundle and notarize macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          BUNDLE_CONFIG: ${{ steps.build.outputs.config }}
+          TARGET: ${{ matrix.target }}
+          APPLE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: 'Developer ID Application:'
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for credential in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!credential}" ]]; then
+              echo "::error::Missing $credential. See Desktop signing in README.md for the GitHub secret names."
+              exit 1
+            fi
+          done
+
+          pnpm --filter @silo/desktop tauri bundle --ci --target "$TARGET" --bundles app --config "$BUNDLE_CONFIG"
+      - name: Bundle Linux AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          BUNDLE_CONFIG: ${{ steps.build.outputs.config }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          pnpm --filter @silo/desktop tauri bundle --ci --target "$TARGET" --bundles appimage --config "$BUNDLE_CONFIG"
+      - name: Verify and ZIP desktop package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          bundle_dir="target/$TARGET/release/bundle"
+          mkdir -p dist
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            app="$bundle_dir/macos/Silo.app"
+            "$app/Contents/MacOS/silo" --version
+            codesign --verify --deep --strict --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+            ditto -c -k --keepParent "$app" "dist/$ASSET.zip"
+          else
+            appimages=("$bundle_dir"/appimage/*.AppImage)
+            if [[ "${#appimages[@]}" -ne 1 || ! -x "${appimages[0]}" ]]; then
+              echo "::error::Expected one executable AppImage in $bundle_dir/appimage"
+              exit 1
+            fi
+            "${appimages[0]}" --appimage-extract usr/bin/silo
+            squashfs-root/usr/bin/silo --version
+            zip -j "dist/$ASSET.zip" "${appimages[0]}"
+          fi
+          unzip -tq "dist/$ASSET.zip"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}.zip
+          if-no-files-found: error
+          overwrite: true

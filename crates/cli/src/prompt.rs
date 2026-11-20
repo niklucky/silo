@@ -1,11 +1,11 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result, bail};
+use silo_agent::MIN_MASTER_PASSWORD_LEN;
 use zeroize::Zeroizing;
 
 /// Env var that bypasses the password prompt, for scripts and CI.
 pub const PASSWORD_ENV: &str = "SILO_PASSWORD";
-const MIN_PASSWORD_LEN: usize = 8;
 
 pub fn password(label: &str) -> Result<Zeroizing<String>> {
     if let Ok(password) = std::env::var(PASSWORD_ENV) {
@@ -66,8 +66,8 @@ pub fn new_password() -> Result<Zeroizing<String>> {
 }
 
 fn check_strength(password: &str) -> Result<()> {
-    if password.chars().count() < MIN_PASSWORD_LEN {
-        bail!("master password must be at least {MIN_PASSWORD_LEN} characters");
+    if password.chars().count() < MIN_MASTER_PASSWORD_LEN {
+        bail!("master password must be at least {MIN_MASTER_PASSWORD_LEN} characters");
     }
     Ok(())
 }
