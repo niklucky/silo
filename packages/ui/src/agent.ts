@@ -13,11 +13,12 @@ export type AgentTransport = (request: string) => Promise<string>;
 type AgentErrorBody =
   | { code: "locked" }
   | { code: "wrong_password" }
+  | { code: "biometric_cancelled" }
   | { code: "no_account"; home: string }
   | { code: "not_found"; selector: string }
   | { code: "ambiguous"; selector: string; matches: string[] }
   | { code: "stale"; selector: string; expected: number; current: number }
-  | { code: "invalid" | "core" | "storage" | "sync" | "internal"; message: string };
+  | { code: "biometric" | "invalid" | "core" | "storage" | "sync" | "internal"; message: string };
 
 /** An error the agent answered with. `code` is the protocol's error code. */
 export class AgentError extends Error {
@@ -34,6 +35,8 @@ function describe(error: AgentErrorBody): string {
       return "The vault is locked.";
     case "wrong_password":
       return "Wrong password.";
+    case "biometric_cancelled":
+      return "Biometric unlock was cancelled.";
     case "no_account":
       return `No vault in ${error.home}. Run \`silo init\` in a terminal.`;
     case "not_found":
@@ -62,6 +65,9 @@ export function createAgentClient(send: AgentTransport): VaultClient & Pick<Vaul
     status: () => call<StatusInfo>("status", undefined, "status"),
     signIn: (server, username, password) => call<SyncInfo | null>("sync_login", { server, username, password }, "sync_status"),
     unlock: (password) => call<StatusInfo>("unlock", { password }, "unlocked"),
+    unlockBiometric: () => call<StatusInfo>("unlock_biometric", {}, "unlocked"),
+    enableBiometric: () => call<StatusInfo>("biometric_enable", {}, "status"),
+    disableBiometric: () => call<StatusInfo>("biometric_disable", {}, "status"),
     lock: () => call<void>("lock", undefined, "locked"),
     list: () => call<SecretSummary[]>("list", {}, "list"),
     get: (id) => call<SecretView>("get", { selector: id }, "secret"),

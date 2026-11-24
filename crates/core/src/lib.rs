@@ -18,7 +18,7 @@ pub mod error;
 pub mod sync;
 pub mod vault;
 
-pub use account::{AccountKeys, AccountRecord};
+pub use account::{AccountKeys, AccountRecord, UnlockSlot};
 pub use error::{Error, Result};
 
 /// Semantic version of the core crate, baked in at compile time.

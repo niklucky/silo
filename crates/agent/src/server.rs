@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,11 +13,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use zeroize::Zeroize;
+use rand::Rng;
+use zeroize::{Zeroize, Zeroizing};
 
+use silo_core::crypto::KEY_LEN;
 use silo_core::sync::ErrorCode;
 use silo_core::{AccountKeys, AccountRecord};
 
+use crate::biometric::{BIOMETRIC_CONTEXT, BiometricError, BiometricProvider, BiometricRecord};
 use crate::protocol::{AgentError, Reply, Request, Response, StatusInfo, SyncStatusInfo};
 use crate::session::Session;
 use crate::store::Store;
@@ -46,6 +49,9 @@ struct State {
     expires_at: Option<Instant>,
     default_ttl: Duration,
     sync: Option<SyncState>,
+    /// Incremented on every lock so an in-flight biometric prompt cannot reopen
+    /// the vault after an explicit lock.
+    lock_epoch: u64,
 }
 
 struct Shared {
@@ -56,10 +62,39 @@ struct Shared {
     nudge: Option<mpsc::Sender<()>>,
     /// Held for a whole sync run, so runs never overlap.
     syncing: Mutex<()>,
+    biometric: Arc<dyn BiometricProvider>,
+    /// Held while a biometric operation is active so prompts and disable serialize.
+    biometric_busy: Mutex<()>,
+    /// Per-run secret written to `$SILO_HOME/agent.token` (0600) to authorize
+    /// local management requests that sandboxed browser bridges cannot access.
+    admin_token: Zeroizing<String>,
 }
 
 /// Runs the agent until a `shutdown` request arrives. Blocks the calling thread.
 pub fn run(config: Config) -> io::Result<()> {
+    run_with_biometric(config, crate::biometric::system_provider())
+}
+
+/// Like [`run`], with an explicit biometric provider (used in tests).
+pub fn run_with_biometric(config: Config, biometric: Arc<dyn BiometricProvider>) -> io::Result<()> {
+    // Hold an exclusive lock on SILO_HOME so two agents cannot share one vault
+    // directory via different SILO_AGENT_SOCKET values (protecting agent.token
+    // and biometric.json from concurrent writers).
+    let home_lock_path = config.store.paths().home().join(".home.lock");
+    let home_lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&home_lock_path)?;
+    home_lock.try_lock().map_err(|err| match err {
+        fs::TryLockError::WouldBlock => io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "another agent is already running for this vault",
+        ),
+        fs::TryLockError::Error(err) => err,
+    })?;
+    let home_meta = home_lock.metadata()?;
     let socket = config.store.paths().socket_file().to_path_buf();
     // Starting the desktop and CLI together must not let either agent remove
     // a socket the other agent just bound.
@@ -70,15 +105,28 @@ pub fn run(config: Config) -> io::Result<()> {
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(lock_path)?;
-    socket_lock.try_lock().map_err(|err| match err {
-        fs::TryLockError::WouldBlock => io::Error::new(
-            io::ErrorKind::AddrInUse,
-            "another agent is already listening",
-        ),
-        fs::TryLockError::Error(err) => err,
-    })?;
-    if socket.exists() {
+        .open(&lock_path)?;
+    let socket_meta = socket_lock.metadata()?;
+    let _socket_lock =
+        if (socket_meta.dev(), socket_meta.ino()) != (home_meta.dev(), home_meta.ino()) {
+            socket_lock.try_lock().map_err(|err| match err {
+                fs::TryLockError::WouldBlock => io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "another agent is already listening",
+                ),
+                fs::TryLockError::Error(err) => err,
+            })?;
+            Some(socket_lock)
+        } else {
+            None
+        };
+    if let Ok(meta) = fs::symlink_metadata(&socket) {
+        if !meta.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a socket", socket.display()),
+            ));
+        }
         if UnixStream::connect(&socket).is_ok() {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
@@ -87,6 +135,9 @@ pub fn run(config: Config) -> io::Result<()> {
         }
         fs::remove_file(&socket)?;
     }
+    let token_path = config.store.paths().admin_token_file();
+    let admin_token = write_admin_token(&token_path)?;
+
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     log(&format!("listening on {}", socket.display()));
@@ -109,11 +160,15 @@ pub fn run(config: Config) -> io::Result<()> {
             expires_at: None,
             default_ttl: config.default_ttl,
             sync,
+            lock_epoch: 0,
         }),
         shutdown: AtomicBool::new(false),
         socket: socket.clone(),
         nudge,
         syncing: Mutex::new(()),
+        biometric,
+        biometric_busy: Mutex::new(()),
+        admin_token,
     });
     if let (Some(interval), Some(nudged)) = (config.sync_interval, nudged) {
         let shared = Arc::clone(&shared);
@@ -143,9 +198,27 @@ pub fn run(config: Config) -> io::Result<()> {
         }
     }
 
+    // Drain any in-flight biometric operation before removing files and
+    // dropping home_lock so a replacement agent cannot race with it.
+    let _biometric_drain = shared.biometric_busy.lock();
     let _ = fs::remove_file(&socket);
+    let _ = fs::remove_file(&token_path);
+    drop(_biometric_drain);
+    drop(home_lock);
     log("stopped");
     Ok(())
+}
+
+fn write_admin_token(path: &std::path::Path) -> io::Result<Zeroizing<String>> {
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    rand::rng().fill_bytes(bytes.as_mut());
+    let token = Zeroizing::new(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(token.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|err| err.error)?;
+    Ok(token)
 }
 
 fn handle(stream: UnixStream, shared: &Shared) {
@@ -192,8 +265,47 @@ fn handle(stream: UnixStream, shared: &Shared) {
 }
 
 fn dispatch(request: Request, shared: &Shared) -> Response {
-    // Requests that go to the sync server run without holding the state lock.
+    // Requests that do network IO or OS biometric/LocalAuthentication calls run
+    // without holding the vault state lock.
     let result = match request {
+        Request::Status => {
+            let biometric_available = shared.biometric.is_available();
+            let mut state = lock_state(shared);
+            state.expire_if_needed();
+            Ok(Reply::Status(state.status(biometric_available)))
+        }
+        Request::Unlock {
+            mut password,
+            ttl_secs,
+        } => {
+            let biometric_available = shared.biometric.is_available();
+            let mut state = lock_state(shared);
+            state.expire_if_needed();
+            let result = state.unlock(
+                password.as_bytes(),
+                ttl_secs.map(Duration::from_secs),
+                biometric_available,
+            );
+            password.zeroize();
+            drop(state);
+            if result.is_ok() {
+                nudge(shared);
+            }
+            result
+        }
+        Request::UnlockBiometric { ttl_secs } => {
+            unlock_biometric(shared, ttl_secs.map(Duration::from_secs))
+        }
+        Request::BiometricEnable { mut token } => {
+            let result = biometric_enable(shared, &token);
+            token.zeroize();
+            result
+        }
+        Request::BiometricDisable { mut token } => {
+            let result = biometric_disable(shared, &token);
+            token.zeroize();
+            result
+        }
         Request::Sync => sync_now(shared)
             .map(Reply::Synced)
             .map_err(AgentError::from),
@@ -235,18 +347,6 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
     let mut state = lock_state(shared);
     state.expire_if_needed();
     let result = match request {
-        Request::Status => Ok(Reply::Status(state.status())),
-        Request::Unlock {
-            mut password,
-            ttl_secs,
-        } => {
-            let result = state.unlock(password.as_bytes(), ttl_secs.map(Duration::from_secs));
-            password.zeroize();
-            if result.is_ok() {
-                nudge(shared);
-            }
-            result
-        }
         Request::Lock => {
             state.lock();
             log("locked by request");
@@ -333,7 +433,12 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
                 )
             }),
         Request::SyncStatus => Ok(Reply::SyncStatus(state.sync_status())),
-        Request::Sync
+        Request::Status
+        | Request::Unlock { .. }
+        | Request::UnlockBiometric { .. }
+        | Request::BiometricEnable { .. }
+        | Request::BiometricDisable { .. }
+        | Request::Sync
         | Request::SyncRegister { .. }
         | Request::SyncLogin { .. }
         | Request::SyncLogout
@@ -547,6 +652,210 @@ fn sync_client(shared: &Shared) -> Result<(HttpClient, String), SyncError> {
     ))
 }
 
+fn require_admin_token(shared: &Shared, provided: &str) -> Result<(), AgentError> {
+    let expected = shared.admin_token.as_bytes();
+    let got = provided.as_bytes();
+    let diff = expected
+        .iter()
+        .zip(got.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    if expected.len() == got.len() && diff == 0 {
+        Ok(())
+    } else {
+        Err(AgentError::Invalid {
+            message: "this method requires local agent authorization".to_owned(),
+        })
+    }
+}
+
+fn map_biometric_error(err: BiometricError) -> AgentError {
+    match err {
+        BiometricError::Cancelled => AgentError::BiometricCancelled,
+        other => AgentError::Biometric {
+            message: other.to_string(),
+        },
+    }
+}
+
+fn unlock_biometric(shared: &Shared, ttl: Option<Duration>) -> Result<Reply, AgentError> {
+    let Ok(_prompt_guard) = shared.biometric_busy.try_lock() else {
+        return Err(AgentError::Biometric {
+            message: "a biometric prompt is already open".to_owned(),
+        });
+    };
+    if shared.shutdown.load(Ordering::SeqCst) {
+        return Err(AgentError::Biometric {
+            message: "agent is shutting down".to_owned(),
+        });
+    }
+    let (account, bio, lock_epoch) = {
+        let mut state = lock_state(shared);
+        state.expire_if_needed();
+        // Validate TTL before showing an OS prompt so an overflow fails fast.
+        let _ = resolve_expiry(ttl, state.default_ttl)?;
+        let account = state.store.read_account()?;
+        let bio = state
+            .store
+            .read_biometric::<BiometricRecord>()?
+            .ok_or_else(|| AgentError::Biometric {
+                message: "biometric unlock is not enabled for this vault".to_owned(),
+            })?;
+        if bio.slot.public_key != account.public_key {
+            return Err(AgentError::Biometric {
+                message: "biometric unlock does not match this account; re-enable it".to_owned(),
+            });
+        }
+        (account, bio, state.lock_epoch)
+    };
+    if !shared.biometric.is_available() {
+        return Err(AgentError::Biometric {
+            message: "biometric unlock is not available on this device".to_owned(),
+        });
+    }
+    shared
+        .biometric
+        .authenticate("unlock your Silo vault")
+        .map_err(map_biometric_error)?;
+    let wrapping_key = shared
+        .biometric
+        .load_key(&bio.key_id)
+        .map_err(map_biometric_error)?;
+    let keys = bio
+        .slot
+        .open(&wrapping_key, &account.public_key, BIOMETRIC_CONTEXT)
+        .map_err(|_| AgentError::Biometric {
+            message: "biometric unlock key did not open this vault; disable and re-enable it"
+                .to_owned(),
+        })?;
+    drop(wrapping_key);
+
+    let biometric_available = shared.biometric.is_available();
+    let mut state = lock_state(shared);
+    if state.lock_epoch != lock_epoch {
+        return Err(AgentError::BiometricCancelled);
+    }
+    let reply = state.unlock_with_keys(keys, ttl, biometric_available)?;
+    drop(state);
+    nudge(shared);
+    Ok(reply)
+}
+
+fn biometric_enable(shared: &Shared, token: &str) -> Result<Reply, AgentError> {
+    require_admin_token(shared, token)?;
+    let Ok(_prompt_guard) = shared.biometric_busy.try_lock() else {
+        return Err(AgentError::Biometric {
+            message: "a biometric prompt is already open".to_owned(),
+        });
+    };
+    if shared.shutdown.load(Ordering::SeqCst) {
+        return Err(AgentError::Biometric {
+            message: "agent is shutting down".to_owned(),
+        });
+    }
+    {
+        let mut state = lock_state(shared);
+        state.expire_if_needed();
+        if state.session.is_none() {
+            return Err(AgentError::Locked);
+        }
+        if state.store.read_biometric::<BiometricRecord>()?.is_some() {
+            return Err(AgentError::Invalid {
+                message: "biometric unlock is already enabled; disable it first".to_owned(),
+            });
+        }
+    }
+    if !shared.biometric.is_available() {
+        return Err(AgentError::Biometric {
+            message: "biometric unlock is not available on this device".to_owned(),
+        });
+    }
+    shared
+        .biometric
+        .authenticate("enable Touch ID unlock for Silo")
+        .map_err(map_biometric_error)?;
+
+    let mut rng = rand::rng();
+    let mut wrapping_key = Zeroizing::new([0u8; KEY_LEN]);
+    rng.fill_bytes(wrapping_key.as_mut());
+    let mut id_bytes = [0u8; 16];
+    rng.fill_bytes(&mut id_bytes);
+    let key_id: String = id_bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+    let slot = {
+        let mut state = lock_state(shared);
+        state.expire_if_needed();
+        if state.store.read_biometric::<BiometricRecord>()?.is_some() {
+            return Err(AgentError::Invalid {
+                message: "biometric unlock is already enabled; disable it first".to_owned(),
+            });
+        }
+        let session = state.session.as_ref().ok_or(AgentError::Locked)?;
+        session.seal_slot(&mut rng, &wrapping_key, BIOMETRIC_CONTEXT)?
+    };
+
+    shared
+        .biometric
+        .store_key(&key_id, &wrapping_key)
+        .map_err(map_biometric_error)?;
+    drop(wrapping_key);
+
+    let biometric_available = shared.biometric.is_available();
+    let record = BiometricRecord { key_id, slot };
+    let status = {
+        let mut state = lock_state(shared);
+        state.expire_if_needed();
+        if shared.shutdown.load(Ordering::SeqCst) || state.session.is_none() {
+            drop(state);
+            let _ = shared.biometric.delete_key(&record.key_id);
+            return Err(AgentError::Locked);
+        }
+        if let Err(err) = state.store.write_biometric(&record) {
+            drop(state);
+            let _ = shared.biometric.delete_key(&record.key_id);
+            return Err(err.into());
+        }
+        state.status(biometric_available)
+    };
+    log("biometric unlock enabled");
+    Ok(Reply::Status(status))
+}
+
+fn biometric_disable(shared: &Shared, token: &str) -> Result<Reply, AgentError> {
+    require_admin_token(shared, token)?;
+    let _prompt_guard = shared
+        .biometric_busy
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if shared.shutdown.load(Ordering::SeqCst) {
+        return Err(AgentError::Biometric {
+            message: "agent is shutting down".to_owned(),
+        });
+    }
+    let old_key_id = {
+        let mut state = lock_state(shared);
+        state.expire_if_needed();
+        state
+            .store
+            .read_biometric::<BiometricRecord>()?
+            .map(|r| r.key_id)
+    };
+    if let Some(old) = old_key_id {
+        shared
+            .biometric
+            .delete_key(&old)
+            .map_err(map_biometric_error)?;
+    }
+    let biometric_available = shared.biometric.is_available();
+    let status = {
+        let mut state = lock_state(shared);
+        state.expire_if_needed();
+        state.store.delete_biometric()?;
+        state.status(biometric_available)
+    };
+    log("biometric unlock disabled");
+    Ok(Reply::Status(status))
+}
+
 fn lock_state(shared: &Shared) -> std::sync::MutexGuard<'_, State> {
     shared.state.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -592,19 +901,46 @@ impl State {
     fn lock(&mut self) {
         self.session = None;
         self.expires_at = None;
+        self.lock_epoch = self.lock_epoch.wrapping_add(1);
     }
 
-    fn unlock(&mut self, password: &[u8], ttl: Option<Duration>) -> Result<Reply, AgentError> {
+    fn unlock(
+        &mut self,
+        password: &[u8],
+        ttl: Option<Duration>,
+        biometric_available: bool,
+    ) -> Result<Reply, AgentError> {
         let (session, skipped) = Session::unlock(&self.store, password)?;
+        self.finish_unlock(session, skipped, ttl, biometric_available)
+    }
+
+    fn unlock_with_keys(
+        &mut self,
+        keys: AccountKeys,
+        ttl: Option<Duration>,
+        biometric_available: bool,
+    ) -> Result<Reply, AgentError> {
+        let (session, skipped) = Session::open(&self.store, keys)?;
+        self.finish_unlock(session, skipped, ttl, biometric_available)
+    }
+
+    fn finish_unlock(
+        &mut self,
+        session: Session,
+        skipped: usize,
+        ttl: Option<Duration>,
+        biometric_available: bool,
+    ) -> Result<Reply, AgentError> {
+        let expires_at = resolve_expiry(ttl, self.default_ttl)?;
         if skipped > 0 {
             log(&format!(
                 "warning: {skipped} stored secret(s) could not be opened with this account"
             ));
         }
         self.session = Some(session);
-        self.expires_at = Some(Instant::now() + ttl.unwrap_or(self.default_ttl));
+        self.expires_at = Some(expires_at);
         log("unlocked");
-        Ok(Reply::Unlocked(self.status()))
+        Ok(Reply::Unlocked(self.status(biometric_available)))
     }
 
     /// With `resume`, picks up what an earlier login to the same account
@@ -687,7 +1023,20 @@ impl State {
         self.session.as_mut().ok_or(AgentError::Locked)
     }
 
-    fn status(&self) -> StatusInfo {
+    fn status(&self, biometric_available: bool) -> StatusInfo {
+        let has_account = self.store.has_account();
+        let biometric_enabled = has_account
+            && self
+                .store
+                .read_account()
+                .ok()
+                .zip(
+                    self.store
+                        .read_biometric::<BiometricRecord>()
+                        .ok()
+                        .flatten(),
+                )
+                .is_some_and(|(account, bio)| bio.slot.public_key == account.public_key);
         StatusInfo {
             agent_version: crate::VERSION.to_owned(),
             core_version: silo_core::version().to_owned(),
@@ -699,7 +1048,7 @@ impl State {
                 .canonicalize()
                 .ok()
                 .map(PathBuf::into_os_string),
-            has_account: self.store.has_account(),
+            has_account,
             unlocked: self.session.is_some(),
             fingerprint: self.session.as_ref().map(|s| s.fingerprint().to_string()),
             public_key: self.session.as_ref().map(|s| *s.public_key()),
@@ -707,8 +1056,18 @@ impl State {
             expires_in_secs: self
                 .expires_at
                 .map(|t| t.saturating_duration_since(Instant::now()).as_secs()),
+            biometric_available,
+            biometric_enabled,
         }
     }
+}
+
+fn resolve_expiry(ttl: Option<Duration>, default_ttl: Duration) -> Result<Instant, AgentError> {
+    Instant::now()
+        .checked_add(ttl.unwrap_or(default_ttl))
+        .ok_or_else(|| AgentError::Invalid {
+            message: "unlock ttl is too large".to_owned(),
+        })
 }
 
 fn log(message: &str) {
@@ -831,5 +1190,371 @@ mod tests {
         );
         server.join().unwrap().unwrap();
         assert!(!paths.socket_file().exists());
+    }
+
+    #[test]
+    fn biometric_enable_unlock_cancel_and_disable() {
+        use std::collections::HashMap;
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
+
+        struct MockBiometric {
+            available: AtomicBool,
+            cancel_next: AtomicBool,
+            fail_delete_next: AtomicBool,
+            prompts: AtomicUsize,
+            availability_checks: AtomicUsize,
+            keys: Mutex<HashMap<String, [u8; KEY_LEN]>>,
+            gate: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+        }
+
+        impl MockBiometric {
+            fn new() -> Self {
+                Self {
+                    available: AtomicBool::new(true),
+                    cancel_next: AtomicBool::new(false),
+                    fail_delete_next: AtomicBool::new(false),
+                    prompts: AtomicUsize::new(0),
+                    availability_checks: AtomicUsize::new(0),
+                    keys: Mutex::new(HashMap::new()),
+                    gate: Mutex::new(None),
+                }
+            }
+
+            fn pause_next_prompt(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+                let entered = Arc::new(Barrier::new(2));
+                let release = Arc::new(Barrier::new(2));
+                *self.gate.lock().unwrap() = Some((Arc::clone(&entered), Arc::clone(&release)));
+                (entered, release)
+            }
+        }
+
+        impl BiometricProvider for MockBiometric {
+            fn is_available(&self) -> bool {
+                self.availability_checks.fetch_add(1, Ordering::SeqCst);
+                self.available.load(Ordering::SeqCst)
+            }
+
+            fn authenticate(&self, _reason: &str) -> Result<(), BiometricError> {
+                self.prompts.fetch_add(1, Ordering::SeqCst);
+                if let Some((entered, release)) = self.gate.lock().unwrap().take() {
+                    entered.wait();
+                    release.wait();
+                }
+                if self.cancel_next.swap(false, Ordering::SeqCst) {
+                    return Err(BiometricError::Cancelled);
+                }
+                Ok(())
+            }
+
+            fn store_key(&self, account: &str, key: &[u8; KEY_LEN]) -> Result<(), BiometricError> {
+                self.keys.lock().unwrap().insert(account.to_owned(), *key);
+                Ok(())
+            }
+
+            fn load_key(&self, account: &str) -> Result<Zeroizing<[u8; KEY_LEN]>, BiometricError> {
+                self.keys
+                    .lock()
+                    .unwrap()
+                    .get(account)
+                    .copied()
+                    .map(Zeroizing::new)
+                    .ok_or(BiometricError::KeyNotFound)
+            }
+
+            fn delete_key(&self, account: &str) -> Result<(), BiometricError> {
+                if self.fail_delete_next.swap(false, Ordering::SeqCst) {
+                    return Err(BiometricError::Failed("keychain locked".to_owned()));
+                }
+                self.keys.lock().unwrap().remove(account);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        let store = Store::open(paths.clone()).unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+        let kdf = KdfParams::new(&mut rng, 256, 1, 1);
+        let (record, _) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
+        store.write_account(&record).unwrap();
+
+        let mock = Arc::new(MockBiometric::new());
+        let provider: Arc<dyn BiometricProvider> = Arc::clone(&mock) as _;
+        let server = thread::spawn(move || {
+            run_with_biometric(
+                Config {
+                    store,
+                    default_ttl: DEFAULT_TTL,
+                    sync_interval: None,
+                },
+                provider,
+            )
+        });
+
+        let mut client = None;
+        for _ in 0..100 {
+            if let Ok(c) = Client::connect(paths.socket_file()) {
+                client = Some(c);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut client = client.expect("agent came up");
+        let token = fs::read_to_string(paths.admin_token_file()).unwrap();
+
+        // A second agent for the same SILO_HOME on a different socket must be refused (S13).
+        let second_paths = paths.clone().with_socket(dir.path().join("other.sock"));
+        let second_store = Store::open(second_paths).unwrap();
+        let err = run_with_biometric(
+            Config {
+                store: second_store,
+                default_ttl: DEFAULT_TTL,
+                sync_interval: None,
+            },
+            Arc::clone(&mock) as _,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+
+        // Initially available but not enabled.
+        let Reply::Status(status) = client.call(&Request::Status).unwrap() else {
+            panic!()
+        };
+        assert!(status.biometric_available);
+        assert!(!status.biometric_enabled);
+
+        // Unauthorized biometric management is refused even on the raw socket (S1).
+        assert!(matches!(
+            client.call(&Request::BiometricEnable {
+                token: String::new()
+            }),
+            Err(crate::client::ClientError::Agent(
+                AgentError::Invalid { .. }
+            ))
+        ));
+        assert!(matches!(
+            client.call(&Request::BiometricDisable {
+                token: "wrong".into()
+            }),
+            Err(crate::client::ClientError::Agent(
+                AgentError::Invalid { .. }
+            ))
+        ));
+
+        // Cannot enable while locked.
+        assert!(matches!(
+            client.call(&Request::BiometricEnable {
+                token: token.clone()
+            }),
+            Err(crate::client::ClientError::Agent(AgentError::Locked))
+        ));
+
+        // Unlock with master password, add a secret, then enable biometrics.
+        client
+            .call(&Request::Unlock {
+                password: "pw".into(),
+                ttl_secs: None,
+            })
+            .unwrap();
+        let before = mock.availability_checks.load(Ordering::SeqCst);
+        client
+            .call(&Request::Add(NewSecret {
+                title: "bio-note".into(),
+                folder: FolderPath::default(),
+                tags: vec![],
+                urls: vec![],
+                basic_auth: false,
+                body: SecretBody::Note(Note {
+                    text: "opened via touch id".into(),
+                }),
+            }))
+            .unwrap();
+        let _ = client.call(&Request::List(ListFilter::default())).unwrap();
+        let _ = client
+            .call(&Request::Get {
+                selector: "bio-note".into(),
+            })
+            .unwrap();
+        // Ordinary vault operations do not probe LocalAuthentication (S9).
+        assert_eq!(mock.availability_checks.load(Ordering::SeqCst), before);
+
+        let Reply::Status(status) = client
+            .call(&Request::BiometricEnable {
+                token: token.clone(),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(status.biometric_enabled);
+        assert_eq!(mock.keys.lock().unwrap().len(), 1);
+
+        // Lock, then cancel a biometric unlock attempt: vault stays locked.
+        client.call(&Request::Lock).unwrap();
+        mock.cancel_next.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            client.call(&Request::UnlockBiometric { ttl_secs: None }),
+            Err(crate::client::ClientError::Agent(
+                AgentError::BiometricCancelled
+            ))
+        ));
+        let Reply::Status(status) = client.call(&Request::Status).unwrap() else {
+            panic!()
+        };
+        assert!(!status.unlocked);
+
+        // An explicit lock while a Touch ID prompt is pending must keep the vault locked (S2).
+        let (entered, release) = mock.pause_next_prompt();
+        let sock = paths.socket_file().to_path_buf();
+        let pending = thread::spawn(move || {
+            let mut c = Client::connect(&sock).unwrap();
+            c.call(&Request::UnlockBiometric { ttl_secs: None })
+        });
+        entered.wait();
+        client.call(&Request::Lock).unwrap();
+        release.wait();
+        assert!(matches!(
+            pending.join().unwrap(),
+            Err(crate::client::ClientError::Agent(
+                AgentError::BiometricCancelled
+            ))
+        ));
+        let Reply::Status(status) = client.call(&Request::Status).unwrap() else {
+            panic!()
+        };
+        assert!(!status.unlocked);
+
+        // Now unlock with biometrics and verify secrets decrypt.
+        let Reply::Unlocked(status) = client
+            .call(&Request::UnlockBiometric { ttl_secs: Some(90) })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(status.unlocked);
+        assert!(status.biometric_enabled);
+        assert!(status.expires_in_secs.unwrap() <= 90);
+        let Reply::Secret(view) = client
+            .call(&Request::Get {
+                selector: "bio-note".into(),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            view.body,
+            SecretBody::Note(Note {
+                text: "opened via touch id".into(),
+            })
+        );
+
+        // Re-enrolling while already enabled is refused until disabled (S11/S13).
+        assert!(matches!(
+            client.call(&Request::BiometricEnable {
+                token: token.clone()
+            }),
+            Err(crate::client::ClientError::Agent(
+                AgentError::Invalid { .. }
+            ))
+        ));
+
+        // Disable first, then test disable while enrollment waits on Touch ID:
+        // disable serializes after enrollment and cleans up (S3).
+        client
+            .call(&Request::BiometricDisable {
+                token: token.clone(),
+            })
+            .unwrap();
+        let (entered, release) = mock.pause_next_prompt();
+        let sock = paths.socket_file().to_path_buf();
+        let tok_en = token.clone();
+        let enrolling = thread::spawn(move || {
+            let mut c = Client::connect(&sock).unwrap();
+            c.call(&Request::BiometricEnable { token: tok_en })
+        });
+        entered.wait();
+        let sock = paths.socket_file().to_path_buf();
+        let tok_dis = token.clone();
+        let disabling = thread::spawn(move || {
+            let mut c = Client::connect(&sock).unwrap();
+            c.call(&Request::BiometricDisable { token: tok_dis })
+        });
+        thread::sleep(Duration::from_millis(20));
+        release.wait();
+        assert!(enrolling.join().unwrap().is_ok());
+        let Reply::Status(status) = disabling.join().unwrap().unwrap() else {
+            panic!()
+        };
+        assert!(!status.biometric_enabled);
+        assert!(mock.keys.lock().unwrap().is_empty());
+        assert!(!paths.biometric_file().exists());
+
+        // Re-enable, then verify out-of-range TTL is rejected without panicking or installing a session (S12).
+        client
+            .call(&Request::BiometricEnable {
+                token: token.clone(),
+            })
+            .unwrap();
+        client.call(&Request::Lock).unwrap();
+        assert!(matches!(
+            client.call(&Request::UnlockBiometric {
+                ttl_secs: Some(u64::MAX)
+            }),
+            Err(crate::client::ClientError::Agent(
+                AgentError::Invalid { .. }
+            ))
+        ));
+        assert!(matches!(
+            client.call(&Request::Unlock {
+                password: "pw".into(),
+                ttl_secs: Some(u64::MAX),
+            }),
+            Err(crate::client::ClientError::Agent(
+                AgentError::Invalid { .. }
+            ))
+        ));
+        let Reply::Status(status) = client.call(&Request::Status).unwrap() else {
+            panic!()
+        };
+        assert!(!status.unlocked);
+
+        // Fail Keychain deletion once on disable: record stays until retry succeeds (S4).
+        mock.fail_delete_next.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            client.call(&Request::BiometricDisable {
+                token: token.clone()
+            }),
+            Err(crate::client::ClientError::Agent(
+                AgentError::Biometric { .. }
+            ))
+        ));
+        assert!(paths.biometric_file().exists());
+        assert_eq!(mock.keys.lock().unwrap().len(), 1);
+
+        let Reply::Status(status) = client
+            .call(&Request::BiometricDisable {
+                token: token.clone(),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(!status.biometric_enabled);
+        assert!(mock.keys.lock().unwrap().is_empty());
+        assert!(!paths.biometric_file().exists());
+
+        client.call(&Request::Lock).unwrap();
+        assert!(matches!(
+            client.call(&Request::UnlockBiometric { ttl_secs: None }),
+            Err(crate::client::ClientError::Agent(
+                AgentError::Biometric { .. }
+            ))
+        ));
+
+        client.call(&Request::Shutdown).unwrap();
+        server.join().unwrap().unwrap();
+        assert!(!paths.admin_token_file().exists());
     }
 }

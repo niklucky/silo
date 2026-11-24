@@ -4,6 +4,7 @@
 //! public key, and the secret key wrapped under a key derived from the password.
 //! Unlocking yields [`AccountKeys`], which stay in memory only.
 
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -16,16 +17,30 @@ use crate::error::{Error, Result};
 
 /// Current on-disk / on-wire format of [`AccountRecord`].
 pub const ACCOUNT_FORMAT: u8 = 1;
+/// Current on-disk / on-wire format of [`UnlockSlot`].
+pub const UNLOCK_SLOT_FORMAT: u8 = 1;
 
 const ACCOUNT_WRAP_INFO: &[u8] = b"secret/v1/account-key-wrap";
 const ACCOUNT_AAD_DOMAIN: &[u8] = b"secret/v1/account";
 const IDENTITY_FINGERPRINT_DOMAIN: &[u8] = b"silo/v1/identity";
+const UNLOCK_SLOT_WRAP_INFO: &[u8] = b"silo/v1/unlock-slot-wrap";
+const UNLOCK_SLOT_AAD_DOMAIN: &[u8] = b"silo/v1/unlock-slot";
 
 /// Stored description of an account. Contains no secrets; safe on disk and server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountRecord {
     pub format: u8,
     pub kdf: KdfParams,
+    pub public_key: PublicKey,
+    pub wrapped_secret_key: Ciphertext,
+}
+
+/// Secondary wrapping of an account's secret key under a 32-byte key supplied
+/// by an external unlock mechanism (such as OS biometrics/keychain or a
+/// WebAuthn PRF credential).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlockSlot {
+    pub format: u8,
     pub public_key: PublicKey,
     pub wrapped_secret_key: Ciphertext,
 }
@@ -90,6 +105,64 @@ impl AccountKeys {
 
     pub(crate) fn signing_key(&self) -> &SigningKey {
         &self.signing_key
+    }
+
+    /// Wraps this account's secret key into an [`UnlockSlot`] under an external
+    /// 32-byte key bound to `context` (for example `b"os-biometric"` or
+    /// `b"webauthn-prf"`).
+    pub fn seal_slot(
+        &self,
+        rng: &mut impl CryptoRng,
+        wrapping_key: &[u8; crypto::KEY_LEN],
+        context: &[u8],
+    ) -> Result<UnlockSlot> {
+        let wrap_key = slot_wrap_key(wrapping_key, context);
+        let wrapped_secret_key = crypto::seal(
+            &wrap_key,
+            rng,
+            &slot_aad(&self.public_key, context),
+            self.secret_key.to_bytes().as_ref(),
+        )?;
+        Ok(UnlockSlot {
+            format: UNLOCK_SLOT_FORMAT,
+            public_key: self.public_key,
+            wrapped_secret_key,
+        })
+    }
+}
+
+impl UnlockSlot {
+    /// Unwraps the account keys with `wrapping_key`, checking that the slot
+    /// matches both `expected_public_key` and `context`.
+    pub fn open(
+        &self,
+        wrapping_key: &[u8; crypto::KEY_LEN],
+        expected_public_key: &PublicKey,
+        context: &[u8],
+    ) -> Result<AccountKeys> {
+        if self.format != UNLOCK_SLOT_FORMAT {
+            return Err(Error::UnsupportedFormat(self.format));
+        }
+        if self.public_key != *expected_public_key {
+            return Err(Error::Unlock);
+        }
+        let wrap_key = slot_wrap_key(wrapping_key, context);
+        let plain = crypto::open(
+            &wrap_key,
+            &slot_aad(&self.public_key, context),
+            &self.wrapped_secret_key,
+        )
+        .map_err(|_| Error::Unlock)?;
+        let mut bytes = Zeroizing::new([0u8; crypto::KEY_LEN]);
+        if plain.len() != bytes.len() {
+            return Err(Error::Unlock);
+        }
+        bytes.copy_from_slice(&plain);
+        let keys = AccountKeys::new(SecretKey::from_bytes(bytes));
+        if keys.public_key != *expected_public_key {
+            return Err(Error::Unlock);
+        }
+        Ok(keys)
     }
 }
 
@@ -189,6 +262,31 @@ fn aad(public_key: &PublicKey) -> Vec<u8> {
     aad
 }
 
+fn slot_wrap_key(
+    wrapping_key: &[u8; crypto::KEY_LEN],
+    context: &[u8],
+) -> Zeroizing<[u8; crypto::KEY_LEN]> {
+    let hk = Hkdf::<Sha256>::new(None, wrapping_key);
+    let mut info = Vec::with_capacity(UNLOCK_SLOT_WRAP_INFO.len() + 1 + context.len());
+    info.extend_from_slice(UNLOCK_SLOT_WRAP_INFO);
+    info.push(0);
+    info.extend_from_slice(context);
+    let mut out = Zeroizing::new([0u8; crypto::KEY_LEN]);
+    hk.expand(&info, out.as_mut())
+        .expect("32 bytes is always a valid HKDF-SHA256 length");
+    out
+}
+
+fn slot_aad(public_key: &PublicKey, context: &[u8]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(UNLOCK_SLOT_AAD_DOMAIN.len() + 1 + 32 + 1 + context.len());
+    aad.extend_from_slice(UNLOCK_SLOT_AAD_DOMAIN);
+    aad.push(UNLOCK_SLOT_FORMAT);
+    aad.extend_from_slice(public_key.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(context);
+    aad
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +374,55 @@ mod tests {
         let back: AccountRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, record);
         assert!(back.unlock(b"pw").is_ok());
+    }
+
+    #[test]
+    fn unlock_slot_roundtrip_and_context_binding() {
+        let mut rng = testing::rng(25);
+        let kdf = testing::weak_kdf(&mut rng);
+        let (record, keys) = AccountRecord::create(&mut rng, b"pw", kdf).unwrap();
+        let wrapping_key = [42u8; crypto::KEY_LEN];
+
+        let slot = keys
+            .seal_slot(&mut rng, &wrapping_key, b"os-biometric")
+            .unwrap();
+        let json = serde_json::to_string(&slot).unwrap();
+        let slot: UnlockSlot = serde_json::from_str(&json).unwrap();
+
+        let opened = slot
+            .open(&wrapping_key, &record.public_key, b"os-biometric")
+            .unwrap();
+        assert_eq!(opened.identity(), keys.identity());
+
+        // Wrong wrapping key, context, or account public key must fail.
+        let wrong_key = [7u8; crypto::KEY_LEN];
+        assert_eq!(
+            slot.open(&wrong_key, &record.public_key, b"os-biometric")
+                .unwrap_err(),
+            Error::Unlock
+        );
+        assert_eq!(
+            slot.open(&wrapping_key, &record.public_key, b"webauthn-prf")
+                .unwrap_err(),
+            Error::Unlock
+        );
+        assert_eq!(
+            slot.open(
+                &wrapping_key,
+                &PublicKey::from_bytes([9; 32]),
+                b"os-biometric"
+            )
+            .unwrap_err(),
+            Error::Unlock
+        );
+
+        let mut future = slot.clone();
+        future.format = 2;
+        assert_eq!(
+            future
+                .open(&wrapping_key, &record.public_key, b"os-biometric")
+                .unwrap_err(),
+            Error::UnsupportedFormat(2)
+        );
     }
 }

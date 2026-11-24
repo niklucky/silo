@@ -26,6 +26,14 @@ pub enum Command {
         /// How long to stay unlocked, e.g. 8h or 30m (default 12h)
         #[arg(long, value_parser = humantime::parse_duration)]
         ttl: Option<Duration>,
+        /// Skip Touch ID / OS biometrics and prompt for the master password
+        #[arg(long, short = 'p')]
+        password: bool,
+    },
+    /// Enable, disable, or inspect OS biometric unlock (Touch ID on macOS)
+    Biometric {
+        #[command(subcommand)]
+        command: BiometricCommand,
     },
     /// Make the agent forget the keys
     Lock,
@@ -232,6 +240,16 @@ pub enum BrowserCommand {
         browser: Vec<Browser>,
     },
     /// Show which browsers are connected
+    Status,
+}
+
+#[derive(Subcommand)]
+pub enum BiometricCommand {
+    /// Enable OS biometric unlock (Touch ID) for this vault on this machine
+    Enable,
+    /// Disable OS biometric unlock and remove its keychain key
+    Disable,
+    /// Show whether OS biometric unlock is available and enabled
     Status,
 }
 

@@ -304,6 +304,9 @@ kbd {
   background: var(--surface-2);
   color: var(--fg);
 }
+.icon-btn.active {
+  color: var(--accent);
+}
 .icon-btn.small {
   width: 24px;
   height: 24px;
@@ -1078,6 +1081,21 @@ kbd {
 .unlock-card .error {
   width: 100%;
   margin: 0;
+}
+.unlock-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  color: var(--muted);
+  font-size: 12px;
+}
+.unlock-divider::before,
+.unlock-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
 }
 .vault-setup-field {
   display: grid;

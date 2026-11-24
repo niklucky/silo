@@ -80,11 +80,13 @@ impl Bridge {
     }
 
     fn handle(&mut self, request: &Request) -> Response {
-        // Browsers can manage secrets, but cannot read old revisions or
-        // change where the vault syncs.
+        // Browsers can manage secrets and unlock with biometrics, but cannot
+        // enroll/disable biometrics, read old revisions, or change sync settings.
         if matches!(
             request,
             Request::Shutdown
+                | Request::BiometricEnable { .. }
+                | Request::BiometricDisable { .. }
                 | Request::History { .. }
                 | Request::SyncRegister { .. }
                 | Request::SyncLogin { .. }
@@ -287,6 +289,23 @@ mod tests {
         assert!(matches!(
             bridge.handle(&Request::History { selector }),
             Response::Err(AgentError::Invalid { .. })
+        ));
+        assert!(matches!(
+            bridge.handle(&Request::BiometricEnable {
+                token: String::new()
+            }),
+            Response::Err(AgentError::Invalid { .. })
+        ));
+        assert!(matches!(
+            bridge.handle(&Request::BiometricDisable {
+                token: String::new()
+            }),
+            Response::Err(AgentError::Invalid { .. })
+        ));
+        // UnlockBiometric is allowed through the bridge (fails here only because not enrolled).
+        assert!(matches!(
+            bridge.handle(&Request::UnlockBiometric { ttl_secs: None }),
+            Response::Err(AgentError::Biometric { .. })
         ));
 
         Client::connect(paths.socket_file())

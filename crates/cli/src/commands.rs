@@ -10,13 +10,16 @@ use silo_agent::{Client, ClientError, Paths, Store, client, initialize_account, 
 use silo_core::vault::{EnvSet, EnvVar, File, FolderPath, Login, Note, SecretBody, Tag};
 use zeroize::Zeroize;
 
-use crate::args::{AddCommand, AgentCommand, Command, ExportFormat, FileCommand, InitArgs};
+use crate::args::{
+    AddCommand, AgentCommand, BiometricCommand, Command, ExportFormat, FileCommand, InitArgs,
+};
 use crate::{browser, edit, format, import, prompt, sync};
 
 pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Init(args) => init(args),
-        Command::Unlock { ttl } => unlock(ttl),
+        Command::Unlock { ttl, password } => unlock(ttl, password),
+        Command::Biometric { command } => biometric(command),
         Command::Lock => lock(),
         Command::Status { json } => status(json),
         Command::Agent {
@@ -146,15 +149,47 @@ fn init_sync_setup(args: InitArgs) -> Result<Option<InitSync>> {
     }))
 }
 
-fn unlock(ttl: Option<Duration>) -> Result<()> {
+fn unlock(ttl: Option<Duration>, force_password: bool) -> Result<()> {
     let paths = Paths::from_env()?;
     let store = Store::open(paths.clone())?;
     if !store.has_account() {
         bail!("no account in {}; run `silo init`", paths.home().display());
     }
     let mut agent = ensure_agent(&paths)?;
+
+    let try_biometric = !force_password
+        && std::env::var_os("SILO_PASSWORD").is_none()
+        && std::io::stdin().is_terminal();
+    if try_biometric
+        && let Ok(Reply::Status(info)) = agent.call(&Request::Status)
+        && info.biometric_available
+        && info.biometric_enabled
+    {
+        match agent.call(&Request::UnlockBiometric {
+            ttl_secs: ttl.map(|d| d.as_secs()),
+        }) {
+            Ok(Reply::Unlocked(status)) => {
+                print_unlocked(&status);
+                return Ok(());
+            }
+            Ok(other) => return Err(unexpected(other)),
+            Err(ClientError::Agent(silo_agent::AgentError::BiometricCancelled)) => {
+                eprintln!("Biometric unlock cancelled; enter master password.");
+            }
+            Err(ClientError::Agent(silo_agent::AgentError::Biometric { message })) => {
+                eprintln!("Biometric unlock failed ({message}); enter master password.");
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
     let password = prompt::password("Master password")?;
     let status = unlock_with(&mut agent, &password, ttl)?;
+    print_unlocked(&status);
+    Ok(())
+}
+
+fn print_unlocked(status: &StatusInfo) {
     println!(
         "Unlocked {} secret(s) for {}. Fingerprint: {}",
         status.secrets,
@@ -165,7 +200,65 @@ fn unlock(ttl: Option<Duration>) -> Result<()> {
             )),
         status.fingerprint.as_deref().unwrap_or("?")
     );
+}
+
+fn biometric(command: BiometricCommand) -> Result<()> {
+    let paths = Paths::from_env()?;
+    let store = Store::open(paths.clone())?;
+    if !store.has_account() {
+        bail!("no account in {}; run `silo init`", paths.home().display());
+    }
+    let mut agent = ensure_agent(&paths)?;
+    match command {
+        BiometricCommand::Status => {
+            let Reply::Status(info) = agent.call(&Request::Status)? else {
+                bail!("unexpected reply from agent");
+            };
+            if !info.biometric_available {
+                println!("Biometric unlock: unavailable on this device");
+            } else if info.biometric_enabled {
+                println!("Biometric unlock: enabled");
+            } else {
+                println!("Biometric unlock: available (run `silo biometric enable`)");
+            }
+        }
+        BiometricCommand::Enable => {
+            let Reply::Status(info) = agent.call(&Request::Status)? else {
+                bail!("unexpected reply from agent");
+            };
+            if !info.biometric_available {
+                bail!("OS biometric unlock is not available on this device");
+            }
+            if !info.unlocked {
+                let password = prompt::password("Master password")?;
+                unlock_with(&mut agent, &password, None)?;
+            }
+            let token = read_admin_token(&paths)?;
+            match agent.call(&Request::BiometricEnable { token })? {
+                Reply::Status(_) => println!("Biometric unlock enabled."),
+                other => return Err(unexpected(other)),
+            }
+        }
+        BiometricCommand::Disable => {
+            let token = read_admin_token(&paths)?;
+            match agent.call(&Request::BiometricDisable { token })? {
+                Reply::Status(_) => println!("Biometric unlock disabled."),
+                other => return Err(unexpected(other)),
+            }
+        }
+    }
     Ok(())
+}
+
+fn read_admin_token(paths: &Paths) -> Result<String> {
+    let path = paths.admin_token_file();
+    let token = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "could not read agent token at {} (is an older agent running? try `silo agent stop`)",
+            path.display()
+        )
+    })?;
+    Ok(token.trim().to_owned())
 }
 
 fn unlock_with(agent: &mut Client, password: &str, ttl: Option<Duration>) -> Result<StatusInfo> {
@@ -244,6 +337,16 @@ fn status(json: bool) -> Result<()> {
                 );
             } else {
                 println!("Vault:       locked (run `silo unlock`)");
+            }
+            if info.biometric_available || info.biometric_enabled {
+                println!(
+                    "Biometric:   {}",
+                    if info.biometric_enabled {
+                        "enabled"
+                    } else {
+                        "available (run `silo biometric enable`)"
+                    }
+                );
             }
             if let Ok(mut agent) = connect(&paths) {
                 println!("Sync:        {}", sync::summary_line(&mut agent)?);

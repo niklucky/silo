@@ -55,6 +55,11 @@ impl Paths {
         self.home.join("account.json")
     }
 
+    /// Local biometric unlock slot metadata (keychain key id + wrapped account key).
+    pub fn biometric_file(&self) -> PathBuf {
+        self.home.join("biometric.json")
+    }
+
     pub fn vault_dir(&self) -> PathBuf {
         self.home.join("vault")
     }
@@ -71,6 +76,12 @@ impl Paths {
 
     pub fn socket_file(&self) -> &Path {
         &self.socket
+    }
+
+    /// Per-run local management token (mode 0600) required for sensitive
+    /// agent operations such as enrolling or disabling biometrics.
+    pub fn admin_token_file(&self) -> PathBuf {
+        self.home.join("agent.token")
     }
 
     pub fn log_file(&self) -> PathBuf {

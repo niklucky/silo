@@ -22,6 +22,10 @@ export interface SyncInfo {
 export interface VaultClient {
   status(): Promise<StatusInfo>;
   unlock(password: string): Promise<StatusInfo>;
+  /** Unlocks using OS biometrics (Touch ID) when supported by the host. */
+  unlockBiometric?(): Promise<StatusInfo>;
+  enableBiometric?(): Promise<StatusInfo>;
+  disableBiometric?(): Promise<StatusInfo>;
   lock(): Promise<void>;
   /** Every secret, without bodies. */
   list(): Promise<SecretSummary[]>;

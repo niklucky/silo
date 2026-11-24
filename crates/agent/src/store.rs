@@ -115,6 +115,32 @@ impl Store {
         remove_optional(self.paths.sync_baseline_file())
     }
 
+    /// Local biometric unlock slot, if configured on this machine.
+    pub fn read_biometric<T: DeserializeOwned>(&self) -> Result<Option<T>, StoreError> {
+        read_optional(&self.paths.biometric_file())
+    }
+
+    pub fn write_biometric<T: Serialize>(&self, record: &T) -> Result<(), StoreError> {
+        let path = self.paths.biometric_file();
+        let io_error = |source| StoreError::Io {
+            path: path.clone(),
+            source,
+        };
+        let mut file = tempfile::NamedTempFile::new_in(self.paths.home()).map_err(io_error)?;
+        serde_json::to_writer_pretty(&mut file, record).map_err(|source| StoreError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        file.as_file().sync_all().map_err(io_error)?;
+        file.persist_noclobber(&path)
+            .map_err(|err| io_error(err.error))?;
+        Ok(())
+    }
+
+    pub fn delete_biometric(&self) -> Result<(), StoreError> {
+        remove_optional(self.paths.biometric_file())
+    }
+
     /// Loads the latest revision of every secret. Order is unspecified; callers sort.
     pub fn load_all(&self) -> Result<Vec<StoredSecret>, StoreError> {
         json_files(&self.paths.vault_dir())?

@@ -28,10 +28,10 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         context.completeRequest(returningItems: [response], completionHandler: nil)
     }
 
-    /// Browsers cannot read old revisions or change where the vault syncs.
-    /// Keep in step with silo-native-host.
+    /// Browsers cannot manage biometrics, read old revisions, or change where
+    /// the vault syncs. Keep in step with silo-native-host.
     private static let refused: Set<String> = [
-        "shutdown", "history",
+        "shutdown", "biometric_enable", "biometric_disable", "history",
         "sync_register", "sync_login", "sync_logout", "sync_revoke_device",
     ]
 

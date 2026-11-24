@@ -93,6 +93,8 @@ export interface StatusInfo {
   fingerprint: string | null;
   secrets: number;
   expires_in_secs: number | null;
+  biometric_available?: boolean;
+  biometric_enabled?: boolean;
 }
 
 export const KIND_LABEL: Record<SecretKind, string> = {

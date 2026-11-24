@@ -22,9 +22,15 @@ interface Props {
   sync: SyncInfo | null | undefined;
   syncing: boolean;
   syncNow: () => void;
+  biometric?: {
+    enabled: boolean;
+    busy: boolean;
+    label: string;
+    toggle: () => void;
+  };
 }
 
-export function Sidebar({ items, scope, setScope, lock, sync, syncing, syncNow }: Props) {
+export function Sidebar({ items, scope, setScope, lock, sync, syncing, syncNow, biometric }: Props) {
   const folders = useMemo(() => folderTree(items), [items]);
   const tags = useMemo(() => allTags(items), [items]);
   const kindCount = (kind: SecretKind) => items.filter((i) => i.meta.kind === kind).length;
@@ -78,6 +84,22 @@ export function Sidebar({ items, scope, setScope, lock, sync, syncing, syncNow }
       </div>
       <div className="sidebar-foot">
         <SyncState sync={sync} syncing={syncing} syncNow={syncNow} />
+        {biometric && (
+          <button
+            className={`icon-btn${biometric.enabled ? " active" : ""}`}
+            title={
+              biometric.enabled
+                ? `${biometric.label} unlock enabled — click to disable`
+                : `Enable ${biometric.label} unlock`
+            }
+            aria-label={biometric.enabled ? `Disable ${biometric.label} unlock` : `Enable ${biometric.label} unlock`}
+            aria-pressed={biometric.enabled}
+            disabled={biometric.busy}
+            onClick={biometric.toggle}
+          >
+            <Icon name="fingerprint" size={15} />
+          </button>
+        )}
         <button className="icon-btn" title="Lock (⌘L)" onClick={lock}>
           <Icon name="lock" size={15} />
         </button>

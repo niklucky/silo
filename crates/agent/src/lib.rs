@@ -18,6 +18,7 @@
 //! receive decrypted secrets over the socket; the socket is protected by file
 //! permissions, so the trust boundary is "same user on this machine".
 
+pub mod biometric;
 pub mod client;
 pub mod paths;
 pub mod protocol;

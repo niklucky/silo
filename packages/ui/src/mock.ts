@@ -177,6 +177,7 @@ export function createMockClient(): VaultClient {
   const delay = <T>(value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(structuredClone(value)), 60));
   const fail = (message: string, code?: string) => Promise.reject(Object.assign(new Error(message), { code }));
   let lastSync = now - 120;
+  let biometricEnabled = false;
   const latest = (key: string) => store.get(key)?.[0];
   const summary = ({ id, revision, meta }: SecretView): SecretSummary => ({ id, revision, meta });
   const status = (): StatusInfo => ({
@@ -185,6 +186,8 @@ export function createMockClient(): VaultClient {
     fingerprint: "a1b2 c3d4 e5f6 0718",
     secrets: store.size,
     expires_in_secs: unlocked ? 3600 : null,
+    biometric_available: true,
+    biometric_enabled: biometricEnabled,
   });
 
   return {
@@ -192,6 +195,20 @@ export function createMockClient(): VaultClient {
     async unlock(password) {
       if (!password) return fail("Enter your master password.");
       unlocked = true;
+      return delay(status());
+    },
+    async unlockBiometric() {
+      if (!biometricEnabled) return fail("Biometric unlock is not enabled.");
+      unlocked = true;
+      return delay(status());
+    },
+    async enableBiometric() {
+      if (!unlocked) return fail("The vault is locked.", "locked");
+      biometricEnabled = true;
+      return delay(status());
+    },
+    async disableBiometric() {
+      biometricEnabled = false;
       return delay(status());
     },
     async lock() {

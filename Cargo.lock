@@ -3552,6 +3552,7 @@ name = "silo-agent"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "cc",
  "humantime",
  "libc",
  "rand",

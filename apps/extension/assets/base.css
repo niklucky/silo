@@ -157,6 +157,22 @@ button.primary {
 button.primary:hover {
   background: var(--accent-hover);
 }
+.unlock-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.unlock-divider::before,
+.unlock-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
 button.ghost {
   border-color: transparent;
   background: transparent;
