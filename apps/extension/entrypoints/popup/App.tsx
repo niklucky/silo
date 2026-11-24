@@ -1,7 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { browser } from "wxt/browser";
 import { Icon, Logo } from "@/components/Icon";
-import { call, send } from "@/lib/client";
+import { AgentFailure, call, send } from "@/lib/client";
 import type { AuthEvent } from "@/lib/messages";
 import type { SecretSummary, SecretView, StatusInfo } from "@/lib/protocol";
 import { errorText } from "@/lib/util";
@@ -226,7 +226,12 @@ export default function App() {
               <button onClick={() => void refresh()}>Try again</button>
             </div>
           )}
-          {connection.state === "locked" && <Unlock onUnlocked={() => void refresh()} />}
+          {connection.state === "locked" && (
+            <Unlock
+              biometric={Boolean(connection.info.biometric_available && connection.info.biometric_enabled)}
+              onUnlocked={() => void refresh()}
+            />
+          )}
 
           {unlocked && screen.name === "list" && (
             <VaultList
@@ -322,11 +327,12 @@ function Status({ connection }: { connection: Connection }) {
   }
 }
 
-function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
+function Unlock({ biometric, onUnlocked }: { biometric: boolean; onUnlocked: () => void }) {
   const [password, setPassword] = useState("");
   const [shown, setShown] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const biometricLabel = /Mac/i.test(navigator.userAgent) ? "Touch ID" : "Biometrics";
 
   async function unlock(event: FormEvent) {
     event.preventDefault();
@@ -342,17 +348,46 @@ function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
     }
   }
 
+  async function unlockBiometric() {
+    setBusy(true);
+    setError(null);
+    try {
+      await call({ method: "unlock_biometric", params: {} });
+      onUnlocked();
+    } catch (err) {
+      if (!(err instanceof AgentFailure && err.info.code === "biometric_cancelled")) {
+        setError(errorText(err));
+      }
+      setBusy(false);
+    }
+  }
+
   return (
     <form className="center unlock" onSubmit={(e) => void unlock(e)}>
       <Logo size={64} />
       <h2>Unlock Silo</h2>
-      <p className="muted">Your master password unlocks the vault on this computer.</p>
+      <p className="muted">
+        {biometric
+          ? `Unlock with ${biometricLabel} or your master password.`
+          : "Your master password unlocks the vault on this computer."}
+      </p>
+      {biometric && (
+        <>
+          <button type="button" className="primary wide" disabled={busy} onClick={() => void unlockBiometric()}>
+            <Icon name="fingerprint" size={16} />
+            {busy ? "Waiting…" : `Unlock with ${biometricLabel}`}
+          </button>
+          <div className="unlock-divider">
+            <span>or</span>
+          </div>
+        </>
+      )}
       <div className="input-group">
         <input
           type={shown ? "text" : "password"}
           aria-label="Master password"
           placeholder="Master password"
-          autoFocus
+          autoFocus={!biometric}
           autoComplete="current-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -367,7 +402,7 @@ function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
           <Icon name={shown ? "eyeOff" : "eye"} />
         </button>
       </div>
-      <button type="submit" className="primary wide" disabled={busy || password.length === 0}>
+      <button type="submit" className={`${biometric ? "" : "primary "}wide`} disabled={busy || password.length === 0}>
         {busy ? "Unlocking…" : "Unlock"}
       </button>
       {error && <p className="error">{error}</p>}

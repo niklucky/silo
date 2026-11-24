@@ -3,11 +3,11 @@
 
 use std::collections::BTreeMap;
 
-use silo_core::AccountKeys;
 use silo_core::account::Identity;
-use silo_core::crypto::{CryptoRng, DataKey, Fingerprint, PublicKey};
+use silo_core::crypto::{CryptoRng, DataKey, Fingerprint, KEY_LEN, PublicKey};
 use silo_core::sync::Tombstone;
 use silo_core::vault::{Grant, SealedSecret, SecretBody, SecretId, SecretKind, SecretMeta, Url};
+use silo_core::{AccountKeys, UnlockSlot};
 
 use crate::protocol::{
     AgentError, ListFilter, NewSecret, SecretSummary, SecretUpdate, SecretView, display_path,
@@ -99,6 +99,15 @@ impl Session {
 
     pub fn fingerprint(&self) -> Fingerprint {
         self.keys.fingerprint()
+    }
+
+    pub fn seal_slot(
+        &self,
+        rng: &mut impl CryptoRng,
+        wrapping_key: &[u8; KEY_LEN],
+        context: &[u8],
+    ) -> Result<UnlockSlot, AgentError> {
+        Ok(self.keys.seal_slot(rng, wrapping_key, context)?)
     }
 
     pub fn len(&self) -> usize {

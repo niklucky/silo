@@ -81,9 +81,50 @@ export class Agent {
   }
 
   async call(request: Request): Promise<Reply> {
-    const response = import.meta.env.SAFARI ? await this.send(request) : await this.post(request);
+    const response = import.meta.env.SAFARI
+      ? await this.send(request)
+      : request.method === "unlock_biometric"
+        ? await this.postIsolated(request)
+        : await this.post(request);
     if ("err" in response) throw new AgentError(response.err);
     return response.ok;
+  }
+
+  /**
+   * Sends a single blocking request (such as a Touch ID prompt) over a
+   * dedicated native messaging port so it never blocks status/lock checks on
+   * the shared FIFO port.
+   */
+  private postIsolated(request: Request): Promise<Response> {
+    return new Promise<Response>((resolve, reject) => {
+      let settled = false;
+      const port = browser.runtime.connectNative(HOST_NAME);
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        try {
+          port.disconnect();
+        } catch {
+          // Port already closed.
+        }
+        fn();
+      };
+      port.onMessage.addListener((message: unknown) => {
+        finish(() => resolve(message as Response));
+      });
+      port.onDisconnect.addListener(() => {
+        const reason =
+          (port as { error?: { message?: string } }).error?.message ??
+          browser.runtime.lastError?.message ??
+          "native host disconnected";
+        finish(() => reject(new BridgeError(reason)));
+      });
+      try {
+        port.postMessage(request);
+      } catch (err) {
+        finish(() => reject(new BridgeError(err instanceof Error ? err.message : String(err))));
+      }
+    });
   }
 
   /**

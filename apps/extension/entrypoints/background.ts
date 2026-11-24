@@ -958,7 +958,7 @@ export default defineBackground({
               url: browser.runtime.getURL("/unlock.html"),
               type: "popup",
               width: 380,
-              height: 260,
+              height: 340,
             });
             return { kind: "ok" };
         }
@@ -982,8 +982,9 @@ export default defineBackground({
           return { kind: "events", events };
         case "agent":
           try {
+            if (message.request.method === "unlock_biometric") await endAllSessions();
             const reply = await agent.call(message.request);
-            if (message.request.method === "unlock") badge("");
+            if (message.request.method === "unlock" || message.request.method === "unlock_biometric") badge("");
             if (message.request.method === "lock" || message.request.method === "remove") await endAllSessions();
             return { kind: "agent", response: { ok: reply } };
           } catch (err) {

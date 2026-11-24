@@ -62,6 +62,8 @@ export interface StatusInfo {
   public_key: string | null;
   secrets: number;
   expires_in_secs: number | null;
+  biometric_available?: boolean;
+  biometric_enabled?: boolean;
 }
 
 /** Input for `add`; the agent assigns id, revision and timestamps. */
@@ -98,6 +100,7 @@ export interface ListFilter {
 export type Request =
   | { method: "status" }
   | { method: "unlock"; params: { password: string; ttl_secs?: number } }
+  | { method: "unlock_biometric"; params: { ttl_secs?: number } }
   | { method: "lock" }
   | { method: "list"; params: ListFilter }
   | { method: "get"; params: { selector: string } }
@@ -124,11 +127,12 @@ export type Reply =
 export type AgentError =
   | { code: "locked" }
   | { code: "wrong_password" }
+  | { code: "biometric_cancelled" }
   | { code: "no_account"; home: string }
   | { code: "not_found"; selector: string }
   | { code: "ambiguous"; selector: string; matches: string[] }
   | { code: "stale"; selector: string; expected: number; current: number }
-  | { code: "invalid" | "core" | "storage" | "internal"; message: string };
+  | { code: "biometric" | "invalid" | "core" | "storage" | "internal"; message: string };
 
 export type Response = { ok: Reply } | { err: AgentError };
 
@@ -138,6 +142,8 @@ export function describe(error: AgentError): string {
       return "The vault is locked.";
     case "wrong_password":
       return "Wrong password.";
+    case "biometric_cancelled":
+      return "Biometric unlock was cancelled.";
     case "no_account":
       return `No account in ${error.home}. Run \`silo init\` in a terminal.`;
     case "not_found":

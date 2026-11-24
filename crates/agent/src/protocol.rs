@@ -25,6 +25,22 @@ pub enum Request {
         #[serde(default)]
         ttl_secs: Option<u64>,
     },
+    /// Unlocks the vault using OS biometrics (Touch ID) and the local keychain slot.
+    UnlockBiometric {
+        /// Seconds until the agent locks itself again. Agent default if absent.
+        #[serde(default)]
+        ttl_secs: Option<u64>,
+    },
+    /// Enrolls OS biometric unlock for the currently unlocked vault on this machine.
+    BiometricEnable {
+        #[serde(default)]
+        token: String,
+    },
+    /// Disables OS biometric unlock and removes its keychain key on this machine.
+    BiometricDisable {
+        #[serde(default)]
+        token: String,
+    },
     Lock,
     Shutdown,
     List(ListFilter),
@@ -180,6 +196,12 @@ pub struct StatusInfo {
     pub public_key: Option<PublicKey>,
     pub secrets: usize,
     pub expires_in_secs: Option<u64>,
+    /// True when this machine supports OS biometric unlock (e.g. Touch ID).
+    #[serde(default)]
+    pub biometric_available: bool,
+    /// True when biometric unlock is set up for this vault on this machine.
+    #[serde(default)]
+    pub biometric_enabled: bool,
 }
 
 /// Where this vault syncs and how it went.
@@ -228,6 +250,10 @@ pub enum AgentError {
     Locked,
     #[error("wrong password")]
     WrongPassword,
+    #[error("biometric authentication cancelled")]
+    BiometricCancelled,
+    #[error("{message}")]
+    Biometric { message: String },
     #[error("no account in {home}; run `silo init`")]
     NoAccount { home: String },
     #[error("no secret matches {selector:?}")]
@@ -327,6 +353,27 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Request::Status).unwrap(),
             r#"{"method":"status"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::UnlockBiometric { ttl_secs: None }).unwrap(),
+            r#"{"method":"unlock_biometric","params":{"ttl_secs":null}}"#
+        );
+        let bio: Request =
+            serde_json::from_str(r#"{"method":"unlock_biometric","params":{}}"#).unwrap();
+        assert_eq!(bio, Request::UnlockBiometric { ttl_secs: None });
+        assert_eq!(
+            serde_json::to_string(&Request::BiometricEnable {
+                token: "tok".into()
+            })
+            .unwrap(),
+            r#"{"method":"biometric_enable","params":{"token":"tok"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::BiometricDisable {
+                token: "tok".into()
+            })
+            .unwrap(),
+            r#"{"method":"biometric_disable","params":{"token":"tok"}}"#
         );
         let list: Request = serde_json::from_str(r#"{"method":"list","params":{}}"#).unwrap();
         assert_eq!(list, Request::List(ListFilter::default()));

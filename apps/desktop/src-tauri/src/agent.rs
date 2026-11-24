@@ -6,6 +6,7 @@
 //! the first local account. If no agent is running, it starts one with the bundled
 //! `silo` binary, using the same agent command as the standalone CLI.
 
+use std::borrow::Cow;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -73,6 +74,16 @@ impl Agent {
                 message: "the desktop app does not stop the agent".to_owned(),
             });
         }
+        // Biometric requests may block on an OS prompt; run them on a dedicated
+        // connection so Lock and Status never stall behind Touch ID.
+        if matches!(
+            request,
+            Request::UnlockBiometric { .. }
+                | Request::BiometricEnable { .. }
+                | Request::BiometricDisable { .. }
+        ) {
+            return self.call_isolated(request);
+        }
         let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
         let unreachable = |err: ClientError| {
             Response::Err(AgentError::Internal {
@@ -125,6 +136,49 @@ impl Agent {
             Err(err) => Err(err),
         }
     }
+
+    fn call_isolated(&self, request: &Request) -> Response {
+        let unreachable = |err: ClientError| {
+            Response::Err(AgentError::Internal {
+                message: format!("cannot reach the agent: {err}"),
+            })
+        };
+        let paths = match self.paths() {
+            Ok(paths) => paths,
+            Err(err) => return unreachable(ClientError::Io(err)),
+        };
+        let mut client = match connect(&paths) {
+            Ok(client) => client,
+            Err(err) => return unreachable(err),
+        };
+        let request = match request {
+            Request::BiometricEnable { .. } => match read_admin_token(&paths) {
+                Ok(token) => Cow::Owned(Request::BiometricEnable { token }),
+                Err(err) => return Response::Err(err),
+            },
+            Request::BiometricDisable { .. } => match read_admin_token(&paths) {
+                Ok(token) => Cow::Owned(Request::BiometricDisable { token }),
+                Err(err) => return Response::Err(err),
+            },
+            other => Cow::Borrowed(other),
+        };
+        match client.call(&request) {
+            Ok(reply) => Response::Ok(reply),
+            Err(ClientError::Agent(err)) => Response::Err(err),
+            Err(err) => unreachable(err),
+        }
+    }
+}
+
+fn read_admin_token(paths: &Paths) -> Result<String, AgentError> {
+    let path = paths.admin_token_file();
+    let token = std::fs::read_to_string(&path).map_err(|_| AgentError::Invalid {
+        message: format!(
+            "Could not read the agent authorization token at {}. Restart the agent with `silo agent stop` and try again.",
+            path.display()
+        ),
+    })?;
+    Ok(token.trim().to_owned())
 }
 
 fn check_setup_home(paths: &Paths, response: Reply) -> Result<PathBuf, AgentError> {

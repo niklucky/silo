@@ -38,8 +38,11 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
   const [sync, setSync] = useState<SyncInfo | null | undefined>(undefined);
   const [syncing, setSyncing] = useState(false);
   const [noAccount, setNoAccount] = useState(false);
+  const [biometric, setBiometric] = useState({ available: false, enabled: false });
+  const [biometricBusy, setBiometricBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const favicons = useMemo(() => (fetchSite ? createFaviconLoader(fetchSite) : null), [fetchSite]);
+  const biometricLabel = typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent) ? "Touch ID" : "Biometrics";
 
   // A fresh cache per unlocked session (`session` is only there to force one), so no username outlives a lock.
   const [session, setSession] = useState(0);
@@ -75,6 +78,10 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
     try {
       const status = await client.status();
       setNoAccount(!status.has_account);
+      setBiometric({
+        available: Boolean(status.biometric_available),
+        enabled: Boolean(status.biometric_enabled),
+      });
       if (!status.unlocked) {
         locked();
         return;
@@ -230,6 +237,25 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
     setToast(note);
   }
 
+  const toggleBiometric = useCallback(async () => {
+    const fn = biometric.enabled ? client.disableBiometric : client.enableBiometric;
+    if (!fn) return;
+    setBiometricBusy(true);
+    try {
+      const next = await fn();
+      const enabled = Boolean(next.biometric_enabled);
+      setBiometric({ available: Boolean(next.biometric_available), enabled });
+      setToast(`${biometricLabel} unlock ${enabled ? "enabled" : "disabled"}`);
+    } catch (err) {
+      if (isLocked(err)) return locked();
+      if (!isBiometricCancelled(err)) {
+        setToast(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setBiometricBusy(false);
+    }
+  }, [biometric.enabled, biometricLabel, client, locked]);
+
   if (state === "loading") return <div className="vault" data-host={host} />;
   if (state === "locked") {
     if (noAccount && setup) {
@@ -258,20 +284,41 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
         />
       );
     }
+    const canBiometric = !noAccount && biometric.available && biometric.enabled && Boolean(client.unlockBiometric);
     return (
       <Unlock
         host={host}
         noAccount={noAccount}
+        biometricLabel={canBiometric ? biometricLabel : undefined}
         unlock={async (password) => {
-          await client.unlock(password);
+          const next = await client.unlock(password);
+          setBiometric({
+            available: Boolean(next.biometric_available),
+            enabled: Boolean(next.biometric_enabled),
+          });
           await refresh();
           setState("open");
         }}
+        unlockBiometric={
+          canBiometric && client.unlockBiometric
+            ? async () => {
+                const next = await client.unlockBiometric!();
+                setBiometric({
+                  available: Boolean(next.biometric_available),
+                  enabled: Boolean(next.biometric_enabled),
+                });
+                await refresh();
+                setState("open");
+              }
+            : undefined
+        }
       />
     );
   }
 
   const newFolder = scope.type === "folder" ? scope.path : "";
+  const canToggleBiometric =
+    (biometric.available || biometric.enabled) && Boolean(biometric.enabled ? client.disableBiometric : client.enableBiometric);
 
   return (
     <FaviconContext.Provider value={favicons}>
@@ -284,6 +331,16 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
           sync={sync}
           syncing={syncing}
           syncNow={() => void syncNow()}
+          biometric={
+            canToggleBiometric
+              ? {
+                  enabled: biometric.enabled,
+                  busy: biometricBusy,
+                  label: biometricLabel,
+                  toggle: () => void toggleBiometric(),
+                }
+              : undefined
+          }
         />
         <ItemList
           scope={scope}
@@ -364,10 +421,39 @@ function isLocked(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "locked";
 }
 
-function Unlock({ host, noAccount, unlock }: { host: string; noAccount: boolean; unlock: (password: string) => Promise<void> }) {
+function isBiometricCancelled(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "biometric_cancelled";
+}
+
+function Unlock({
+  host,
+  noAccount,
+  biometricLabel,
+  unlock,
+  unlockBiometric,
+}: {
+  host: string;
+  noAccount: boolean;
+  biometricLabel?: string;
+  unlock: (password: string) => Promise<void>;
+  unlockBiometric?: () => Promise<void>;
+}) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  function triggerBiometric() {
+    if (!unlockBiometric) return;
+    setBusy(true);
+    setError(null);
+    unlockBiometric().catch((err: unknown) => {
+      if (!isBiometricCancelled(err)) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+      setBusy(false);
+    });
+  }
+
   return (
     <div className="unlock" data-host={host} data-tauri-drag-region>
       <form
@@ -389,11 +475,31 @@ function Unlock({ host, noAccount, unlock }: { host: string; noAccount: boolean;
             Create one with <code>silo init</code>, or sign in to your server with <code>silo sync login</code>, then come back.
           </p>
         ) : (
-          <input type="password" autoFocus placeholder="Master password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <>
+            {unlockBiometric && biometricLabel && (
+              <>
+                <button type="button" className="btn primary wide" disabled={busy} onClick={triggerBiometric}>
+                  <Icon name="fingerprint" size={16} />
+                  Unlock with {biometricLabel}
+                </button>
+                <div className="unlock-divider">
+                  <span>or</span>
+                </div>
+              </>
+            )}
+            <input
+              type="password"
+              autoFocus={!unlockBiometric}
+              placeholder="Master password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={busy}
+            />
+          </>
         )}
         {error && <p className="error">{error}</p>}
         {!noAccount && (
-          <button className="btn primary wide" disabled={busy}>
+          <button className={`btn ${unlockBiometric ? "" : "primary "}wide`} disabled={busy || password.length === 0}>
             Unlock
           </button>
         )}

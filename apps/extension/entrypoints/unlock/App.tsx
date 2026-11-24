@@ -1,6 +1,6 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { Icon, Logo } from "@/components/Icon";
-import { call } from "@/lib/client";
+import { AgentFailure, call } from "@/lib/client";
 import { errorText } from "@/lib/util";
 
 /**
@@ -12,6 +12,22 @@ export default function App() {
   const [shown, setShown] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [biometric, setBiometric] = useState(false);
+  const biometricLabel = /Mac/i.test(navigator.userAgent) ? "Touch ID" : "Biometrics";
+
+  useEffect(() => {
+    call({ method: "status" })
+      .then((reply) => {
+        if (typeof reply === "object" && "status" in reply) {
+          if (reply.status.unlocked) {
+            window.close();
+            return;
+          }
+          setBiometric(Boolean(reply.status.biometric_available && reply.status.biometric_enabled));
+        }
+      })
+      .catch(() => undefined);
+  }, []);
 
   async function unlock(event: FormEvent) {
     event.preventDefault();
@@ -26,6 +42,20 @@ export default function App() {
     }
   }
 
+  async function unlockBiometric() {
+    setBusy(true);
+    setError(null);
+    try {
+      await call({ method: "unlock_biometric", params: {} });
+      window.close();
+    } catch (err) {
+      if (!(err instanceof AgentFailure && err.info.code === "biometric_cancelled")) {
+        setError(errorText(err));
+      }
+      setBusy(false);
+    }
+  }
+
   return (
     <main>
       <div className="title">
@@ -33,12 +63,23 @@ export default function App() {
         <h1>Unlock Silo</h1>
       </div>
       <form onSubmit={(e) => void unlock(e)}>
+        {biometric && (
+          <>
+            <button type="button" className="primary" disabled={busy} onClick={() => void unlockBiometric()}>
+              <Icon name="fingerprint" size={16} />
+              {busy ? "Waiting…" : `Unlock with ${biometricLabel}`}
+            </button>
+            <div className="unlock-divider">
+              <span>or</span>
+            </div>
+          </>
+        )}
         <div className="input-group">
           <input
             type={shown ? "text" : "password"}
             aria-label="Master password"
             placeholder="Master password"
-            autoFocus
+            autoFocus={!biometric}
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -48,7 +89,7 @@ export default function App() {
             <Icon name={shown ? "eyeOff" : "eye"} />
           </button>
         </div>
-        <button type="submit" className="primary" disabled={busy || password.length === 0}>
+        <button type="submit" className={biometric ? undefined : "primary"} disabled={busy || password.length === 0}>
           {busy ? "Unlocking…" : "Unlock"}
         </button>
         {error && <p className="error">{error}</p>}

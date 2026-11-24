@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { browser } from "wxt/browser";
-import { Logo } from "@/components/Icon";
+import { Icon, Logo } from "@/components/Icon";
 import type { ChallengeView, LinkOption, SameSiteLogin, SaveChoice, UiRequest, UiResponse } from "@/lib/messages";
 import { describe } from "@/lib/protocol";
 import { errorText } from "@/lib/util";
@@ -29,6 +29,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [master, setMaster] = useState("");
+  const [biometric, setBiometric] = useState(false);
+  const biometricLabel = /Mac/i.test(navigator.userAgent) ? "Touch ID" : "Biometrics";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [folder, setFolder] = useState("web");
@@ -57,6 +59,24 @@ export default function App() {
       })
       .catch((err: unknown) => setError(errorText(err)));
   }, [id, framed]);
+
+  const unlocking = phase.step === "unlock";
+  useEffect(() => {
+    if (!unlocking) return;
+    send({ kind: "agent", request: { method: "status" } })
+      .then((response) => {
+        if (
+          response.kind === "agent" &&
+          "ok" in response.response &&
+          typeof response.response.ok === "object" &&
+          "status" in response.response.ok
+        ) {
+          const { status } = response.response.ok;
+          setBiometric(Boolean(status.biometric_available && status.biometric_enabled));
+        }
+      })
+      .catch(() => undefined);
+  }, [unlocking]);
 
   const saving = phase.step === "save";
   useEffect(() => {
@@ -116,6 +136,27 @@ export default function App() {
         throw new Error(describe(response.response.err));
       }
       setMaster("");
+      follow(await send({ kind: "challenge_retry", id }), challenge);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unlockBiometric(challenge: ChallengeView) {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await send({
+        kind: "agent",
+        request: { method: "unlock_biometric", params: {} },
+      });
+      if (response.kind === "bridge_error") throw new Error(response.message);
+      if (response.kind === "agent" && "err" in response.response) {
+        if (response.response.err.code === "biometric_cancelled") return;
+        throw new Error(describe(response.response.err));
+      }
       follow(await send({ kind: "challenge_retry", id }), challenge);
     } catch (err) {
       setError(errorText(err));
@@ -204,18 +245,29 @@ export default function App() {
         {site}
         <p>Unlock your vault to look for a saved login.</p>
         <form onSubmit={(e) => void unlock(e, challenge)}>
+          {biometric && (
+            <>
+              <button type="button" className="primary" onClick={() => void unlockBiometric(challenge)} disabled={busy}>
+                <Icon name="fingerprint" size={16} />
+                {busy ? "Waiting…" : `Unlock with ${biometricLabel}`}
+              </button>
+              <div className="unlock-divider">
+                <span>or</span>
+              </div>
+            </>
+          )}
           <label htmlFor="master">Master password</label>
           <input
             id="master"
             type="password"
-            autoFocus
+            autoFocus={!biometric}
             autoComplete="current-password"
             value={master}
             onChange={(e) => setMaster(e.target.value)}
             disabled={busy}
           />
           <div className="row">
-            <button type="submit" className="primary" disabled={busy || master.length === 0}>
+            <button type="submit" className={biometric ? undefined : "primary"} disabled={busy || master.length === 0}>
               Unlock
             </button>
             <button type="button" onClick={() => void cancel()} disabled={busy}>
