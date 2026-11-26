@@ -91,6 +91,11 @@ pub fn changes(
         max_seq(conn)?
     };
     Ok(ChangesReply {
+        has_env_tokens: conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM env_tokens WHERE owner_id=?1)",
+            [me.id],
+            |r| r.get(0),
+        )?,
         changes,
         cursor,
         more,

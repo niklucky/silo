@@ -452,6 +452,8 @@ pub struct HistoryReply {
 /// `since=cursor` while `more` is true.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangesReply {
+    #[serde(default)]
+    pub has_env_tokens: bool,
     pub changes: Vec<Change>,
     pub cursor: u64,
     pub more: bool,

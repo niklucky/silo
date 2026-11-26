@@ -10,6 +10,7 @@ import { KIND_ICON } from "./Sidebar";
 
 interface Props {
   scope: Scope;
+  openTokens?: () => void;
   /** Already filtered and ordered. */
   items: readonly SecretSummary[];
   query: string;
@@ -22,7 +23,7 @@ interface Props {
   usernames: ReadonlyMap<string, string | null>;
 }
 
-export function ItemList({ scope, items, query, setQuery, searchRef, selected, select, create, usernames }: Props) {
+export function ItemList({ scope, items, query, setQuery, searchRef, selected, select, create, usernames, openTokens }: Props) {
   const [menu, setMenu] = useState(false);
   const groups = group(items, scope, query);
   const grouped = scope.type === "folder" && !query.trim() ? scope.path : null;
@@ -48,6 +49,11 @@ export function ItemList({ scope, items, query, setQuery, searchRef, selected, s
         <h2>{scopeTitle(scope)}</h2>
         <span className="list-count">{items.length}</span>
         <span className="spacer" />
+        {openTokens && (
+          <button className="icon-btn" title={scope.type === "folder" ? "Folder access tokens" : "All access tokens"} onClick={openTokens}>
+            <Icon name="key" size={16} />
+          </button>
+        )}
         <div className="menu-anchor">
           <button className="icon-btn accent" title="New item (⌘N)" onClick={() => setMenu(!menu)}>
             <Icon name="plus" size={16} />

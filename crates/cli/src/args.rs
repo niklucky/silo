@@ -92,16 +92,28 @@ pub enum Command {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Manage read-only CI access tokens from the unlocked owner's vault
+    Token {
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
     /// Run a command with one or more env sets injected: silo run api/dev -- npm start
     Run {
-        #[arg(required = true)]
+        /// Local env sets. Omit to use SILO_TOKEN and SILO_SERVER
         selectors: Vec<String>,
+        /// Read the access token from this environment variable
+        #[arg(long, conflicts_with = "selectors")]
+        token_env: Option<String>,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
     /// Print an env set as dotenv, shell exports or JSON
     Export {
-        selector: String,
+        /// Local env set. Omit to use SILO_TOKEN and SILO_SERVER
+        selector: Option<String>,
+        /// Read the access token from this environment variable
+        #[arg(long, conflicts_with = "selector")]
+        token_env: Option<String>,
         #[arg(long, value_enum, default_value_t = ExportFormat::Dotenv)]
         format: ExportFormat,
     },
@@ -155,6 +167,25 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<SyncCommand>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum TokenCommand {
+    /// Issue a token for an env set or the env sets currently in a folder
+    Create {
+        name: String,
+        #[arg(long, required_unless_present = "folder", conflicts_with = "folder")]
+        env_set: Option<String>,
+        /// Includes existing env sets in subfolders
+        #[arg(long, required_unless_present = "env_set")]
+        folder: Option<silo_core::vault::FolderPath>,
+    },
+    /// Show token names and their selected env sets
+    List,
+    /// Issue a new credential for the same scope and invalidate the old one
+    Rotate { name: String },
+    /// Immediately disable future fetches
+    Revoke { name: String },
 }
 
 #[derive(Args)]

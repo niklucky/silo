@@ -1,5 +1,17 @@
 import type { NewSecret, SecretSummary, SecretUpdate, SecretView, StatusInfo } from "./protocol";
 
+export type TokenScope = { env_set: string } | { folder: string };
+export interface AccessTokenInfo {
+  name: string;
+  paths: string[];
+}
+export interface AccessTokens {
+  list(scope: TokenScope | null): Promise<AccessTokenInfo[]>;
+  issue(name: string, scope: TokenScope): Promise<string>;
+  rotate(name: string): Promise<string>;
+  revoke(name: string): Promise<void>;
+}
+
 /** Where the vault syncs and how the last run went. */
 export interface SyncInfo {
   server: string;
@@ -20,6 +32,7 @@ export interface SyncInfo {
  * to the unlock screen.
  */
 export interface VaultClient {
+  tokens?: AccessTokens;
   status(): Promise<StatusInfo>;
   unlock(password: string): Promise<StatusInfo>;
   /** Unlocks using OS biometrics (Touch ID) when supported by the host. */

@@ -338,6 +338,17 @@ fn dispatch(request: Request, shared: &Shared) -> Response {
         Request::SyncRevokeDevice { device_id } => {
             sync_revoke(shared, &device_id).map_err(AgentError::from)
         }
+        Request::ManageToken { mut token, action } => {
+            let authorized = require_admin_token(shared, &token);
+            token.zeroize();
+            authorized.and_then(|()| {
+                let _running = shared
+                    .syncing
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                sync::access::manage(shared, action).map_err(AgentError::from)
+            })
+        }
         other => return dispatch_locked(other, shared),
     };
     result.into()
@@ -441,6 +452,7 @@ fn dispatch_locked(request: Request, shared: &Shared) -> Response {
         | Request::Sync
         | Request::SyncRegister { .. }
         | Request::SyncLogin { .. }
+        | Request::ManageToken { .. }
         | Request::SyncLogout
         | Request::SyncDevices
         | Request::SyncRevokeDevice { .. } => unreachable!("handled in dispatch"),

@@ -94,9 +94,31 @@ pub enum Request {
     Sync,
     SyncStatus,
     SyncDevices,
+    ManageToken {
+        #[serde(default)]
+        token: String,
+        action: TokenAction,
+    },
     SyncRevokeDevice {
         device_id: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenAction {
+    ListFor { scope: TokenScope },
+    Create { name: String, scope: TokenScope },
+    List,
+    Rotate { name: String },
+    Revoke { name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenScope {
+    EnvSet(String),
+    Folder(FolderPath),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +263,9 @@ pub enum Reply {
     },
     Devices(Vec<DeviceInfo>),
     DeviceRevoked,
+    TokenIssued(silo_core::access::IssuedToken),
+    Tokens(Vec<(String, Vec<String>)>),
+    TokenRevoked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

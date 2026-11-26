@@ -10,6 +10,8 @@ use silo_core::sync::{
 };
 
 use super::SyncError;
+use silo_core::access::{InstallToken, TokenBundle, TokenState};
+use silo_core::vault::Grant;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// Replies can carry file secrets; the server accepts pushes up to 64 MiB.
@@ -85,6 +87,29 @@ impl HttpClient {
 
     pub fn history(&self, request: &HistoryRequest) -> Result<HistoryReply, SyncError> {
         self.post("/v1/history", request)
+    }
+
+    pub fn env_tokens(&self) -> Result<Vec<TokenState>, SyncError> {
+        self.get("/v1/env-tokens")
+    }
+
+    pub fn install_env_token(&self, request: &InstallToken) -> Result<(), SyncError> {
+        self.post("/v1/env-tokens", request)
+    }
+
+    pub fn refresh_env_grants(&self, grants: &[Grant]) -> Result<(), SyncError> {
+        self.post("/v1/env-token-grants", &grants)
+    }
+
+    pub fn revoke_env_token(
+        &self,
+        policy: &silo_core::access::TokenPolicy,
+    ) -> Result<(), SyncError> {
+        self.send_empty("DELETE", &format!("/v1/env-tokens/{}", policy.name))
+    }
+
+    pub fn fetch_env(&self) -> Result<TokenBundle, SyncError> {
+        self.get("/v1/env")
     }
 
     fn url(&self, path: &str) -> String {

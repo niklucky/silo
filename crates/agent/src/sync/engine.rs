@@ -130,9 +130,10 @@ fn run_with(
     };
     let mut rng = rand::rng();
 
-    loop {
+    let has_env_tokens = loop {
         let since = access.with_vault(|v| Ok(v.state.cursor))?;
         let reply = client.changes(since)?;
+        let has_env_tokens = reply.has_env_tokens;
         let more = access.with_vault(|v| {
             let more = if reply.cursor < since {
                 // The server has less than we pulled: it was restored from an
@@ -153,9 +154,9 @@ fn run_with(
             Ok(more)
         })?;
         if !more {
-            break;
+            break has_env_tokens;
         }
-    }
+    };
     // Every upload that reached the server was in that pull.
     access.with_vault(|v| {
         v.state.in_flight.clear();
@@ -189,6 +190,9 @@ fn run_with(
                 v.save()
             })?;
         }
+    }
+    if has_env_tokens {
+        super::access::refresh(access, client)?;
     }
     fill_gaps(access, client, std::mem::take(&mut progress.gaps));
     Ok(progress.report)

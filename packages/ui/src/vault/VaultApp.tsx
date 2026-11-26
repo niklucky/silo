@@ -5,6 +5,7 @@ import { Icon, Logo } from "../icons";
 import { KIND_LABEL, type SecretKind, type SecretSummary, type SecretView } from "../protocol";
 import { search } from "../search";
 import { createUsernameLoader, usernameKey, useUsernames } from "../usernames";
+import { AccessTokenDialog, type TokenContext } from "./AccessTokenDialog";
 import { type Copy, Detail } from "./Detail";
 import { type Draft, draftOf, Editor, newDraft } from "./Editor";
 import { ItemList } from "./ItemList";
@@ -33,6 +34,7 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
   const [scope, setScopeRaw] = useState<Scope>({ type: "all" });
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [tokenContext, setTokenContext] = useState<TokenContext | null>(null);
   const [mode, setMode] = useState<Mode>({ type: "view" });
   const [toast, setToast] = useState<string | null>(null);
   const [sync, setSync] = useState<SyncInfo | null | undefined>(undefined);
@@ -62,6 +64,7 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
    * Every path that notices a lock goes through here, whoever locked.
    */
   const locked = useCallback(() => {
+    setTokenContext(null);
     setItems([]);
     setSelected(null);
     setMode({ type: "view" });
@@ -354,6 +357,11 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
             setMode({ type: "view" });
           }}
           create={(kind) => setMode({ type: "new", kind, session: ++editorSessions })}
+          openTokens={client.tokens && (scope.type === "folder" || scope.type === "all") ? () => {
+            setTokenContext(scope.type === "folder"
+              ? { scope: { folder: scope.path }, label: scope.path }
+              : { scope: null, label: "All issued tokens" });
+          } : undefined}
           usernames={usernames}
         />
         <main className="pane">
@@ -383,6 +391,9 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
             <Detail
               client={client}
               summary={current}
+              openTokens={client.tokens && current.meta.kind === "env_set" ? () => setTokenContext({
+                scope: { env_set: current.id }, label: [current.meta.folder, current.meta.title].filter(Boolean).join("/"),
+              }) : undefined}
               copy={copy}
               edit={(view) => setMode({ type: "edit", view, session: ++editorSessions })}
               remove={async () => {
@@ -407,6 +418,9 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
             </div>
           )}
         </main>
+        {client.tokens && tokenContext && (
+          <AccessTokenDialog api={client.tokens} context={tokenContext} items={items} close={() => setTokenContext(null)} locked={locked} />
+        )}
         {toast && (
           <div className="toast" role="status">
             <Icon name="check" size={14} /> {toast}

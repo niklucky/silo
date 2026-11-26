@@ -143,7 +143,8 @@ permissions restrict to your user.
 | `SILO_HOME`         | Data directory (default `~/.silo`)                 |
 | `SILO_AGENT_SOCKET` | Socket path (default `$SILO_HOME/agent.sock`)      |
 | `SILO_PASSWORD`     | Skip the master password prompt; for scripts and CI only |
-| `SILO_SERVER`       | Default server URL for sync register and login      |
+| `SILO_SERVER`       | Server URL for sync setup and CI token fetches      |
+| `SILO_TOKEN`        | Read-only CI credential for `run` and `export` without local selectors |
 
 With sync set up, `$SILO_HOME/sync.json` (mode 0600) holds the server address,
 the device token and sync progress. `silo sync logout` keeps the progress in
@@ -151,6 +152,75 @@ the device token and sync progress. `silo sync logout` keeps the progress in
 deletions made in between still sync as yours.
 
 Unix only for now (sockets, file modes). Windows needs named pipes; later.
+
+### Read-only access tokens for CI
+
+A pipeline can fetch deployment variables from your existing account with a
+read-only token. Use an updated Silo server and owner agent. On your machine,
+unlock your synced vault and choose one of these scopes:
+
+```sh
+silo token create api-deploy --env-set projects/api/prod-env
+silo token create worker-deploy --folder projects/worker
+```
+
+In Silo Desktop, open an env set and choose **Access tokens**, or select a
+folder and use the key button beside its name. Enter a name and choose **Issue
+token**. Each view lists the tokens that cover any env set in the selection.
+Expand a token to see its full scope. **Rotate** replaces its credential and
+**Revoke** removes its access across that scope. The key button in **All items**
+lists every token, including tokens with deleted members.
+
+Each CLI command above prints the credential once. Save it as the pipeline's
+`SILO_TOKEN` secret. `silo token list` shows each token's name and selected
+paths. A folder includes existing env sets in that folder and its subfolders.
+Membership follows their IDs through renames and moves. New env sets require
+a new token. New and edited variables in a selected set become available after
+owner sync. A fetch fails if a selected set was deleted, a current revision is
+awaiting grants from an updated owner agent, or variable names collide across
+sets. For a deleted member, revoke the token and create one with the new scope.
+
+On the runner, install the updated `silo` on `PATH` (from a pinned Silo
+checkout, build with `cargo build --locked --release -p silo-cli --bin silo`).
+In Forgejo Actions, set the `SILO_SERVER` variable to the HTTPS server URL.
+After checking out your deployment code, use this step:
+
+```yaml
+- name: Deploy with Silo
+  env:
+    SILO_SERVER: ${{ vars.SILO_SERVER }}
+    SILO_TOKEN: ${{ secrets.SILO_TOKEN }}
+  run: silo run -- ./deploy.sh
+```
+
+With no local selector, `run` and `export` fetch the signed scope directly
+from the server. The runner needs no vault, agent or master password.
+`run` passes the variables to the command and its children and removes the
+access credential from their environment. Keep tracing off when using the
+values. To use another credential variable, pass `--token-env MY_TOKEN`.
+
+For a deployment tool that accepts a dotenv file, use this step body and
+adapt the file argument to your tool:
+
+```sh
+set -eu
+env_file=$(mktemp)
+trap 'rm -f "$env_file"' EXIT
+silo export > "$env_file"
+unset SILO_TOKEN
+./deploy.sh --env-file "$env_file"
+```
+
+`silo token rotate api-deploy` prints a fresh credential with the same scope
+and immediately invalidates the previous one. Replace the CI secret before the
+next run. `silo token revoke api-deploy` disables future fetches. Values already
+delivered to a job stay accessible there.
+
+The server stores a hash of the token's HTTP bearer, the token name, opaque
+member IDs, and owner-signed grants for the latest synced revisions. The
+credential includes a separate local decryption key and the owner's public
+signing key. The runner verifies the complete scope before releasing values.
+Revocation requires the server to enforce its current token registry.
 
 ### Importing
 
@@ -208,7 +278,8 @@ What makes it safe to sync through a server you may not fully trust:
   hands out is ignored and counted in `silo sync` output. A revision older than
   one the device has already seen is ignored too.
 - The server knows usernames, device names, how many secrets an account has,
-  their sizes and when they change. Nothing else.
+  their sizes and when they change. For CI tokens it also sees the token names
+  and which secret IDs belong to each token.
 
 Changes made on two devices before they sync are kept, never overwritten. When
 both changed the same secret, the newer edit becomes current and the other one

@@ -3,7 +3,7 @@
  * an agent. Any password unlocks it.
  */
 
-import type { VaultClient } from "./client";
+import type { TokenScope, VaultClient } from "./client";
 import type { NewSecret, SecretBody, SecretMeta, SecretSummary, SecretView, StatusInfo } from "./protocol";
 
 const DAY = 86_400;
@@ -164,6 +164,7 @@ const SEED: { meta: Omit<SecretMeta, "created_at" | "updated_at">; body: SecretB
 export function createMockClient(): VaultClient {
   const now = Math.floor(Date.now() / 1000);
   const store = new Map<string, SecretView[]>();
+  const tokens = new Map<string, string[]>();
   let unlocked = false;
   let next = 1;
 
@@ -190,7 +191,43 @@ export function createMockClient(): VaultClient {
     biometric_enabled: biometricEnabled,
   });
 
+  function tokenMembers(scope: TokenScope): string[] {
+    return [...store.values()].map(([view]) => view!).filter(({ id, meta }) =>
+      meta.kind === "env_set" && ("env_set" in scope ? id === scope.env_set :
+        meta.folder === scope.folder || meta.folder.startsWith(`${scope.folder}/`)),
+    ).map(({ id }) => id);
+  }
+
   return {
+    tokens: {
+      async list(scope) {
+        if (!unlocked) return fail("The vault is locked.", "locked");
+        const selected = scope ? new Set(tokenMembers(scope)) : null;
+        return delay([...tokens].filter(([, ids]) => !selected || ids.some((id) => selected.has(id))).map(([name, ids]) => ({
+          name, paths: ids.map((id) => {
+            const meta = latest(id)?.meta;
+            return meta ? [meta.folder, meta.title].filter(Boolean).join("/") : id;
+          }),
+        })));
+      },
+      async issue(name, scope) {
+        if (!unlocked) return fail("The vault is locked.", "locked");
+        if (tokens.has(name)) return fail("A token with this name already exists.");
+        const ids = tokenMembers(scope);
+        if (!ids.length) return fail("This selection contains no env sets.");
+        tokens.set(name, ids);
+        return delay(`demo_${crypto.randomUUID()}`);
+      },
+      async rotate(name) {
+        if (!unlocked) return fail("The vault is locked.", "locked");
+        if (!tokens.has(name)) return fail("Unknown access token.");
+        return delay(`demo_${crypto.randomUUID()}`);
+      },
+      async revoke(name) {
+        if (!unlocked) return fail("The vault is locked.", "locked");
+        if (!tokens.delete(name)) return fail("Unknown access token.");
+      },
+    },
     status: () => delay(status()),
     async unlock(password) {
       if (!password) return fail("Enter your master password.");

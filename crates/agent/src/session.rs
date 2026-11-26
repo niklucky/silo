@@ -408,6 +408,39 @@ impl Session {
     // ---------- for sync ----------
 
     /// Every secret's id and current revision.
+    pub(crate) fn token_policy(
+        &self,
+        name: String,
+        recipient: PublicKey,
+        ids: std::collections::BTreeSet<SecretId>,
+    ) -> Result<silo_core::access::TokenPolicy, AgentError> {
+        Ok(silo_core::access::TokenPolicy::sign(
+            &self.keys, name, recipient, ids,
+        )?)
+    }
+
+    pub(crate) fn env_grant(
+        &self,
+        id: SecretId,
+        recipient: PublicKey,
+    ) -> Result<Grant, AgentError> {
+        let entry = self.entries.get(&id).ok_or_else(|| AgentError::NotFound {
+            selector: id.to_string(),
+        })?;
+        if entry.meta.kind != SecretKind::EnvSet {
+            return Err(AgentError::Invalid {
+                message: format!("{} is not an env set", display_path(&entry.meta)),
+            });
+        }
+        Ok(Grant::seal(
+            &mut rand::rng(),
+            &self.keys,
+            &entry.stored.secret,
+            &entry.key,
+            recipient,
+        )?)
+    }
+
     pub fn revisions(&self) -> Vec<(SecretId, u32)> {
         self.entries
             .iter()

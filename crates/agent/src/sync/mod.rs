@@ -5,6 +5,7 @@
 //! every few minutes while unlocked, and on `silo sync`. Sync state lives in
 //! `sync.json` next to the vault; see [`SyncState`].
 
+pub(crate) mod access;
 mod engine;
 mod http;
 mod state;

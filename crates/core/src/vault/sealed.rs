@@ -219,14 +219,18 @@ impl Grant {
     /// Recovers the data key. Fails with [`Error::NotRecipient`] if the grant is
     /// addressed to someone else, or [`Error::Decrypt`] if it was tampered with.
     pub fn open(&self, keys: &AccountKeys) -> Result<DataKey> {
+        self.open_for(keys.secret_key())
+    }
+
+    pub(crate) fn open_for(&self, secret: &crypto::SecretKey) -> Result<DataKey> {
         if self.format != SECRET_FORMAT {
             return Err(Error::UnsupportedFormat(self.format));
         }
-        if &self.recipient != keys.public_key() {
+        if self.recipient != secret.public_key() {
             return Err(Error::NotRecipient);
         }
         self.key.open(
-            keys.secret_key(),
+            secret,
             &grant_aad(self.secret_id, self.revision, &self.recipient),
         )
     }

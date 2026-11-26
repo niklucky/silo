@@ -14,7 +14,8 @@ use silo_core::sync::ServerKey;
 
 use crate::error::{ApiError, ApiResult};
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE settings (
     key   TEXT PRIMARY KEY,
     value BLOB NOT NULL
@@ -91,7 +92,26 @@ CREATE TABLE grants (
 ) STRICT;
 
 CREATE INDEX grants_by_recipient ON grants(recipient, secret_id, revision);
-"#];
+"#,
+    r#"
+CREATE TABLE env_tokens (
+    owner_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    recipient BLOB NOT NULL UNIQUE,
+    bearer_hash BLOB NOT NULL UNIQUE,
+    policy TEXT NOT NULL,
+    PRIMARY KEY(owner_id, name)
+) STRICT;
+CREATE TABLE env_token_grants (
+    recipient BLOB NOT NULL REFERENCES env_tokens(recipient) ON DELETE CASCADE,
+    secret_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY(recipient, secret_id),
+    FOREIGN KEY(secret_id, revision) REFERENCES revisions(secret_id, revision)
+) STRICT;
+"#,
+];
 
 /// Key of the random secret that makes up KDF parameters for unknown usernames.
 pub const PRELOGIN_SECRET: &str = "prelogin_secret";

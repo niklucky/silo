@@ -32,7 +32,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     /// the vault syncs. Keep in step with silo-native-host.
     private static let refused: Set<String> = [
         "shutdown", "biometric_enable", "biometric_disable", "history",
-        "sync_register", "sync_login", "sync_logout", "sync_revoke_device",
+        "sync_register", "sync_login", "sync_logout", "sync_revoke_device", "manage_token",
     ]
 
     private static func forward(_ message: Any?) throws -> Any {
