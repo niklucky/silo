@@ -19,6 +19,7 @@ export type Copy = (text: string, what: string) => void;
 
 interface Props {
   client: VaultClient;
+  openTokens?: () => void;
   summary: SecretSummary;
   copy: Copy;
   edit: (view: SecretView) => void;
@@ -29,7 +30,7 @@ interface Props {
   locked: () => void;
 }
 
-export function Detail({ client, summary, copy, edit, remove, openFolder, openTag, locked }: Props) {
+export function Detail({ client, summary, copy, edit, remove, openFolder, openTag, locked, openTokens }: Props) {
   const [view, setView] = useState<SecretView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
@@ -134,6 +135,9 @@ export function Detail({ client, summary, copy, edit, remove, openFolder, openTa
         {error && <p className="error">{error}</p>}
         {!view && !error && <div className="skeleton" />}
         {view && <Body view={view} copy={copy} />}
+        {openTokens && (
+          <button className="btn" onClick={openTokens}><Icon name="key" size={14} /> Access tokens</button>
+        )}
 
         {view && (
           <footer className="detail-foot">

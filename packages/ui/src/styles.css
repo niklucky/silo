@@ -1188,3 +1188,34 @@ code {
 .drop .warn {
   color: var(--warn);
 }
+
+.token-dialog {
+  width: min(460px, calc(100vw - 48px));
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 12px 48px #0003;
+}
+.token-dialog::backdrop { background: #0005; }
+.token-dialog header, .token-actions, .token-entry h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.token-dialog header { justify-content: space-between; align-items: flex-start; }
+.token-dialog h2 { font-size: 18px; margin: 0; }
+.token-path { margin: 3px 0 0; overflow-wrap: anywhere; }
+.token-create, .token-entry { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.token-create p, .token-entry p { margin: 8px 0 12px; }
+.token-entry h3 { font-size: 14px; margin: 0 0 6px; overflow-wrap: anywhere; }
+.token-create details { margin: 8px 0 12px; }
+.token-dialog details { color: var(--muted); overflow-wrap: anywhere; }
+.token-dialog summary { cursor: pointer; }
+.token-dialog ul { padding-left: 20px; }
+.token-actions { margin-top: 10px; justify-content: flex-end; }
+.token-dialog .field-value { overflow-wrap: anywhere; user-select: text; }
+.token-dialog .field .icon-btn { opacity: 1; }

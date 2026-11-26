@@ -62,6 +62,15 @@ export function createAgentClient(send: AgentTransport): VaultClient & Pick<Vaul
   }
 
   return {
+    tokens: {
+      async list(scope) {
+        const rows = await call<[string, string[]][]>("manage_token", { action: scope ? { list_for: { scope } } : "list" }, "tokens");
+        return rows.map(([name, paths]) => ({ name, paths }));
+      },
+      issue: (name, scope) => call<string>("manage_token", { action: { create: { name, scope } } }, "token_issued"),
+      rotate: (name) => call<string>("manage_token", { action: { rotate: { name } } }, "token_issued"),
+      revoke: (name) => call<void>("manage_token", { action: { revoke: { name } } }, "token_revoked"),
+    },
     status: () => call<StatusInfo>("status", undefined, "status"),
     signIn: (server, username, password) => call<SyncInfo | null>("sync_login", { server, username, password }, "sync_status"),
     unlock: (password) => call<StatusInfo>("unlock", { password }, "unlocked"),

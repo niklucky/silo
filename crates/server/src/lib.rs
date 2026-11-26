@@ -21,6 +21,7 @@ use silo_core::sync::{
     ServerInfo, ServerKey, SessionReply,
 };
 
+mod access;
 pub mod accounts;
 pub mod auth;
 pub mod connections;
@@ -54,7 +55,7 @@ impl AppState {
 }
 
 pub fn app(state: AppState) -> Router {
-    let v1 = Router::new()
+    let v1 = access::routes()
         .route("/server", get(server_info))
         .route("/prelogin/{username}", get(prelogin))
         .route("/register", post(register))

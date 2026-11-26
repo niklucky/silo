@@ -44,8 +44,17 @@ pub fn run(command: Command) -> Result<()> {
         Command::Edit(args) => edit::run(args),
         Command::Restore { selector, revision } => edit::restore(&selector, revision),
         Command::Rm { selector, yes } => rm(&selector, yes),
-        Command::Run { selectors, command } => run_with_env(&selectors, &command),
-        Command::Export { selector, format } => export(&selector, format),
+        Command::Token { command } => crate::token::manage(command),
+        Command::Run {
+            selectors,
+            token_env,
+            command,
+        } => run_with_env(&selectors, token_env.as_deref(), &command),
+        Command::Export {
+            selector,
+            token_env,
+            format,
+        } => export(selector.as_deref(), token_env.as_deref(), format),
         Command::File {
             command:
                 FileCommand::Pull {
@@ -250,7 +259,7 @@ fn biometric(command: BiometricCommand) -> Result<()> {
     Ok(())
 }
 
-fn read_admin_token(paths: &Paths) -> Result<String> {
+pub(crate) fn read_admin_token(paths: &Paths) -> Result<String> {
     let path = paths.admin_token_file();
     let token = std::fs::read_to_string(&path).with_context(|| {
         format!(
@@ -716,37 +725,40 @@ fn rm(selector: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_with_env(selectors: &[String], command: &[String]) -> Result<()> {
-    let mut env: Vec<(String, String)> = Vec::new();
-    for selector in selectors {
-        let view = fetch(selector)?;
-        let SecretBody::EnvSet(set) = &view.body else {
-            bail!(
-                "{} is a {}, not an env set",
-                view.path(),
-                format::kind_name(view.meta.kind)
-            );
-        };
-        for var in &set.vars {
-            env.retain(|(k, _)| k != &var.key);
-            env.push((var.key.clone(), var.value.clone()));
-        }
-    }
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| anyhow!("no command given after --"))?;
-    let err = Process::new(program).args(args).envs(env).exec();
-    Err(err).with_context(|| format!("failed to run {program}"))
-}
-
-fn export(selector: &str, format: ExportFormat) -> Result<()> {
-    let view = fetch(selector)?;
-    let SecretBody::EnvSet(set) = &view.body else {
-        bail!(
+fn local_env(selector: &str) -> Result<EnvSet> {
+    let mut view = fetch(selector)?;
+    match &mut view.body {
+        SecretBody::EnvSet(set) => Ok(std::mem::take(set)),
+        _ => bail!(
             "{} is a {}, not an env set",
             view.path(),
             format::kind_name(view.meta.kind)
-        );
+        ),
+    }
+}
+
+fn run_with_env(selectors: &[String], token_env: Option<&str>, command: &[String]) -> Result<()> {
+    let (program, args) = command.split_first().context("no command given after --")?;
+    let mut child = Process::new(program);
+    child.args(args);
+    if selectors.is_empty() {
+        let variable = token_env.unwrap_or("SILO_TOKEN");
+        let set = crate::token::fetch(variable)?;
+        child.env_remove(variable).env_remove("SILO_TOKEN");
+        child.envs(set.vars.iter().map(|var| (&var.key, &var.value)));
+    } else {
+        for selector in selectors {
+            let set = local_env(selector)?;
+            child.envs(set.vars.iter().map(|var| (&var.key, &var.value)));
+        }
+    }
+    Err(child.exec()).with_context(|| format!("failed to run {program}"))
+}
+
+fn export(selector: Option<&str>, token_env: Option<&str>, format: ExportFormat) -> Result<()> {
+    let set = match selector {
+        Some(selector) => local_env(selector)?,
+        None => crate::token::fetch(token_env.unwrap_or("SILO_TOKEN"))?,
     };
     match format {
         ExportFormat::Dotenv => {

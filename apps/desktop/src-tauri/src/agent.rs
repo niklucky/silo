@@ -74,13 +74,14 @@ impl Agent {
                 message: "the desktop app does not stop the agent".to_owned(),
             });
         }
-        // Biometric requests may block on an OS prompt; run them on a dedicated
-        // connection so Lock and Status never stall behind Touch ID.
+        // OS prompts and token management can wait on the user or the network.
+        // Keep the shared connection available for Lock and Status.
         if matches!(
             request,
             Request::UnlockBiometric { .. }
                 | Request::BiometricEnable { .. }
                 | Request::BiometricDisable { .. }
+                | Request::ManageToken { .. }
         ) {
             return self.call_isolated(request);
         }
@@ -158,6 +159,13 @@ impl Agent {
             },
             Request::BiometricDisable { .. } => match read_admin_token(&paths) {
                 Ok(token) => Cow::Owned(Request::BiometricDisable { token }),
+                Err(err) => return Response::Err(err),
+            },
+            Request::ManageToken { action, .. } => match read_admin_token(&paths) {
+                Ok(token) => Cow::Owned(Request::ManageToken {
+                    token,
+                    action: action.clone(),
+                }),
                 Err(err) => return Response::Err(err),
             },
             other => Cow::Borrowed(other),
@@ -442,6 +450,13 @@ mod tests {
         assert_eq!(
             call(json!({"method": "unlock", "params": {"password": "pw"}}))["ok"]["unlocked"]["unlocked"],
             true
+        );
+
+        // The WebView sends just the action. The native bridge supplies the local
+        // management credential, allowing the agent to reach its sync check.
+        assert_eq!(
+            call(json!({"method": "manage_token", "params": {"action": "list"}}))["err"]["code"],
+            "sync"
         );
 
         let added = call(json!({"method": "add", "params": {

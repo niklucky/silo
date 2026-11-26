@@ -10,6 +10,7 @@ mod generate;
 mod import;
 mod prompt;
 mod sync;
+mod token;
 
 use std::process::ExitCode;
 

@@ -94,8 +94,34 @@ pub enum Request {
     Sync,
     SyncStatus,
     SyncDevices,
+    ManageToken {
+        #[serde(default)]
+        token: String,
+        action: TokenAction,
+    },
     SyncRevokeDevice {
         device_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenAction {
+    ListFor { scope: TokenScope },
+    Create { name: String, scope: TokenScope },
+    List,
+    Rotate { name: String },
+    Revoke { name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenScope {
+    EnvSet(String),
+    Folder(FolderPath),
+    FolderSnapshot {
+        folder: FolderPath,
+        ids: std::collections::BTreeSet<SecretId>,
     },
 }
 
@@ -212,6 +238,8 @@ pub struct SyncStatusInfo {
     pub device_id: String,
     pub last_sync: Option<u64>,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_warnings: Vec<String>,
     /// Local changes not on the server yet; unknown while locked.
     pub pending: Option<usize>,
     /// Changes the server refused, by `folder/title` or id.
@@ -241,6 +269,9 @@ pub enum Reply {
     },
     Devices(Vec<DeviceInfo>),
     DeviceRevoked,
+    TokenIssued(silo_core::access::IssuedToken),
+    Tokens(Vec<(String, Vec<String>)>),
+    TokenRevoked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

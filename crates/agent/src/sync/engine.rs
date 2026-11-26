@@ -48,6 +48,9 @@ pub struct SyncReport {
     pub conflicts: Vec<String>,
     /// One line per change the server refused.
     pub rejected: Vec<String>,
+    /// Token scopes that cannot currently produce a process environment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_warnings: Vec<String>,
     /// Changes from the server that were not signed by this account, or could
     /// not be opened. Ignored.
     pub skipped: usize,
@@ -108,7 +111,8 @@ pub fn run(access: &impl VaultAccess, now: &dyn Fn() -> u64) -> Result<SyncRepor
     let result = run_with(access, &client, now);
     let error = result.as_ref().err().map(ToString::to_string);
     let recorded = access.with_vault(|v| {
-        if error.is_none() {
+        if let Ok(report) = &result {
+            v.state.token_warnings.clone_from(&report.token_warnings);
             v.state.last_sync = Some(now());
         }
         v.state.last_error = error;
@@ -130,9 +134,10 @@ fn run_with(
     };
     let mut rng = rand::rng();
 
-    loop {
+    let mut has_env_tokens = loop {
         let since = access.with_vault(|v| Ok(v.state.cursor))?;
         let reply = client.changes(since)?;
+        let has_env_tokens = reply.has_env_tokens;
         let more = access.with_vault(|v| {
             let more = if reply.cursor < since {
                 // The server has less than we pulled: it was restored from an
@@ -153,20 +158,42 @@ fn run_with(
             Ok(more)
         })?;
         if !more {
-            break;
+            break has_env_tokens;
         }
-    }
+    };
     // Every upload that reached the server was in that pull.
     access.with_vault(|v| {
         v.state.in_flight.clear();
         v.save()
     })?;
 
-    for _ in 0..MAX_ROUNDS {
-        let items = access.with_vault(plan_push)?;
+    let mut recipients = None;
+    for round in 0..MAX_ROUNDS {
+        let mut items = access.with_vault(plan_push)?;
         if items.is_empty() {
             break;
         }
+        if has_env_tokens && recipients.is_none() {
+            recipients = Some(super::access::recipients(access, client)?);
+        }
+        access.with_vault(|v| {
+            for item in &mut items {
+                if let PushItem::Put {
+                    entry, env_grants, ..
+                } = item
+                {
+                    let readers = recipients
+                        .as_ref()
+                        .and_then(|map| map.get(&entry.secret.id));
+                    *env_grants =
+                        Some(v.session.push_env_grants(
+                            entry,
+                            readers.map(Vec::as_slice).unwrap_or_default(),
+                        )?);
+                }
+            }
+            Ok(())
+        })?;
         for chunk in items.chunks(PUSH_BATCH) {
             access.with_vault(|v| {
                 begin_push(v, chunk);
@@ -182,6 +209,10 @@ fn run_with(
                     chunk.len()
                 )));
             }
+            if reply.results.contains(&PushResult::TokenScopesChanged) {
+                has_env_tokens = true;
+                recipients = None;
+            }
             access.with_vault(|v| {
                 for (item, result) in chunk.iter().zip(reply.results) {
                     apply_result(v, &mut rng, item, result, &mut progress)?;
@@ -189,6 +220,14 @@ fn run_with(
                 v.save()
             })?;
         }
+        if round + 1 == MAX_ROUNDS && has_env_tokens && recipients.is_none() {
+            return Err(SyncError::Config(
+                "access token scopes changed during the push; sync again".into(),
+            ));
+        }
+    }
+    if has_env_tokens {
+        progress.report.token_warnings = super::access::refresh(access, client)?;
     }
     fill_gaps(access, client, std::mem::take(&mut progress.gaps));
     Ok(progress.report)
@@ -491,6 +530,7 @@ fn plan_push(v: &mut Vault<'_>) -> Result<Vec<PushItem>, SyncError> {
         let entry = v.session.sign_if_needed(v.store, next)?;
         items.push(PushItem::Put {
             base_revision: known.unwrap_or(0),
+            env_grants: None,
             entry,
             restore: v.state.deleted_remotely.contains_key(&id),
         });
@@ -519,6 +559,7 @@ fn apply_result(
         v.state.in_flight.remove(&id);
     }
     match (item, result) {
+        (_, PushResult::TokenScopesChanged) => {} // Retried with current signed policies next round.
         (PushItem::Put { entry, .. }, PushResult::Ok { .. }) => {
             let revision = entry.secret.revision;
             v.state.deleted_remotely.remove(&id);

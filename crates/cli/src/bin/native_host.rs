@@ -92,6 +92,7 @@ impl Bridge {
                 | Request::SyncLogin { .. }
                 | Request::SyncLogout
                 | Request::SyncRevokeDevice { .. }
+                | Request::ManageToken { .. }
         ) {
             return Response::Err(AgentError::Invalid {
                 message: "this method is not available through the browser".to_owned(),

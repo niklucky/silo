@@ -15,6 +15,11 @@ use silo_core::vault::{
 };
 use silo_server::{AppState, Db, accounts};
 
+use silo_agent::protocol::{TokenAction, TokenScope};
+use silo_agent::sync::HttpClient;
+use silo_core::access::AccessToken;
+use silo_core::vault::{EnvSet, EnvVar};
+
 const PASSWORD: &str = "correct horse";
 
 struct Server {
@@ -620,4 +625,341 @@ fn forged_meta() -> SecretMeta {
         created_at: 0,
         updated_at: 0,
     }
+}
+
+fn env(key: &str, value: &str) -> SecretBody {
+    SecretBody::EnvSet(EnvSet {
+        vars: vec![EnvVar {
+            key: key.into(),
+            value: value.into(),
+        }],
+    })
+}
+fn add(device: &mut Device, folder: &str, title: &str, body: SecretBody) {
+    device.call(Request::Add(NewSecret {
+        folder: FolderPath::parse(folder).unwrap(),
+        title: title.into(),
+        tags: vec![],
+        urls: vec![],
+        basic_auth: false,
+        body,
+    }));
+}
+fn manage(device: &mut Device, action: TokenAction) -> Reply {
+    let token = std::fs::read_to_string(device.paths.admin_token_file()).unwrap();
+    device.call(Request::ManageToken { token, action })
+}
+fn issued(reply: Reply, server: &Server) -> (AccessToken, HttpClient) {
+    let Reply::TokenIssued(value) = reply else {
+        panic!("expected a credential")
+    };
+    let token = AccessToken::parse(value.as_str()).unwrap();
+    let client = HttpClient::new(&server.url)
+        .unwrap()
+        .with_token(&token.bearer());
+    (token, client)
+}
+
+#[test]
+fn folder_access_tokens_follow_only_the_original_env_sets_across_devices() {
+    let server = Server::start();
+    let mut owner = Device::start(true);
+    owner.register(&server, "owner");
+    add(&mut owner, "prod", "app", env("API", "first"));
+    add(&mut owner, "prod/nested", "db", env("DB", "database"));
+    add(&mut owner, "production", "other", env("OUTSIDE", "private"));
+    owner.add_note("prod/private", "private");
+    let Reply::List(preview) = owner.call(Request::List(ListFilter {
+        folder: Some(FolderPath::parse("prod").unwrap()),
+        kind: Some(SecretKind::EnvSet),
+        ..Default::default()
+    })) else {
+        panic!("expected env sets")
+    };
+    let previewed_ids: std::collections::BTreeSet<_> = preview.iter().map(|item| item.id).collect();
+    let name = String::from("deploy");
+    let (token, client) = issued(
+        manage(
+            &mut owner,
+            TokenAction::Create {
+                name: name.clone(),
+                scope: TokenScope::FolderSnapshot {
+                    folder: FolderPath::parse("prod").unwrap(),
+                    ids: previewed_ids.clone(),
+                },
+            },
+        ),
+        &server,
+    );
+    let read =
+        |token: &AccessToken, client: &HttpClient| token.open(client.fetch_env().unwrap()).unwrap();
+    assert_eq!(read(&token, &client).vars.len(), 2);
+    assert!(client.env_tokens().is_err());
+    assert!(client.devices().is_err());
+    let mut incomplete = client.fetch_env().unwrap();
+    incomplete.entries.pop();
+    assert!(token.open(incomplete).is_err());
+    let mut changed_scope = client.fetch_env().unwrap();
+    changed_scope.policy.ids.pop_last();
+    assert!(token.open(changed_scope).is_err());
+
+    let mut other_owner = Device::start(true);
+    other_owner.register(&server, "other");
+    assert_eq!(
+        manage(&mut other_owner, TokenAction::List),
+        Reply::Tokens(vec![])
+    );
+    let other_admin = std::fs::read_to_string(other_owner.paths.admin_token_file()).unwrap();
+    assert!(
+        other_owner
+            .try_call(Request::ManageToken {
+                token: other_admin,
+                action: TokenAction::Revoke { name: name.clone() }
+            })
+            .is_err()
+    );
+
+    let mut peer = Device::start(false);
+    peer.login(&server, "owner");
+    peer.sync();
+    add(&mut peer, "prod", "added-later", env("LATER", "later"));
+    peer.call(Request::Update(SecretUpdate {
+        selector: "prod/app".into(),
+        revision: None,
+        title: None,
+        folder: Some(FolderPath::root()),
+        tags: None,
+        urls: None,
+        basic_auth: None,
+        body: Some(env("API", "updated")),
+    }));
+    peer.sync();
+    // The folder still contains the DB member. Show the entire token scope,
+    // including the env set moved outside it, but never match a new member by path.
+    let Reply::Tokens(scoped) = manage(
+        &mut peer,
+        TokenAction::ListFor {
+            scope: TokenScope::Folder(FolderPath::parse("prod/nested").unwrap()),
+        },
+    ) else {
+        panic!("expected token information")
+    };
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].0, name);
+    assert!(scoped[0].1.contains(&"app".to_owned()));
+    assert!(scoped[0].1.contains(&"prod/nested/db".to_owned()));
+    for scope in [
+        TokenScope::EnvSet("prod/added-later".into()),
+        TokenScope::Folder(FolderPath::parse("production").unwrap()),
+    ] {
+        assert_eq!(
+            manage(&mut peer, TokenAction::ListFor { scope }),
+            Reply::Tokens(vec![])
+        );
+    }
+    let updated = read(&token, &client);
+    assert_eq!(
+        updated
+            .vars
+            .iter()
+            .map(|v| (v.key.as_str(), v.value.as_str()))
+            .collect::<Vec<_>>(),
+        [("API", "updated"), ("DB", "database")]
+    );
+
+    // The create operation pulls changes from the peer. An old desktop preview
+    // must never authorize the newly added member, even with an unchanged count.
+    let admin = std::fs::read_to_string(owner.paths.admin_token_file()).unwrap();
+    let err = owner
+        .try_call(Request::ManageToken {
+            token: admin,
+            action: TokenAction::Create {
+                name: "stale-preview".into(),
+                scope: TokenScope::FolderSnapshot {
+                    folder: FolderPath::parse("prod").unwrap(),
+                    ids: previewed_ids,
+                },
+            },
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Folder membership changed"),
+        "{err}"
+    );
+    let Reply::Tokens(rows) = manage(&mut owner, TokenAction::List) else {
+        panic!("expected token list")
+    };
+    assert_eq!(rows.len(), 1);
+
+    let (new_token, new_client) = issued(
+        manage(&mut owner, TokenAction::Rotate { name: name.clone() }),
+        &server,
+    );
+    assert!(client.fetch_env().is_err());
+    assert_eq!(read(&new_token, &new_client), updated);
+    peer.call(Request::Remove {
+        selector: "prod/nested/db".into(),
+    });
+    peer.sync();
+    assert!(new_client.fetch_env().is_err());
+    assert_eq!(
+        manage(&mut peer, TokenAction::Revoke { name }),
+        Reply::TokenRevoked
+    );
+    assert!(new_client.fetch_env().is_err());
+}
+
+#[test]
+fn invalid_scoped_variables_prevent_issue_and_warn_on_later_edits() {
+    let server = Server::start();
+    let mut owner = Device::start(true);
+    owner.register(&server, "owner");
+    add(&mut owner, "prod", "app", env("API", "first"));
+    add(&mut owner, "prod/nested", "db", env("DB", "database"));
+    let name = String::from("deploy");
+    let (token, client) = issued(
+        manage(
+            &mut owner,
+            TokenAction::Create {
+                name: name.clone(),
+                scope: TokenScope::Folder(FolderPath::root()),
+            },
+        ),
+        &server,
+    );
+    let admin = std::fs::read_to_string(owner.paths.admin_token_file()).unwrap();
+    for (key, value, reason) in [
+        ("API", "other", "duplicate variable"),
+        ("BAD-NAME", "x", "variable name"),
+        ("VALID", "x\0y", "NUL byte"),
+    ] {
+        owner.call(Request::Update(SecretUpdate {
+            selector: "prod/nested/db".into(),
+            revision: None,
+            title: None,
+            folder: None,
+            tags: None,
+            urls: None,
+            basic_auth: None,
+            body: Some(env(key, value)),
+        }));
+        let report = owner.sync();
+        assert!(
+            report
+                .token_warnings
+                .iter()
+                .any(|w| w.contains("deploy") && w.contains(reason)),
+            "{report:?}"
+        );
+        assert!(token.open(client.fetch_env().unwrap()).is_err());
+        let err = owner
+            .try_call(Request::ManageToken {
+                token: admin.clone(),
+                action: TokenAction::Rotate { name: name.clone() },
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains(reason), "{err}");
+        let scope = if key == "API" {
+            TokenScope::Folder(FolderPath::root())
+        } else {
+            TokenScope::EnvSet("prod/nested/db".into())
+        };
+        let err = owner
+            .try_call(Request::ManageToken {
+                token: admin.clone(),
+                action: TokenAction::Create {
+                    name: "unusable".into(),
+                    scope,
+                },
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains(reason), "{err}");
+    }
+    owner.call(Request::Update(SecretUpdate {
+        selector: "prod/nested/db".into(),
+        revision: None,
+        title: None,
+        folder: None,
+        tags: None,
+        urls: None,
+        basic_auth: None,
+        body: Some(env("DB", "database")),
+    }));
+    assert!(owner.sync().token_warnings.is_empty());
+    assert_eq!(
+        token.open(client.fetch_env().unwrap()).unwrap().vars.len(),
+        2
+    );
+}
+
+#[test]
+fn first_token_issued_between_pull_and_push_is_granted_in_the_same_sync() {
+    use axum::extract::Request as HttpRequest;
+    use axum::middleware::{Next, from_fn};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use tokio::sync::Notify;
+
+    let paused = Arc::new(AtomicBool::new(false));
+    let resume = Arc::new(Notify::new());
+    let (at_push, wait) = mpsc::channel();
+    let server = Server::start_with(|app| {
+        let paused = paused.clone();
+        let resume = resume.clone();
+        app.layer(from_fn(move |req: HttpRequest, next: Next| {
+            let hold = req.uri().path() == "/v1/push" && paused.swap(false, Ordering::SeqCst);
+            let at_push = at_push.clone();
+            let resume = resume.clone();
+            async move {
+                if hold {
+                    at_push.send(()).unwrap();
+                    tokio::time::timeout(Duration::from_secs(10), resume.notified())
+                        .await
+                        .unwrap();
+                }
+                next.run(req).await
+            }
+        }))
+    });
+    let mut owner = Device::start(true);
+    owner.register(&server, "owner");
+    add(&mut owner, "prod", "app", env("KEY", "before"));
+    owner.sync();
+    let mut peer = Device::start(false);
+    peer.login(&server, "owner");
+    peer.sync();
+    peer.call(Request::Update(SecretUpdate {
+        selector: "prod/app".into(),
+        revision: None,
+        title: None,
+        folder: None,
+        tags: None,
+        urls: None,
+        basic_auth: None,
+        body: Some(env("KEY", "after")),
+    }));
+    paused.store(true, Ordering::SeqCst);
+    let pending = thread::spawn(move || peer.sync());
+    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+    let reader = manage(
+        &mut owner,
+        TokenAction::Create {
+            name: "first".into(),
+            scope: TokenScope::EnvSet("prod/app".into()),
+        },
+    );
+    let (token, client) = issued(reader, &server);
+    assert_eq!(
+        token.open(client.fetch_env().unwrap()).unwrap().vars[0].value,
+        "before"
+    );
+    resume.notify_one();
+    assert_eq!(pending.join().unwrap().pushed, 1);
+    assert_eq!(
+        token.open(client.fetch_env().unwrap()).unwrap().vars[0].value,
+        "after"
+    );
 }

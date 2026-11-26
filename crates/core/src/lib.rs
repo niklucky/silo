@@ -12,6 +12,7 @@
 //! Start with [`account`] for unlocking, then [`vault`] for sealing secrets and
 //! granting access. [`crypto`] documents the key hierarchy.
 
+pub mod access;
 pub mod account;
 pub mod crypto;
 pub mod error;

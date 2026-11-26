@@ -190,6 +190,9 @@ fn print_report(report: &SyncReport) {
             println!("  {line}");
         }
     }
+    for warning in &report.token_warnings {
+        println!("Access token warning: {warning}");
+    }
     if report.skipped > 0 {
         println!(
             "Ignored {} change(s) from the server not signed by this account.",
@@ -251,6 +254,9 @@ fn status(json: bool) -> Result<()> {
     }
     if let Some(err) = &info.last_error {
         println!("Error:     {err}");
+    }
+    for warning in &info.token_warnings {
+        println!("Access token warning: {warning}");
     }
     for line in &info.rejected {
         println!("Refused:   {line}");

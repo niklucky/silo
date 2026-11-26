@@ -176,6 +176,7 @@ fn new_weak_account() -> (AccountRecord, AccountKeys) {
 fn put(base_revision: u32, entry: StoredSecret) -> PushItem {
     PushItem::Put {
         base_revision,
+        env_grants: None,
         entry,
         restore: false,
     }
@@ -184,6 +185,7 @@ fn put(base_revision: u32, entry: StoredSecret) -> PushItem {
 fn restore(base_revision: u32, entry: StoredSecret) -> PushItem {
     PushItem::Put {
         base_revision,
+        env_grants: None,
         entry,
         restore: true,
     }
@@ -989,4 +991,125 @@ async fn history_returns_revisions_in_between_to_grantees_only() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reply["revisions"], json!([]));
+}
+
+/// Exercise the transaction boundary directly, before an agent can make a follow-up request.
+#[tokio::test]
+async fn token_grants_follow_atomic_pushes_and_refresh_ignores_only_valid_superseded_grants() {
+    use silo_core::access::{AccessToken, InstallToken, TokenBundle, TokenPolicy};
+
+    let server = Server::new();
+    let user = server.register("owner").await;
+    let keys = &user.keys;
+    let scoped_ids = [new_id(1), new_id(2)];
+    let [a1, b1] = scoped_ids.map(|id| entry(keys, id, 1, "initial", &[*keys.public_key()]));
+    server
+        .push(&user, vec![put(0, a1.clone()), put(0, b1.clone())])
+        .await;
+
+    let reader = AccessToken::generate(&mut rand::rng(), keys.identity().signing_key);
+    let grant = |stored: &StoredSecret| {
+        let key = stored.grants[0].open(keys).unwrap();
+        Grant::seal(
+            &mut rand::rng(),
+            keys,
+            &stored.secret,
+            &key,
+            reader.recipient(),
+        )
+        .unwrap()
+    };
+    let post = |path, body| server.call("POST", path, Some(&user.token), Some(body));
+    for endpoint in ["/v1/env-tokens", "/v1/env-token-grants"] {
+        let (status, reply) = post(endpoint, json!({"invalid":true})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(reply["error"]["code"], "invalid");
+    }
+    let install = |name: &str| InstallToken {
+        policy: TokenPolicy::sign(keys, name.into(), reader.recipient(), scoped_ids.into())
+            .unwrap(),
+        grants: vec![grant(&a1), grant(&b1)],
+        bearer_hash: reader.bearer_hash(),
+        replaces: None,
+    };
+    assert_eq!(
+        post("/v1/env-tokens", json!(install("deploy"))).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post("/v1/env-tokens", json!(install("duplicate-key")))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let bearer = reader.bearer();
+    let fetch = || server.call("GET", "/v1/env", Some(&bearer), None);
+    let revisions = |json| {
+        serde_json::from_value::<TokenBundle>(json)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| e.secret.revision)
+            .collect::<Vec<_>>()
+    };
+    let a2 = entry(keys, scoped_ids[0], 2, "edit", &[*keys.public_key()]);
+    // This device pulled before the first token was issued.
+    let push_edit = |grants| PushItem::Put {
+        base_revision: 1,
+        restore: false,
+        entry: a2.clone(),
+        env_grants: Some(grants),
+    };
+    assert_eq!(
+        server.push(&user, vec![push_edit(vec![])]).await,
+        [PushResult::TokenScopesChanged]
+    );
+    assert_eq!(revisions(fetch().await.1), [1, 1]);
+    let bad = grant(&a1);
+    assert!(matches!(
+        server.push(&user, vec![push_edit(vec![bad])]).await[0],
+        PushResult::Rejected { .. }
+    ));
+    assert_eq!(revisions(fetch().await.1), [1, 1]);
+    assert!(matches!(
+        server.push(&user, vec![push_edit(vec![grant(&a2)])]).await[0],
+        PushResult::Ok { .. }
+    ));
+    assert_eq!(revisions(fetch().await.1), [2, 1]);
+
+    let b2 = entry(keys, scoped_ids[1], 2, "legacy edit", &[*keys.public_key()]);
+    server.push(&user, vec![put(1, b2.clone())]).await;
+    assert_eq!(fetch().await.0, StatusCode::BAD_REQUEST);
+    let mut unsigned = grant(&a1);
+    unsigned.signature = None;
+    assert_eq!(
+        post("/v1/env-token-grants", json!([grant(&b2), unsigned]))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(fetch().await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        post("/v1/env-token-grants", json!([grant(&a1), grant(&b2)]))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(revisions(fetch().await.1), [2, 2]);
+    server
+        .push(
+            &user,
+            vec![PushItem::Delete {
+                tombstone: Tombstone::seal(keys, scoped_ids[0], 2, 10),
+            }],
+        )
+        .await;
+    assert_eq!(
+        post("/v1/env-token-grants", json!([grant(&a2), grant(&b2)]))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(fetch().await.0, StatusCode::BAD_REQUEST);
 }
