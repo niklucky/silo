@@ -10,7 +10,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -72,6 +72,7 @@ pub fn app(state: AppState) -> Router {
         .route("/history", post(history));
     Router::new()
         .route("/health", get(health))
+        .route("/install.sh", get(cli_installer))
         .nest("/v1", v1)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(log_request))
@@ -99,6 +100,10 @@ pub fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+async fn cli_installer() -> Redirect {
+    Redirect::temporary("https://github.com/niklucky/silo/releases/latest/download/install.sh")
 }
 
 async fn health() -> Json<Value> {

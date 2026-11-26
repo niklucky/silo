@@ -110,7 +110,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           pnpm --filter @silo/desktop tauri bundle --ci --target "$TARGET" --bundles appimage --config "$BUNDLE_CONFIG"
-      - name: Verify and ZIP desktop package
+      - name: Verify and package desktop and CLI downloads
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -120,7 +120,8 @@ jobs:
           mkdir -p dist
           if [[ "$RUNNER_OS" == macOS ]]; then
             app="$bundle_dir/macos/Silo.app"
-            "$app/Contents/MacOS/silo" --version
+            cli="$app/Contents/MacOS/silo"
+            "$cli" --version
             codesign --verify --deep --strict --verbose=2 "$app"
             xcrun stapler validate "$app"
             spctl --assess --type execute --verbose=2 "$app"
@@ -132,13 +133,15 @@ jobs:
               exit 1
             fi
             "${appimages[0]}" --appimage-extract usr/bin/silo
-            squashfs-root/usr/bin/silo --version
+            cli=squashfs-root/usr/bin/silo
+            "$cli" --version
             zip -j "dist/$ASSET.zip" "${appimages[0]}"
           fi
           unzip -tq "dist/$ASSET.zip"
+          cp "$cli" "dist/silo-${ASSET#Silo-desktop-}"
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}.zip
+          path: dist/
           if-no-files-found: error
           overwrite: true

@@ -186,17 +186,22 @@ its scope is unique and matches `[A-Za-z_][A-Za-z0-9_]*`, and that values
 contain no NUL bytes. If a later edit breaks these rules, CI reads fail.
 Owner sync reports the affected token so you can correct the env set.
 
-On the runner, install the updated `silo` on `PATH` (from a pinned Silo
-checkout, build with `cargo build --locked --release -p silo-cli --bin silo`).
-In Forgejo Actions, set the `SILO_SERVER` variable to the HTTPS server URL.
-After checking out your deployment code, use this step:
+Install the standalone CLI on the runner. For Forgejo Actions, pin the installer
+to the release you tested and set the `SILO_SERVER` variable to your HTTPS
+server URL. After checking out your deployment code, use these steps:
 
 ```yaml
+- name: Install Silo CLI
+  shell: bash
+  run: |
+    set -eo pipefail
+    wget -qO- https://github.com/niklucky/silo/releases/download/v0.5.0/install.sh | bash
+
 - name: Deploy with Silo
   env:
     SILO_SERVER: ${{ vars.SILO_SERVER }}
     SILO_TOKEN: ${{ secrets.SILO_TOKEN }}
-  run: silo run -- ./deploy.sh
+  run: '"$HOME/.local/bin/silo" run -- ./deploy.sh'
 ```
 
 With no local selector, `run` and `export` fetch the signed scope directly
@@ -212,7 +217,7 @@ adapt the file argument to your tool:
 set -eu
 env_file=$(mktemp)
 trap 'rm -f "$env_file"' EXIT
-silo export > "$env_file"
+"$HOME/.local/bin/silo" export > "$env_file"
 unset SILO_TOKEN
 ./deploy.sh --env-file "$env_file"
 ```
@@ -498,8 +503,28 @@ Tauri imports the certificate into a temporary keychain and submits the signed
 app to Apple for notarization. The workflow verifies the signature, stapled
 ticket and Gatekeeper assessment before archiving the app. Run **Desktop
 packages** from the Actions tab once the workflow is on `main` to check signing
-and download both ZIPs using the checked-in desktop version. The manual run
+and download the desktop and CLI artifacts using the checked-in desktop version. The manual run
 uploads Actions artifacts only.
+
+### Install the standalone CLI
+
+On Linux x86-64 (Ubuntu 22.04 or compatible glibc) and macOS (Apple Silicon
+or Intel), install the latest CLI with:
+
+```bash
+set -o pipefail
+wget -qO- https://silo.warpunit.com/install.sh | bash
+# With curl:
+# curl -fsSL https://silo.warpunit.com/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+silo --help
+```
+
+The website redirects to the official release installer. It chooses the binary
+for your machine, verifies its SHA-256 digest, and puts it in `~/.local/bin`.
+To select another directory, pass `SILO_INSTALL_DIR=/your/bin` to `bash` on
+the right of the pipe. Each release from v0.5.0 has its own installer URL for
+pinning in CI. Run the installer again to update the standalone CLI.
 
 ### Version releases and updates
 
@@ -524,7 +549,8 @@ GitHub environment and passes the image's immutable `@sha256:…` digest to the
 VPS. The workflow's scoped `GITHUB_TOKEN` supplies registry access.
 
 After the server deploys successfully and all desktop builds pass, the
-GitHub Release includes the container digest and three ZIPs. The desktop bundles
+GitHub Release includes the container digest, three standalone CLI binaries,
+their installer and three desktop ZIPs. The desktop bundles
 use the tag version:
 
 - `Silo-desktop-macos-arm64.zip` contains the signed and notarized
@@ -572,8 +598,8 @@ the newer schema; inspect the logs and follow the explicit restore procedure
 above if a database restore is necessary.
 
 For a failed workflow, rerun the failed jobs from the Actions run. A new remote
-release directory is created each time. A rerun keeps desktop ZIPs already
-uploaded to the GitHub Release and uploads any missing ZIPs. A full rerun
+release directory is created each time. A rerun keeps downloads already
+uploaded to the GitHub Release and adds missing assets. A full rerun
 rebuilds the image from the same source commit and may pick up newer base image
 packages. The release notes record the corresponding image digest. The deploy
 script retains successful releases, cached images and database files on the host.
