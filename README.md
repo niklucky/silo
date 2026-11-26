@@ -176,9 +176,15 @@ Each CLI command above prints the credential once. Save it as the pipeline's
 paths. A folder includes existing env sets in that folder and its subfolders.
 Membership follows their IDs through renames and moves. New env sets require
 a new token. New and edited variables in a selected set become available after
-owner sync. A fetch fails if a selected set was deleted, a current revision is
-awaiting grants from an updated owner agent, or variable names collide across
-sets. For a deleted member, revoke the token and create one with the new scope.
+owner sync. Updated agents publish each revision and its token grants together.
+If an older agent edits a member, CI waits for an updated agent to sync and
+grant the current revision. A deleted member blocks the token until you restore
+the set or replace the token with a new scope.
+
+Before issuing or rotating a token, Silo checks that every variable name in
+its scope is unique and matches `[A-Za-z_][A-Za-z0-9_]*`, and that values
+contain no NUL bytes. If a later edit breaks these rules, CI reads fail.
+Owner sync reports the affected token so you can correct the env set.
 
 On the runner, install the updated `silo` on `PATH` (from a pinned Silo
 checkout, build with `cargo build --locked --release -p silo-cli --bin silo`).

@@ -213,7 +213,13 @@ export function createMockClient(): VaultClient {
       async issue(name, scope) {
         if (!unlocked) return fail("The vault is locked.", "locked");
         if (tokens.has(name)) return fail("A token with this name already exists.");
-        const ids = tokenMembers(scope);
+        const ids = tokenMembers("folder_snapshot" in scope ? { folder: scope.folder_snapshot.folder } : scope);
+        if ("folder_snapshot" in scope) {
+          const expected = new Set(scope.folder_snapshot.ids);
+          if (ids.length !== expected.size || ids.some((id) => !expected.has(id))) {
+            return fail("Folder membership changed. Review the updated env sets and issue the token again.");
+          }
+        }
         if (!ids.length) return fail("This selection contains no env sets.");
         tokens.set(name, ids);
         return delay(`demo_${crypto.randomUUID()}`);

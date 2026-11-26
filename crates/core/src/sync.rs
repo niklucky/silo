@@ -35,7 +35,7 @@ use crate::account::{AccountKeys, AccountRecord, Identity};
 use crate::crypto::bytes;
 use crate::crypto::{AuthKey, KdfParams, PublicKey, SecretKey, Signature, SigningPublicKey};
 use crate::error::{Error, Result};
-use crate::vault::{SecretId, StoredSecret};
+use crate::vault::{Grant, SecretId, StoredSecret};
 
 /// Current format of [`Tombstone`].
 pub const TOMBSTONE_FORMAT: u8 = 1;
@@ -351,6 +351,9 @@ pub enum PushItem {
     Put {
         base_revision: u32,
         entry: StoredSecret,
+        /// Present for token-aware clients, even when no active token covers this revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env_grants: Option<Vec<Grant>>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         restore: bool,
     },
@@ -379,6 +382,8 @@ pub enum PushResult {
     Ok {
         seq: u64,
     },
+    /// No edit was committed. Reload signed token policies and retry this item.
+    TokenScopesChanged,
     /// The server has moved on; `current` is what it holds now.
     Conflict {
         current: Box<Change>,
@@ -599,6 +604,7 @@ mod tests {
         let item = PushItem::Put {
             base_revision: 0,
             entry: entry.clone(),
+            env_grants: None,
             restore: false,
         };
         let json = serde_json::to_value(&item).unwrap();

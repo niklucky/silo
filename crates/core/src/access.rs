@@ -10,7 +10,7 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::account::AccountKeys;
 use crate::crypto::{CryptoRng, PublicKey, SecretKey, Signature, SigningPublicKey};
-use crate::vault::{EnvSet, Grant, SecretBody, SecretId, StoredSecret};
+use crate::vault::{EnvSet, EnvVar, Grant, SecretBody, SecretId, StoredSecret};
 use crate::{Error, Result};
 
 /// Printable form returned once to the owner. Debug output redacts the credential.
@@ -101,33 +101,44 @@ impl AccessToken {
             }
             entry.verify(&self.owner)?;
             let key = grant.open_for(&self.secret)?;
-            let SecretBody::EnvSet(set) = &entry.secret.open_body(&key)? else {
-                return Err(Error::Decode("token member is not an env set".into()));
-            };
-            for var in &set.vars {
-                let mut name = var.key.bytes();
-                if !name
-                    .next()
-                    .is_some_and(|c| c == b'_' || c.is_ascii_alphabetic())
-                    || !name.all(|c| c == b'_' || c.is_ascii_alphanumeric())
-                    || var.value.contains('\0')
-                {
-                    return Err(Error::Decode(
-                        "invalid environment variable in token scope".into(),
-                    ));
-                }
-                if values.insert(var.key.clone(), var.clone()).is_some() {
-                    return Err(Error::Decode(format!(
-                        "duplicate variable {} in token scope",
-                        var.key
-                    )));
-                }
-            }
+            merge_token_env(&mut values, &entry.secret.open_body(&key)?)?;
         }
         Ok(EnvSet {
             vars: values.into_values().collect(),
         })
     }
+}
+
+/// Merge one member using the same process-environment rules at issuance and redemption.
+pub fn merge_token_env(values: &mut BTreeMap<String, EnvVar>, body: &SecretBody) -> Result<()> {
+    let SecretBody::EnvSet(set) = body else {
+        return Err(Error::Decode("token member is not an env set".into()));
+    };
+    for var in &set.vars {
+        let mut name = var.key.bytes();
+        if !name
+            .next()
+            .is_some_and(|c| c == b'_' || c.is_ascii_alphabetic())
+            || !name.all(|c| c == b'_' || c.is_ascii_alphanumeric())
+        {
+            return Err(Error::Decode(
+                "invalid environment variable name in token scope".into(),
+            ));
+        }
+        if var.value.contains('\0') {
+            return Err(Error::Decode(format!(
+                "{} contains a NUL byte in token scope",
+                var.key
+            )));
+        }
+        if values.insert(var.key.clone(), var.clone()).is_some() {
+            return Err(Error::Decode(format!(
+                "duplicate variable {} in token scope",
+                var.key
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

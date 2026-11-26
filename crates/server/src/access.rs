@@ -3,7 +3,7 @@
 //! key never reaches the server.
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     http::{
         HeaderMap,
         header::{AUTHORIZATION, CACHE_CONTROL},
@@ -70,8 +70,9 @@ fn policy_by_name(conn: &Connection, owner: i64, name: &str) -> ApiResult<Option
 async fn install(
     State(state): State<AppState>,
     auth: Auth,
-    Json(request): Json<InstallToken>,
+    payload: Result<Json<InstallToken>, JsonRejection>,
 ) -> ApiResult<Json<()>> {
+    let request = crate::body(payload)?;
     state
         .db
         .run(move |conn| install_token(conn, &auth.account, request))
@@ -100,8 +101,8 @@ fn install_token(conn: &mut Connection, owner: &Account, request: InstallToken) 
             [old.recipient.as_bytes()],
         )?;
     }
-    tx.execute(
-        "INSERT INTO env_tokens(owner_id,name,recipient,bearer_hash,policy) VALUES (?,?,?,?,?)",
+    let inserted = tx.execute(
+        "INSERT INTO env_tokens(owner_id,name,recipient,bearer_hash,policy) VALUES (?,?,?,?,?) ON CONFLICT DO NOTHING",
         params![
             owner.id,
             policy.name,
@@ -110,6 +111,9 @@ fn install_token(conn: &mut Connection, owner: &Account, request: InstallToken) 
             serde_json::to_string(&policy)?
         ],
     )?;
+    if inserted == 0 {
+        return Err(ApiError::invalid("token name or credential already in use"));
+    }
     if !policy
         .ids
         .iter()
@@ -121,7 +125,7 @@ fn install_token(conn: &mut Connection, owner: &Account, request: InstallToken) 
         ));
     }
     for grant in request.grants {
-        save_grant(&tx, owner, &policy, &grant)?;
+        save_grant(&tx, owner, &policy, &grant, false)?;
     }
     tx.commit()?;
     Ok(())
@@ -132,20 +136,35 @@ fn save_grant(
     owner: &Account,
     policy: &TokenPolicy,
     grant: &Grant,
+    allow_superseded: bool,
 ) -> ApiResult<()> {
     if grant.recipient != policy.recipient || !policy.ids.contains(&grant.secret_id) {
         return Err(ApiError::invalid("grant is outside token scope"));
     }
     let id = grant.secret_id.to_string();
-    let json: String = conn.query_row(
-        "SELECT r.data FROM secrets s JOIN revisions r ON r.secret_id=s.id AND r.revision=s.current_revision
-         WHERE s.id=? AND s.owner_id=? AND s.current_revision=? AND s.tombstone IS NULL",
-        params![id, owner.id, grant.revision], |r| r.get(0)).optional()?
-        .ok_or_else(|| ApiError::invalid("env set changed or is missing; sync and retry"))?;
+    let (json, live): (String, bool) = conn
+        .query_row(
+            "SELECT r.data, s.current_revision=r.revision AND s.tombstone IS NULL
+         FROM secrets s JOIN revisions r ON r.secret_id=s.id
+         WHERE s.id=? AND s.owner_id=? AND r.revision=?",
+            params![id, owner.id, grant.revision],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| ApiError::invalid("unknown env set revision"))?;
     let secret: SealedSecret = serde_json::from_str(&json)?;
-    grant
-        .verify(&secret, &owner.signing_key)
-        .map_err(|_| ApiError::invalid("invalid grant signature"))?;
+    if !grant.covers(&secret) || grant.verify(&secret, &owner.signing_key).is_err() {
+        return Err(ApiError::invalid("invalid grant signature or revision"));
+    }
+    if !live {
+        return if allow_superseded {
+            Ok(())
+        } else {
+            Err(ApiError::invalid(
+                "env set changed or is missing; sync and retry",
+            ))
+        };
+    }
     conn.execute("INSERT INTO env_token_grants(recipient,secret_id,revision,data) VALUES (?,?,?,?)
         ON CONFLICT(recipient,secret_id) DO UPDATE SET revision=excluded.revision,data=excluded.data",
         params![grant.recipient.as_bytes(),id,grant.revision,serde_json::to_string(grant)?])?;
@@ -155,8 +174,9 @@ fn save_grant(
 async fn refresh(
     State(state): State<AppState>,
     auth: Auth,
-    Json(grants): Json<Vec<Grant>>,
+    payload: Result<Json<Vec<Grant>>, JsonRejection>,
 ) -> ApiResult<Json<()>> {
+    let grants = crate::body(payload)?;
     state
         .db
         .run(move |conn| {
@@ -171,7 +191,13 @@ async fn refresh(
                     .optional()?;
                 // Another device can revoke or rotate while this update is on its way.
                 if let Some(json) = row {
-                    save_grant(&tx, &auth.account, &serde_json::from_str(&json)?, &grant)?;
+                    save_grant(
+                        &tx,
+                        &auth.account,
+                        &serde_json::from_str(&json)?,
+                        &grant,
+                        true,
+                    )?;
                 }
             }
             tx.commit()?;

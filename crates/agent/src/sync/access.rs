@@ -1,23 +1,48 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use silo_core::access::{AccessToken, InstallToken, TokenPolicy};
+use silo_core::crypto::PublicKey;
 use silo_core::vault::{SecretId, SecretKind};
 
 use super::{HttpClient, SyncError, VaultAccess};
 use crate::Session;
 use crate::protocol::{ListFilter, Reply, TokenAction, TokenScope};
 
-pub(super) fn refresh(access: &impl VaultAccess, client: &HttpClient) -> Result<(), SyncError> {
+pub(super) fn recipients(
+    access: &impl VaultAccess,
+    client: &HttpClient,
+) -> Result<BTreeMap<SecretId, Vec<PublicKey>>, SyncError> {
+    let states = client.env_tokens()?;
+    access.with_vault(|v| {
+        let mut members = BTreeMap::<_, Vec<_>>::new();
+        for state in states {
+            state.policy.verify(&v.session.identity().signing_key)?;
+            for id in state.policy.ids {
+                members.entry(id).or_default().push(state.policy.recipient);
+            }
+        }
+        Ok(members)
+    })
+}
+
+pub(super) fn refresh(
+    access: &impl VaultAccess,
+    client: &HttpClient,
+) -> Result<Vec<String>, SyncError> {
+    let mut warnings = Vec::new();
     for state in client.env_tokens()? {
         let grants = access.with_vault(|v| {
             let policy = &state.policy;
             // The server cannot choose a new recipient or add an ID to a signed scope.
             policy.verify(&v.session.identity().signing_key)?;
+            if let Err(err) = v.session.validate_token_env(&policy.ids) {
+                warnings.push(format!("{}: {err}", policy.name));
+            }
             let mut grants = Vec::new();
             for id in &policy.ids {
                 if let Some(entry) = v.session.stored(*id)
                     && v.state.known.get(id) == Some(&entry.secret.revision)
-                    && state.revisions.get(id) != Some(&entry.secret.revision)
+                    && state.revisions.get(id).copied().unwrap_or(0) < entry.secret.revision
                 {
                     grants.push(v.session.env_grant(*id, policy.recipient)?);
                 }
@@ -28,23 +53,32 @@ pub(super) fn refresh(access: &impl VaultAccess, client: &HttpClient) -> Result<
             client.refresh_env_grants(&grants)?;
         }
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// Folder selection always uses the current local env-set IDs, including descendants.
 fn members(session: &Session, scope: TokenScope) -> Result<BTreeSet<SecretId>, SyncError> {
-    Ok(match scope {
-        TokenScope::EnvSet(selector) => BTreeSet::from([session.resolve(&selector)?]),
-        TokenScope::Folder(folder) => session
-            .list(&ListFilter {
-                folder: Some(folder),
-                kind: Some(SecretKind::EnvSet),
-                ..Default::default()
-            })
-            .into_iter()
-            .map(|item| item.id)
-            .collect(),
-    })
+    let (folder, preview) = match scope {
+        TokenScope::EnvSet(selector) => return Ok(BTreeSet::from([session.resolve(&selector)?])),
+        TokenScope::Folder(folder) => (folder, None),
+        TokenScope::FolderSnapshot { folder, ids } => (folder, Some(ids)),
+    };
+    let members = session
+        .list(&ListFilter {
+            folder: Some(folder),
+            kind: Some(SecretKind::EnvSet),
+            ..Default::default()
+        })
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    if preview.is_some_and(|ids| ids != members) {
+        return Err(SyncError::Config(
+            "Folder membership changed. Review the updated env sets and issue the token again."
+                .into(),
+        ));
+    }
+    Ok(members)
 }
 
 pub(crate) fn manage(access: &impl VaultAccess, action: TokenAction) -> Result<Reply, SyncError> {
@@ -119,6 +153,7 @@ fn issue(
     replaces: Option<&TokenPolicy>,
 ) -> Result<Reply, SyncError> {
     let (request, credential) = access.with_vault(|v| {
+        v.session.validate_token_env(&ids)?;
         let token = AccessToken::generate(&mut rand::rng(), v.session.identity().signing_key);
         let policy = v.session.token_policy(name, token.recipient(), ids)?;
         let grants = policy

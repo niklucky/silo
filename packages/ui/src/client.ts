@@ -1,13 +1,14 @@
 import type { NewSecret, SecretSummary, SecretUpdate, SecretView, StatusInfo } from "./protocol";
 
 export type TokenScope = { env_set: string } | { folder: string };
+export type IssueScope = { env_set: string } | { folder_snapshot: { folder: string; ids: string[] } };
 export interface AccessTokenInfo {
   name: string;
   paths: string[];
 }
 export interface AccessTokens {
   list(scope: TokenScope | null): Promise<AccessTokenInfo[]>;
-  issue(name: string, scope: TokenScope): Promise<string>;
+  issue(name: string, scope: IssueScope): Promise<string>;
   rotate(name: string): Promise<string>;
   revoke(name: string): Promise<void>;
 }
@@ -19,6 +20,7 @@ export interface SyncInfo {
   /** Unix seconds. */
   last_sync: number | null;
   last_error: string | null;
+  token_warnings?: string[];
   /** Local changes not on the server yet; null while locked. */
   pending: number | null;
 }

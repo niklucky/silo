@@ -15,6 +15,11 @@ use silo_core::vault::{
 };
 use silo_server::{AppState, Db, accounts};
 
+use silo_agent::protocol::{TokenAction, TokenScope};
+use silo_agent::sync::HttpClient;
+use silo_core::access::AccessToken;
+use silo_core::vault::{EnvSet, EnvVar};
+
 const PASSWORD: &str = "correct horse";
 
 struct Server {
@@ -622,46 +627,41 @@ fn forged_meta() -> SecretMeta {
     }
 }
 
+fn env(key: &str, value: &str) -> SecretBody {
+    SecretBody::EnvSet(EnvSet {
+        vars: vec![EnvVar {
+            key: key.into(),
+            value: value.into(),
+        }],
+    })
+}
+fn add(device: &mut Device, folder: &str, title: &str, body: SecretBody) {
+    device.call(Request::Add(NewSecret {
+        folder: FolderPath::parse(folder).unwrap(),
+        title: title.into(),
+        tags: vec![],
+        urls: vec![],
+        basic_auth: false,
+        body,
+    }));
+}
+fn manage(device: &mut Device, action: TokenAction) -> Reply {
+    let token = std::fs::read_to_string(device.paths.admin_token_file()).unwrap();
+    device.call(Request::ManageToken { token, action })
+}
+fn issued(reply: Reply, server: &Server) -> (AccessToken, HttpClient) {
+    let Reply::TokenIssued(value) = reply else {
+        panic!("expected a credential")
+    };
+    let token = AccessToken::parse(value.as_str()).unwrap();
+    let client = HttpClient::new(&server.url)
+        .unwrap()
+        .with_token(&token.bearer());
+    (token, client)
+}
+
 #[test]
 fn folder_access_tokens_follow_only_the_original_env_sets_across_devices() {
-    use silo_agent::protocol::{TokenAction, TokenScope};
-    use silo_agent::sync::HttpClient;
-    use silo_core::access::AccessToken;
-    use silo_core::vault::{EnvSet, EnvVar};
-
-    fn env(key: &str, value: &str) -> SecretBody {
-        SecretBody::EnvSet(EnvSet {
-            vars: vec![EnvVar {
-                key: key.into(),
-                value: value.into(),
-            }],
-        })
-    }
-    fn add(device: &mut Device, folder: &str, title: &str, body: SecretBody) {
-        device.call(Request::Add(NewSecret {
-            folder: FolderPath::parse(folder).unwrap(),
-            title: title.into(),
-            tags: vec![],
-            urls: vec![],
-            basic_auth: false,
-            body,
-        }));
-    }
-    fn manage(device: &mut Device, action: TokenAction) -> Reply {
-        let token = std::fs::read_to_string(device.paths.admin_token_file()).unwrap();
-        device.call(Request::ManageToken { token, action })
-    }
-    fn issued(reply: Reply, server: &Server) -> (AccessToken, HttpClient) {
-        let Reply::TokenIssued(value) = reply else {
-            panic!("expected a credential")
-        };
-        let token = AccessToken::parse(value.as_str()).unwrap();
-        let client = HttpClient::new(&server.url)
-            .unwrap()
-            .with_token(&token.bearer());
-        (token, client)
-    }
-
     let server = Server::start();
     let mut owner = Device::start(true);
     owner.register(&server, "owner");
@@ -669,13 +669,24 @@ fn folder_access_tokens_follow_only_the_original_env_sets_across_devices() {
     add(&mut owner, "prod/nested", "db", env("DB", "database"));
     add(&mut owner, "production", "other", env("OUTSIDE", "private"));
     owner.add_note("prod/private", "private");
+    let Reply::List(preview) = owner.call(Request::List(ListFilter {
+        folder: Some(FolderPath::parse("prod").unwrap()),
+        kind: Some(SecretKind::EnvSet),
+        ..Default::default()
+    })) else {
+        panic!("expected env sets")
+    };
+    let previewed_ids: std::collections::BTreeSet<_> = preview.iter().map(|item| item.id).collect();
     let name = String::from("deploy");
     let (token, client) = issued(
         manage(
             &mut owner,
             TokenAction::Create {
                 name: name.clone(),
-                scope: TokenScope::Folder(FolderPath::parse("prod").unwrap()),
+                scope: TokenScope::FolderSnapshot {
+                    folder: FolderPath::parse("prod").unwrap(),
+                    ids: previewed_ids.clone(),
+                },
             },
         ),
         &server,
@@ -756,6 +767,30 @@ fn folder_access_tokens_follow_only_the_original_env_sets_across_devices() {
         [("API", "updated"), ("DB", "database")]
     );
 
+    // The create operation pulls changes from the peer. An old desktop preview
+    // must never authorize the newly added member, even with an unchanged count.
+    let admin = std::fs::read_to_string(owner.paths.admin_token_file()).unwrap();
+    let err = owner
+        .try_call(Request::ManageToken {
+            token: admin,
+            action: TokenAction::Create {
+                name: "stale-preview".into(),
+                scope: TokenScope::FolderSnapshot {
+                    folder: FolderPath::parse("prod").unwrap(),
+                    ids: previewed_ids,
+                },
+            },
+        })
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Folder membership changed"),
+        "{err}"
+    );
+    let Reply::Tokens(rows) = manage(&mut owner, TokenAction::List) else {
+        panic!("expected token list")
+    };
+    assert_eq!(rows.len(), 1);
+
     let (new_token, new_client) = issued(
         manage(&mut owner, TokenAction::Rotate { name: name.clone() }),
         &server,
@@ -772,4 +807,159 @@ fn folder_access_tokens_follow_only_the_original_env_sets_across_devices() {
         Reply::TokenRevoked
     );
     assert!(new_client.fetch_env().is_err());
+}
+
+#[test]
+fn invalid_scoped_variables_prevent_issue_and_warn_on_later_edits() {
+    let server = Server::start();
+    let mut owner = Device::start(true);
+    owner.register(&server, "owner");
+    add(&mut owner, "prod", "app", env("API", "first"));
+    add(&mut owner, "prod/nested", "db", env("DB", "database"));
+    let name = String::from("deploy");
+    let (token, client) = issued(
+        manage(
+            &mut owner,
+            TokenAction::Create {
+                name: name.clone(),
+                scope: TokenScope::Folder(FolderPath::root()),
+            },
+        ),
+        &server,
+    );
+    let admin = std::fs::read_to_string(owner.paths.admin_token_file()).unwrap();
+    for (key, value, reason) in [
+        ("API", "other", "duplicate variable"),
+        ("BAD-NAME", "x", "variable name"),
+        ("VALID", "x\0y", "NUL byte"),
+    ] {
+        owner.call(Request::Update(SecretUpdate {
+            selector: "prod/nested/db".into(),
+            revision: None,
+            title: None,
+            folder: None,
+            tags: None,
+            urls: None,
+            basic_auth: None,
+            body: Some(env(key, value)),
+        }));
+        let report = owner.sync();
+        assert!(
+            report
+                .token_warnings
+                .iter()
+                .any(|w| w.contains("deploy") && w.contains(reason)),
+            "{report:?}"
+        );
+        assert!(token.open(client.fetch_env().unwrap()).is_err());
+        let err = owner
+            .try_call(Request::ManageToken {
+                token: admin.clone(),
+                action: TokenAction::Rotate { name: name.clone() },
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains(reason), "{err}");
+        let scope = if key == "API" {
+            TokenScope::Folder(FolderPath::root())
+        } else {
+            TokenScope::EnvSet("prod/nested/db".into())
+        };
+        let err = owner
+            .try_call(Request::ManageToken {
+                token: admin.clone(),
+                action: TokenAction::Create {
+                    name: "unusable".into(),
+                    scope,
+                },
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains(reason), "{err}");
+    }
+    owner.call(Request::Update(SecretUpdate {
+        selector: "prod/nested/db".into(),
+        revision: None,
+        title: None,
+        folder: None,
+        tags: None,
+        urls: None,
+        basic_auth: None,
+        body: Some(env("DB", "database")),
+    }));
+    assert!(owner.sync().token_warnings.is_empty());
+    assert_eq!(
+        token.open(client.fetch_env().unwrap()).unwrap().vars.len(),
+        2
+    );
+}
+
+#[test]
+fn first_token_issued_between_pull_and_push_is_granted_in_the_same_sync() {
+    use axum::extract::Request as HttpRequest;
+    use axum::middleware::{Next, from_fn};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use tokio::sync::Notify;
+
+    let paused = Arc::new(AtomicBool::new(false));
+    let resume = Arc::new(Notify::new());
+    let (at_push, wait) = mpsc::channel();
+    let server = Server::start_with(|app| {
+        let paused = paused.clone();
+        let resume = resume.clone();
+        app.layer(from_fn(move |req: HttpRequest, next: Next| {
+            let hold = req.uri().path() == "/v1/push" && paused.swap(false, Ordering::SeqCst);
+            let at_push = at_push.clone();
+            let resume = resume.clone();
+            async move {
+                if hold {
+                    at_push.send(()).unwrap();
+                    tokio::time::timeout(Duration::from_secs(10), resume.notified())
+                        .await
+                        .unwrap();
+                }
+                next.run(req).await
+            }
+        }))
+    });
+    let mut owner = Device::start(true);
+    owner.register(&server, "owner");
+    add(&mut owner, "prod", "app", env("KEY", "before"));
+    owner.sync();
+    let mut peer = Device::start(false);
+    peer.login(&server, "owner");
+    peer.sync();
+    peer.call(Request::Update(SecretUpdate {
+        selector: "prod/app".into(),
+        revision: None,
+        title: None,
+        folder: None,
+        tags: None,
+        urls: None,
+        basic_auth: None,
+        body: Some(env("KEY", "after")),
+    }));
+    paused.store(true, Ordering::SeqCst);
+    let pending = thread::spawn(move || peer.sync());
+    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+    let reader = manage(
+        &mut owner,
+        TokenAction::Create {
+            name: "first".into(),
+            scope: TokenScope::EnvSet("prod/app".into()),
+        },
+    );
+    let (token, client) = issued(reader, &server);
+    assert_eq!(
+        token.open(client.fetch_env().unwrap()).unwrap().vars[0].value,
+        "before"
+    );
+    resume.notify_one();
+    assert_eq!(pending.join().unwrap().pushed, 1);
+    assert_eq!(
+        token.open(client.fetch_env().unwrap()).unwrap().vars[0].value,
+        "after"
+    );
 }

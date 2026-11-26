@@ -407,7 +407,6 @@ impl Session {
 
     // ---------- for sync ----------
 
-    /// Every secret's id and current revision.
     pub(crate) fn token_policy(
         &self,
         name: String,
@@ -424,9 +423,43 @@ impl Session {
         id: SecretId,
         recipient: PublicKey,
     ) -> Result<Grant, AgentError> {
-        let entry = self.entries.get(&id).ok_or_else(|| AgentError::NotFound {
-            selector: id.to_string(),
-        })?;
+        self.grant_entry(self.entry(id)?, recipient)
+    }
+
+    /// A push can carry an archived intermediate revision with its own data key.
+    pub(crate) fn push_env_grants(
+        &self,
+        stored: &StoredSecret,
+        recipients: &[PublicKey],
+    ) -> Result<Vec<Grant>, AgentError> {
+        if recipients.is_empty() {
+            return Ok(Vec::new());
+        }
+        let entry = Entry::open(stored.clone(), &self.keys)?;
+        recipients
+            .iter()
+            .map(|r| self.grant_entry(&entry, *r))
+            .collect()
+    }
+
+    pub(crate) fn validate_token_env(
+        &self,
+        ids: &std::collections::BTreeSet<SecretId>,
+    ) -> Result<(), AgentError> {
+        let mut values = BTreeMap::new();
+        for id in ids {
+            let entry = self.entry(*id)?;
+            let body = entry.stored.secret.open_body(&entry.key)?;
+            silo_core::access::merge_token_env(&mut values, &body).map_err(|err| {
+                AgentError::Invalid {
+                    message: format!("{}: {err}", display_path(&entry.meta)),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    fn grant_entry(&self, entry: &Entry, recipient: PublicKey) -> Result<Grant, AgentError> {
         if entry.meta.kind != SecretKind::EnvSet {
             return Err(AgentError::Invalid {
                 message: format!("{} is not an env set", display_path(&entry.meta)),

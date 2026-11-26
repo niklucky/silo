@@ -42,6 +42,9 @@ pub struct SyncState {
     pub in_flight: BTreeMap<SecretId, String>,
     #[serde(default)]
     pub last_sync: Option<u64>,
+    // Warnings can contain decrypted paths or variable names. Keep them in memory.
+    #[serde(skip)]
+    pub token_warnings: Vec<String>,
     #[serde(default)]
     pub last_error: Option<String>,
 }

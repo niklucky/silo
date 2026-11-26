@@ -419,7 +419,7 @@ export function VaultApp({ client, setup, host, fetchSite }: VaultAppProps) {
           )}
         </main>
         {client.tokens && tokenContext && (
-          <AccessTokenDialog api={client.tokens} context={tokenContext} items={items} close={() => setTokenContext(null)} locked={locked} />
+          <AccessTokenDialog api={client.tokens} context={tokenContext} items={items} refresh={refresh} close={() => setTokenContext(null)} locked={locked} />
         )}
         {toast && (
           <div className="toast" role="status">

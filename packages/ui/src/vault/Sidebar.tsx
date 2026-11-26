@@ -117,15 +117,16 @@ function SyncState({ sync, syncing, syncNow }: Pick<Props, "sync" | "syncing" | 
       </span>
     );
   }
-  const state = syncing ? "busy" : sync.last_error ? "error" : "ok";
+  const warnings = sync.token_warnings ?? [];
+  const state = syncing ? "busy" : sync.last_error || warnings.length ? "error" : "ok";
   const label = syncing
     ? "Syncing…"
     : sync.last_error
       ? "Sync failed"
-      : sync.last_sync
+      : warnings.length ? "Access token warning" : sync.last_sync
         ? `Synced ${timeAgo(sync.last_sync)}`
         : "Not synced yet";
-  const title = [sync.last_error, `${sync.username} on ${sync.server}`, "Click to sync now"].filter(Boolean).join("\n");
+  const title = [sync.last_error, ...warnings, `${sync.username} on ${sync.server}`, "Click to sync now"].filter(Boolean).join("\n");
   return (
     <button className={`sync-state ${state}`} title={title} onClick={syncNow} disabled={syncing}>
       <i /> {label}

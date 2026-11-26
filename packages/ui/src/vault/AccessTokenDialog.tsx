@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { AccessTokenInfo, AccessTokens, TokenScope } from "../client";
+import type { AccessTokenInfo, AccessTokens, IssueScope, TokenScope } from "../client";
 import { Icon } from "../icons";
 import type { SecretSummary } from "../protocol";
 import { inScope } from "./scope";
@@ -11,24 +11,25 @@ export interface TokenContext {
 }
 
 type TokenAction = { type: "rotate" | "revoke"; name: string };
-type Change = TokenAction | { type: "issue"; name: string; scope: TokenScope };
+type Change = TokenAction | { type: "issue"; name: string; scope: IssueScope; paths: string[] };
 
 interface Props {
   api: AccessTokens;
   context: TokenContext;
   items: readonly SecretSummary[];
+  refresh: () => Promise<void>;
   close: () => void;
   locked: () => void;
 }
 
-export function AccessTokenDialog({ api, context, items, close, locked }: Props) {
+export function AccessTokenDialog({ api, context, items, refresh, close, locked }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [rows, setRows] = useState<AccessTokenInfo[] | null>(null);
   const [revision, setRevision] = useState(0);
   const [name, setName] = useState("");
   const [confirm, setConfirm] = useState<TokenAction | null>(null);
   const [busy, setBusy] = useState(false);
-  const [issued, setIssued] = useState<{ name: string; value: string } | null>(null);
+  const [issued, setIssued] = useState<{ name: string; value: string; paths: string[] } | null>(null);
   const [error, setError] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const { scope, label } = context;
@@ -79,7 +80,8 @@ export function AccessTokenDialog({ api, context, items, close, locked }: Props)
         setRevision((n) => n + 1);
       } else {
         const value = change.type === "issue" ? await api.issue(change.name, change.scope) : await api.rotate(change.name);
-        setIssued({ name: change.name, value });
+        const paths = change.type === "issue" ? change.paths : rows?.find((row) => row.name === change.name)?.paths ?? [];
+        setIssued({ name: change.name, value, paths });
         setCopyStatus("");
         setName("");
       }
@@ -88,6 +90,14 @@ export function AccessTokenDialog({ api, context, items, close, locked }: Props)
       if (isLockError(err)) locked();
       else setError(message(err));
     } finally {
+      if (change.type !== "revoke") {
+        try {
+          await refresh();
+        } catch (err) {
+          if (isLockError(err)) locked();
+          else setError((prior) => [prior, `Could not reload the vault. ${message(err)}`].filter(Boolean).join(" "));
+        }
+      }
       setBusy(false);
     }
   }
@@ -114,9 +124,14 @@ export function AccessTokenDialog({ api, context, items, close, locked }: Props)
           <Icon name="close" />
         </button>
       </header>
+      {error && <p className="error" role="alert">{error}</p>}
       {issued ? (
         <>
           <p>Save this credential in your CI secrets now. You can view it once.</p>
+          <details>
+            <summary>Reviewed env sets ({issued.paths.length})</summary>
+            <ul>{issued.paths.map((path, i) => <li key={i}>{path}</li>)}</ul>
+          </details>
           <div className="fields">
             <Field label="Access token" value={issued.value} secret copy={copyCredential} />
           </div>
@@ -142,7 +157,17 @@ export function AccessTokenDialog({ api, context, items, close, locked }: Props)
               className="token-create"
               onSubmit={(event) => {
                 event.preventDefault();
-                void apply({ type: "issue", name, scope });
+                if ("folder" in scope) {
+                  if (!folderItems?.length) return;
+                  void apply({
+                    type: "issue",
+                    name,
+                    scope: { folder_snapshot: { folder: scope.folder, ids: folderItems.map((item) => item.id) } },
+                    paths: folderItems.map((item) => [item.meta.folder, item.meta.title].filter(Boolean).join("/")),
+                  });
+                } else {
+                  void apply({ type: "issue", name, scope, paths: [label] });
+                }
               }}
             >
               <label className="form-field">
@@ -185,11 +210,6 @@ export function AccessTokenDialog({ api, context, items, close, locked }: Props)
                 Issue token
               </button>
             </form>
-          )}
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
           )}
           {rows === null && !error && (
             <p role="status" className="muted">

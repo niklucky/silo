@@ -119,6 +119,10 @@ pub enum TokenAction {
 pub enum TokenScope {
     EnvSet(String),
     Folder(FolderPath),
+    FolderSnapshot {
+        folder: FolderPath,
+        ids: std::collections::BTreeSet<SecretId>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +238,8 @@ pub struct SyncStatusInfo {
     pub device_id: String,
     pub last_sync: Option<u64>,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_warnings: Vec<String>,
     /// Local changes not on the server yet; unknown while locked.
     pub pending: Option<usize>,
     /// Changes the server refused, by `folder/title` or id.

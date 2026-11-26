@@ -43,7 +43,16 @@ pub fn push(
                 base_revision,
                 entry,
                 restore,
-            } => put(&tx, &auth.account, now, base_revision, entry, restore)?,
+                env_grants,
+            } => put(
+                &tx,
+                &auth.account,
+                now,
+                base_revision,
+                entry,
+                restore,
+                env_grants,
+            )?,
             PushItem::Delete { tombstone } => delete(&tx, &auth.account, tombstone)?,
         });
     }
@@ -182,6 +191,7 @@ fn put(
     base_revision: u32,
     entry: StoredSecret,
     restore: bool,
+    env_grants: Option<Vec<Grant>>,
 ) -> ApiResult<PushResult> {
     if entry.verify(&me.signing_key).is_err() {
         return rejected("the revision or a grant is not signed by this account");
@@ -206,8 +216,8 @@ fn put(
     }
 
     let id = entry.secret.id.to_string();
-    let seq = next_seq(tx)?;
-    match secret_row(tx, &id)? {
+    let existing = secret_row(tx, &id)?;
+    match &existing {
         Some(row) if row.owner_id != me.id => {
             return rejected("this secret belongs to another account");
         }
@@ -216,11 +226,38 @@ fn put(
         Some(row)
             if row.current_revision != base_revision || row.tombstone.is_some() != restore =>
         {
-            return conflict(tx, &id, &row, me);
+            return conflict(tx, &id, row, me);
         }
         Some(row) if revision <= row.current_revision => {
             return rejected("the new revision must be newer than its base");
         }
+        _ => {}
+    }
+    if let Some(grants) = &env_grants {
+        // Installation adds one grant row for every signed member, atomically.
+        // Compare inside the edit transaction so a concurrent issue or rotation
+        // can never leave a new revision visible without its current readers.
+        let mut stmt = tx.prepare_cached(
+            "SELECT g.recipient FROM env_token_grants g JOIN env_tokens t ON t.recipient=g.recipient
+             WHERE g.secret_id=? AND t.owner_id=?"
+        )?;
+        let expected = stmt
+            .query_map(params![id, me.id], |r| r.get::<_, [u8; 32]>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let supplied: BTreeSet<_> = grants.iter().map(|g| *g.recipient.as_bytes()).collect();
+        if supplied != expected {
+            return Ok(PushResult::TokenScopesChanged);
+        }
+        if supplied.len() != grants.len()
+            || grants.iter().any(|g| {
+                !g.covers(&entry.secret) || g.verify(&entry.secret, &me.signing_key).is_err()
+            })
+        {
+            return rejected("invalid env token grant for this revision");
+        }
+    }
+    let seq = next_seq(tx)?;
+    match existing {
         Some(_) => {
             tx.execute(
                 "UPDATE secrets SET current_revision = ?1, tombstone = NULL, seq = ?2 WHERE id = ?3",
@@ -254,6 +291,17 @@ fn put(
                 revision,
                 &grant.recipient.as_bytes()[..],
                 serde_json::to_string(grant)?
+            ],
+        )?;
+    }
+    for grant in env_grants.into_iter().flatten() {
+        tx.execute(
+            "UPDATE env_token_grants SET revision=?,data=? WHERE recipient=? AND secret_id=?",
+            params![
+                revision,
+                serde_json::to_string(&grant)?,
+                grant.recipient.as_bytes(),
+                id
             ],
         )?;
     }

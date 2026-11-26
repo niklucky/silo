@@ -912,6 +912,9 @@ impl State {
 
     fn lock(&mut self) {
         self.session = None;
+        if let Some(sync) = &mut self.sync {
+            sync.token_warnings.clear();
+        }
         self.expires_at = None;
         self.lock_epoch = self.lock_epoch.wrapping_add(1);
     }
@@ -1015,6 +1018,11 @@ impl State {
             device_id: sync.device_id.clone(),
             last_sync: sync.last_sync,
             last_error: sync.last_error.clone(),
+            token_warnings: self
+                .session
+                .as_ref()
+                .map(|_| sync.token_warnings.clone())
+                .unwrap_or_default(),
             pending,
             rejected: sync
                 .rejected
