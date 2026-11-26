@@ -140,12 +140,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v6
         with:
           pattern: Silo-desktop-*
           path: dist
           merge-multiple: true
-      - name: Publish GitHub release with desktop downloads
+      - name: Publish desktop packages and standalone CLI installer
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -153,7 +154,10 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
           SERVER_IMAGE: ${{ needs.build.outputs.image }}
         run: |
-          assets=(dist/Silo-desktop-macos-arm64.zip dist/Silo-desktop-macos-x64.zip dist/Silo-desktop-linux-x64.zip)
+          assets=()
+          for platform in linux-x64 macos-arm64 macos-x64; do
+            assets+=("dist/Silo-desktop-$platform.zip" "dist/silo-$platform")
+          done
           for asset in "${assets[@]}"; do test -s "$asset"; done
 
           # shellcheck disable=SC2016
@@ -161,9 +165,18 @@ jobs:
             "$RELEASE_SHA" "$SERVER_IMAGE" > "$RUNNER_TEMP/release-notes.md"
           printf '\nThe desktop app includes the Silo CLI and can set up a vault on first launch. See the [installation instructions](https://github.com/%s/blob/%s/README.md#version-releases-and-updates).\n' \
             "$GH_REPO" "$RELEASE_VERSION" >> "$RUNNER_TEMP/release-notes.md"
-          if existing=$(gh release view "$RELEASE_VERSION" --json assets,isDraft 2>/dev/null); then
-            missing=()
-            for asset in "${assets[@]}"; do
+          printf '\n[Standalone CLI installer](https://github.com/%s/releases/download/%s/install.sh) (Linux x64 and macOS).\n' \
+            "$GH_REPO" "$RELEASE_VERSION" >> "$RUNNER_TEMP/release-notes.md"
+
+          if ! gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            gh release create "$RELEASE_VERSION" --draft --verify-tag --title "$RELEASE_VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+          existing=$(gh release view "$RELEASE_VERSION" --json assets,isDraft)
+          upload_missing() {
+            local asset name state
+            local missing=()
+            for asset in "$@"; do
               name=${asset##*/}
               state=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .state' <<< "$existing")
               case "$state" in
@@ -176,12 +189,19 @@ jobs:
             if (( ${#missing[@]} )); then
               gh release upload "$RELEASE_VERSION" "${missing[@]}"
             fi
-            edit_options=(--notes-file "$RUNNER_TEMP/release-notes.md")
-            if jq -e '.isDraft' <<< "$existing" >/dev/null; then
-              edit_options+=(--draft=false)
-            fi
-            gh release edit "$RELEASE_VERSION" "${edit_options[@]}"
+          }
+          upload_missing "${assets[@]}"
+          # Read published digests so a retry uses the signed binaries already on the release.
+          gh release view "$RELEASE_VERSION" --json assets | \
+            python3 scripts/render-cli-installer.py "$GH_REPO" "$RELEASE_VERSION" > dist/install.sh
+          if jq -e '.assets[] | select(.name == "install.sh" and .state == "uploaded")' <<< "$existing" >/dev/null; then
+            gh release download "$RELEASE_VERSION" --pattern install.sh --output "$RUNNER_TEMP/published-install.sh"
+            cmp dist/install.sh "$RUNNER_TEMP/published-install.sh"
           else
-            gh release create "$RELEASE_VERSION" --verify-tag --title "$RELEASE_VERSION" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" "${assets[@]}"
+            upload_missing dist/install.sh
           fi
+          edit_options=(--notes-file "$RUNNER_TEMP/release-notes.md")
+          if jq -e '.isDraft' <<< "$existing" >/dev/null; then
+            edit_options+=(--draft=false)
+          fi
+          gh release edit "$RELEASE_VERSION" "${edit_options[@]}"
